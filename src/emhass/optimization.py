@@ -6,6 +6,7 @@ import pickle
 import threading
 import time
 from math import ceil, isfinite
+from numbers import Real
 
 import cvxpy as cp
 import numpy as np
@@ -8155,6 +8156,8 @@ class Optimization:
         def_availability: float | list | None = None,
         p_pv_plants: pd.DataFrame | None = None,
         pv_plant_inverters: list | None = None,
+        *,
+        soc_floor_profile: list[float | None] | None = None,
     ) -> pd.DataFrame:
         r"""
         Perform the actual optimization using Convex Programming (CVXPY).
@@ -8184,6 +8187,11 @@ class Optimization:
         per-battery list too; a battery with a target but no timestep gets it at
         its last connected timestep (the departure); pass that battery's
         ``soc_final`` equal to the target, since its SOC is frozen afterwards.
+
+        ``soc_floor_profile`` optionally sets an end-of-step minimum SOC for
+        each timestep of a single-battery solve. Each entry is a fraction or
+        ``None`` for no additional floor. The larger of this floor and any
+        intermediate ``soc_target`` applies when both cover the same step.
 
         ``def_availability`` is the same per-timestep fraction for each
         deferrable load (see _apply_def_availability): it scales the load's
@@ -8229,6 +8237,7 @@ class Optimization:
                 def_availability=def_availability,
                 p_pv_plants=p_pv_plants,
                 pv_plant_inverters=pv_plant_inverters,
+                soc_floor_profile=soc_floor_profile,
             )
 
     def _perform_optimization_locked(
@@ -8259,6 +8268,8 @@ class Optimization:
         def_availability: float | list | None = None,
         p_pv_plants: pd.DataFrame | None = None,
         pv_plant_inverters: list | None = None,
+        *,
+        soc_floor_profile: list[float | None] | None = None,
     ) -> pd.DataFrame:
         _build_start_perf = time.perf_counter() if stage_times is not None else 0.0
         # Shared thermal tanks bake forecast-dependent physics into constraints as constants.
@@ -8479,6 +8490,29 @@ class Optimization:
                     f"{soc_target_clamped} by timestep {k_target} (requested "
                     f"soc_target={target_list[k]}, soc_target_timestep={timestep_list[k]})."
                 )
+
+        if soc_floor_profile is not None:
+            if not self.optim_conf["set_use_battery"] or self.n_batt != 1:
+                raise ValueError("soc_floor_profile requires exactly one enabled battery")
+            if not isinstance(soc_floor_profile, list) or len(soc_floor_profile) != current_n:
+                raise ValueError(f"soc_floor_profile must be a list of {current_n} entries")
+            minimum, maximum = batt_conf["soc_min"][0], batt_conf["soc_max"][0]
+            capacity = batt_conf["cap"][0]
+            floor = self.param_soc_target_floor[0].value.copy()
+            for step, fraction in enumerate(soc_floor_profile):
+                if fraction is None:
+                    continue
+                if (
+                    isinstance(fraction, bool)
+                    or not isinstance(fraction, Real)
+                    or not minimum <= fraction <= maximum
+                ):
+                    raise ValueError(
+                        f"soc_floor_profile[{step}] must be an SOC fraction in "
+                        f"[{minimum}, {maximum}] or None"
+                    )
+                floor[step] = max(floor[step], fraction * capacity)
+            self.param_soc_target_floor[0].value = floor
 
         # Capacity / demand charge runtime inputs: the already-incurred
         # incumbent peak (issue #623 Phase 2), the tariff demand-window mask
@@ -9970,6 +10004,8 @@ class Optimization:
         def_availability: float | list | None = None,
         p_pv_plants: pd.DataFrame | None = None,
         pv_plant_inverters: list | None = None,
+        *,
+        soc_floor_profile: list[float | None] | None = None,
     ) -> pd.DataFrame:
         r"""
         Perform a naive approach to a Model Predictive Control (MPC). \
@@ -10121,6 +10157,8 @@ class Optimization:
             to build the PV of each inverter. It is passed through unsliced. \
             ``None`` (the default) is right at one inverter.
         :type pv_plant_inverters: list, optional
+        :param soc_floor_profile: Optional end-of-step minimum SOC fractions for one battery, \
+            with one entry per solved timestep. None entries impose no additional floor.
         :return: opt_res: A DataFrame containing the optimization results
         :rtype: pandas.DataFrame
 
@@ -10155,7 +10193,7 @@ class Optimization:
         unit_prod_price = subset_data[self.var_prod_price].values
 
         # Call optimization function
-        self.opt_res = self.perform_optimization(
+        opt_res = self.perform_optimization(
             subset_data,
             p_pv_slice,
             p_load_slice,
@@ -10179,8 +10217,10 @@ class Optimization:
             def_availability=def_availability,
             p_pv_plants=p_pv_plants_slice,
             pv_plant_inverters=pv_plant_inverters,
+            soc_floor_profile=soc_floor_profile,
         )
-        return self.opt_res
+        self.opt_res = opt_res
+        return opt_res
 
     @staticmethod
     def validate_def_timewindow(
