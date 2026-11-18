@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Теневой план батареи</title>
+<style>
+  :root {
+    --bg: #111318; --card: #1c1f26; --border: #2c313c;
+    --text: #e6e8ee; --muted: #9aa3b2; --accent: #4fc3f7;
+    --good: #66bb6a; --warn: #ffa726; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; padding: 20px; max-width: 980px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  header h1 { font-size: 22px; font-weight: 600; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: #25404d; color: var(--accent); border: 1px solid #35566b; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 14px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card h3 { font-size: 13px; color: var(--muted); font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .4px; }
+  .big { font-size: 34px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .chip { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 10px; margin-left: 8px; }
+  .chip.up { background: rgba(239,83,80,.15); color: var(--bad); }
+  .chip.down { background: rgba(102,187,106,.15); color: var(--good); }
+  .chip.same { background: rgba(154,163,178,.15); color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+  .card.full { margin-bottom: 14px; }
+  button { background: var(--accent); color: #08222f; border: 0; font-weight: 600; font-size: 14px; padding: 9px 18px; border-radius: 10px; cursor: pointer; }
+  button.secondary { background: #2c313c; color: var(--text); }
+  button:disabled { opacity: .5; cursor: default; }
+  .notice { white-space: pre-line; background: #17222b; border: 1px solid #25404d; border-radius: 10px; padding: 14px 16px; font-size: 14px; margin-bottom: 14px; }
+  .error { background: rgba(239,83,80,.1); border-color: var(--bad); color: var(--bad); }
+  #refresh { margin-left: auto; }
+  .arrow { color: var(--good); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔋 Теневой план батареи</h1>
+  <span class="badge">только советует · в инвертор не пишет</span>
+  <button id="retrain" class="secondary" onclick="retrainNow()">Переобучить модели</button>
+  <button id="refresh" onclick="recalc()">Пересчитать сейчас</button>
+</header>
+
+<div id="status"></div>
+<div class="notice" id="notice" style="display:none"></div>
+<div id="content" style="display:none">
+
+  <div class="grid">
+    <div class="card">
+      <h3>Рекомендуемый пол SOC</h3>
+      <div class="big"><span id="rec">—</span><span class="chip" id="delta"></span></div>
+      <div class="sub" id="curfloor"></div>
+    </div>
+    <div class="card">
+      <h3>Нагрузка, 24 ч</h3>
+      <div class="big" id="load">—</div>
+      <div class="sub" id="loadband"></div>
+    </div>
+    <div class="card">
+      <h3>Солнце, 24 ч</h3>
+      <div class="big" id="pv">—</div>
+      <div class="sub" id="pvb"></div>
+    </div>
+    <div class="card">
+      <h3>Резерв отключений</h3>
+      <div class="big" id="res">—</div>
+      <div class="sub" id="resd"></div>
+    </div>
+  </div>
+
+  <div class="card full">
+    <h3>Зоны TOU инвертора (6 программ)</h3>
+    <table>
+      <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Рекомендация</th></tr></thead>
+      <tbody id="zones"></tbody>
+    </table>
+  </div>
+
+  <div class="card full">
+    <h3>Суточные данные, 14 дней (кВт·ч)</h3>
+    <table>
+      <thead><tr><th>Дата</th><th>Потребление</th><th>Солнце факт</th><th>Потери усечения</th><th>Заряд АКБ</th><th>Разряд АКБ</th><th>Из сети</th><th>Мин. SOC</th><th>Сеть вниз, ч</th></tr></thead>
+      <tbody id="daily"></tbody>
+    </table>
+  </div>
+
+  <div class="card full">
+    <h3>Точность прогнозов (факт vs P50)</h3>
+    <div class="sub" id="metrics-avg" style="margin-bottom:6px"></div>
+    <table>
+      <thead><tr><th>Дата</th><th>Нагрузка: ошибка</th><th>Нагрузка: P10–P90</th><th>Солнце: ошибка</th><th>Солнце: P10–P90</th></tr></thead>
+      <tbody id="metrics"></tbody>
+    </table>
+  </div>
+
+  <div class="card full">
+    <h3>История рекомендаций</h3>
+    <table>
+      <thead><tr><th>Дата</th><th>Пол</th><th>Тогда был</th><th>Δ</th><th>Резерв</th><th>Повышен до</th></tr></thead>
+      <tbody id="history"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const pct = v => Math.round(v * 100) + "%";
+const pp = v => (v > 0 ? "+" + v : v) + " п.п.";
+
+async function load() {
+  try {
+    const [latest, history, status, metrics, dailyData] = await Promise.all([
+      fetch("api/latest").then(r => r.ok ? r.json() : null),
+      fetch("api/history").then(r => r.ok ? r.json() : []),
+      fetch("api/status").then(r => r.json()),
+      fetch("api/metrics").then(r => r.ok ? r.json() : {days: [], avg7: {}}),
+      fetch("api/daily").then(r => r.ok ? r.json() : {days: []}),
+    ]);
+    renderStatus(status);
+    renderMetrics(metrics);
+    renderDaily(dailyData.days || []);
+    if (!latest) { document.getElementById("notice").style.display = "block";
+      document.getElementById("notice").textContent = "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас»."; return; }
+    render(latest);
+    renderHistory(history);
+  } catch (e) { console.error(e); }
+}
+
+function renderStatus(s) {
+  const el = document.getElementById("status");
+  const parts = [];
+  if (s.running) parts.push("⏳ идёт расчёт…");
+  if (s.next_run) parts.push("следующий расчёт: " + new Date(s.next_run).toLocaleString("ru-RU"));
+  if (s.audit_rows) parts.push("строк аудита: " + s.audit_rows);
+  if (s.retrain) {
+    const r = s.retrain;
+    if (r.last_retrain_utc) parts.push("переобучено: " + new Date(r.last_retrain_utc).toLocaleString("ru-RU"));
+    if (r.next_retrain_utc) parts.push("следующее переобучение: " + new Date(r.next_retrain_utc).toLocaleDateString("ru-RU"));
+    else parts.push("переобучение: при следующем расчёте");
+    const m = r.models || {};
+    const bad = ["load", "pv"].filter(k => m[k] && m[k].status === "failed");
+    if (bad.length) parts.push("⚠️ переобучение не удалось: " + bad.map(k => (k === "load" ? "нагрузка" : "солнце")).join(", "));
+  }
+  el.innerHTML = '<p class="muted" style="margin-bottom:14px">' + parts.join(" · ") + "</p>";
+  if (s.last_error) el.innerHTML += '<div class="notice error">Ошибка последнего расчёта:\n' + s.last_error + "</div>";
+}
+
+function renderMetrics(m) {
+  const avg = m.avg7 || {};
+  const bits = [];
+  if (avg.load_mae_kwh != null) bits.push("нагрузка ±" + avg.load_mae_kwh + " кВт·ч/день");
+  if (avg.load_coverage_pct != null) bits.push("покрытие " + avg.load_coverage_pct + "%");
+  if (avg.pv_mae_kwh != null) bits.push("солнце ±" + avg.pv_mae_kwh + " кВт·ч/день");
+  if (avg.pv_coverage_pct != null) bits.push("покрытие " + avg.pv_coverage_pct + "%");
+  document.getElementById("metrics-avg").textContent = bits.length
+    ? "Среднее за " + (avg.days || 0) + " дн.: " + bits.join(" · ")
+    : "Метрики появятся на следующий день после первого прогноза с почасовыми данными.";
+  const cell = (s, unit, suffix) => s ? (s[unit] + suffix) : "—";
+  const cov = s => {
+    if (!s) return "—";
+    const cls = s.coverage_pct >= 70 ? "arrow" : "";
+    return "<span class='" + cls + "'>" + s.coverage_pct + "%</span> <span class='muted'>(" + s.hours + " ч)</span>";
+  };
+  document.getElementById("metrics").innerHTML = (m.days || []).slice().reverse().map(d =>
+    "<tr><td>" + d.date + "</td><td>" + cell(d.load, "mae_kwh", " кВт·ч") + "</td><td>" + cov(d.load) +
+    "</td><td>" + cell(d.pv, "mae_kwh", " кВт·ч") + "</td><td>" + cov(d.pv) + "</td></tr>"
+  ).join("");
+}
+
+function renderDaily(days) {
+  const v = x => x == null ? "—" : x;
+  document.getElementById("daily").innerHTML = days.slice().reverse().map(d => {
+    const loss = d.pv_curtailment_loss_kwh != null
+      ? '<span style="color:var(--warn)">-' + d.pv_curtailment_loss_kwh + "</span> <span class='muted'>(" + d.pv_curtailed_hours + " ч)</span>"
+      : (d.pv_curtailed_hours > 0 ? "<span class='muted'>" + d.pv_curtailed_hours + " ч, нет оценки</span>" : "0");
+    return "<tr><td>" + d.date + "</td><td>" + v(d.load_kwh) + "</td><td>" + v(d.pv_measured_kwh) +
+      "</td><td>" + loss + "</td><td>" + v(d.battery_charge_kwh) + "</td><td>" + v(d.battery_discharge_kwh) +
+      "</td><td>" + v(d.grid_import_kwh) + "</td><td>" + (d.min_soc_pct == null ? "—" : d.min_soc_pct + "%") +
+      "</td><td>" + (d.grid_down_hours || "—") + "</td></tr>";
+  }).join("");
+}
+
+async function retrainNow() {
+  const b = document.getElementById("retrain");
+  b.disabled = true; b.textContent = "Обучаю…";
+  try { await fetch("api/retrain", {method: "POST"}); } catch (e) {}
+  let tries = 0;
+  const timer = setInterval(async () => {
+    const s = await fetch("api/status").then(r => r.json());
+    tries++;
+    if (!s.running || tries > 100) {
+      clearInterval(timer);
+      b.disabled = false; b.textContent = "Переобучить модели";
+      load();
+    }
+  }, 3000);
+}
+
+function render(r) {
+  document.getElementById("content").style.display = "block";
+  const n = document.getElementById("notice");
+  n.style.display = "block"; n.textContent = r.notification;
+  const a = r.advisory;
+  document.getElementById("rec").textContent = pct(a.recommended_floor_soc);
+  const d = document.getElementById("delta");
+  d.textContent = pp(a.delta_pp);
+  d.className = "chip " + (a.delta_pp > 0 ? "up" : a.delta_pp < 0 ? "down" : "same");
+  document.getElementById("curfloor").textContent =
+    "сейчас " + pct(a.current_floor_soc) + " · батарея " + r.battery_now_pct + "%";
+  document.getElementById("load").textContent = r.load_forecast_kwh_24h.p50 + " кВт·ч";
+  document.getElementById("loadband").textContent =
+    "P10 " + r.load_forecast_kwh_24h.p10 + " … P90 " + r.load_forecast_kwh_24h.p90;
+  document.getElementById("pv").textContent =
+    r.pv_forecast_kwh_24h ? r.pv_forecast_kwh_24h.p50 + " кВт·ч" : "—";
+  document.getElementById("pvb").textContent =
+    r.pv_forecast_kwh_24h ? "пессимистично P10 " + r.pv_forecast_kwh_24h.p10 + " кВт·ч"
+                        : "прогноз недоступен — считаем 0";
+  document.getElementById("res").textContent = r.reserve.reserve_kwh + " кВт·ч";
+  document.getElementById("resd").textContent =
+    "критическая " + r.reserve.critical_load_kw + " кВт × " + r.reserve.duration_hours + " ч" +
+    (r.reserve.hold_until_local ? " · повышен до " + r.reserve.hold_until_local : "");
+  const recPct = Math.round(a.recommended_floor_soc * 100);
+  document.getElementById("zones").innerHTML = a.programs.map(p => {
+    const change = p.soc_pct < recPct;
+    return "<tr><td>Зона " + p.n + "</td><td>" + p.from.slice(0, 5) + "</td><td>" +
+      Math.round(p.soc_pct) + "%</td><td>" +
+      (change ? '<span class="arrow">↑ ' + recPct + "%</span>" : "без изменений") + "</td></tr>";
+  }).join("");
+}
+
+function renderHistory(items) {
+  document.getElementById("history").innerHTML = items.map(i =>
+    "<tr><td>" + i.date + "</td><td>" + pct(i.recommended_floor_soc) + "</td><td>" +
+    pct(i.current_floor_soc) + "</td><td>" + pp(i.delta_pp) + "</td><td>" +
+    i.reserve_kwh + " кВт·ч</td><td>" + (i.hold_until_local || "—") + "</td></tr>"
+  ).join("");
+}
+
+async function recalc() {
+  const b = document.getElementById("refresh");
+  b.disabled = true; b.textContent = "Считаю…";
+  try { await fetch("api/run", {method: "POST"}); } catch (e) {}
+  let tries = 0;
+  const timer = setInterval(async () => {
+    const s = await fetch("api/status").then(r => r.json());
+    tries++;
+    if (!s.running || tries > 60) {
+      clearInterval(timer);
+      b.disabled = false; b.textContent = "Пересчитать сейчас";
+      load();
+    }
+  }, 3000);
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>
