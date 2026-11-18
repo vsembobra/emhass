@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.4.0"
+version: "0.5.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -51,6 +51,7 @@ options:
   tou_time_entity_template: time.inverter_program_{n}_time
   run_time: "06:47"
   notifications: true
+  apply_mode: false
   retrain_enabled: true
   retrain_interval_days: 7
   optimizer_enabled: true
@@ -86,6 +87,7 @@ schema:
   tou_time_entity_template: str
   run_time: match(^([01]\d|2[0-3]):[0-5]\d$)
   notifications: bool
+  apply_mode: bool
   retrain_enabled: bool
   retrain_interval_days: int(1,30)
   optimizer_enabled: bool
@@ -177,6 +179,9 @@ translations:
       notifications:
         name: Уведомления
         description: Показывать итог расчёта уведомлением в Home Assistant.
+      apply_mode:
+        name: Применять план к инвертору
+        description: "ВЫКЛ (рекомендуется на первые 1–2 недели): только советы, в инвертор ничего не пишется. ВКЛ: после расчёта аддон записывает целевые SOC в зоны TOU инвертора и порог SOC в input_number. Записываются только изменения от 5 п.п."
       retrain_enabled:
         name: Автоматическое переобучение
         description: Модели прогноза дообучаются на данных объекта с заданным интервалом. Кнопка переобучения в панели работает независимо от этого переключателя.
@@ -281,6 +286,9 @@ translations:
       notifications:
         name: Notifications
         description: Show the plan summary as a Home Assistant notification.
+      apply_mode:
+        name: Apply plan to inverter
+        description: "OFF (recommended for the first 1-2 weeks): advisory only, nothing is written. ON: after each run the add-on writes target SOCs to the inverter's TOU zones and the floor SOC to the input_number. Only changes of 5 pp or more are written."
       retrain_enabled:
         name: Automatic retraining
         description: Forecast models retrain on site data at the configured interval. The panel retrain button works regardless.

@@ -647,6 +647,52 @@ def run() -> dict:
         except Exception:
             optimizer_plan = None
 
+    # Apply mode (off by default): write the plan into the inverter through
+    # Home Assistant services. Optimizer zone targets win when available,
+    # otherwise the heuristic per-zone floors. Writes happen only when the
+    # change is at least 5 percentage points — no churn on rounding noise.
+    applied: list[str] = []
+    apply_errors: list[str] = []
+    if opts.get("apply_mode", False):
+        zone_pct = {}
+        if optimizer_plan is not None:
+            for t in optimizer_plan["zone_targets"]:
+                if t.get("optimal_soc_pct") is not None:
+                    zone_pct[t["n"]] = t["optimal_soc_pct"]
+        else:
+            for p in programs:
+                if p.get("recommended_soc_pct") is not None:
+                    zone_pct[p["n"]] = p["recommended_soc_pct"]
+        min_pct = int(round(float(opts["min_soc"]) * 100))
+        max_pct = int(round(float(opts["max_soc"]) * 100))
+        for p in programs:
+            target = zone_pct.get(p["n"])
+            if target is None:
+                continue
+            target = min(max(int(round(target)), min_pct), max_pct)
+            if abs(target - p["soc_pct"]) < 5:
+                continue
+            try:
+                ha_service(
+                    "number",
+                    "set_value",
+                    {"entity_id": ent["tou_soc"][p["n"] - 1], "value": target},
+                )
+                applied.append(f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%")
+            except Exception:
+                apply_errors.append(f"зона {p['n']}")
+        floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
+        if abs(floor_target - round(current_floor * 100)) >= 5:
+            try:
+                ha_service(
+                    "input_number",
+                    "set_value",
+                    {"entity_id": ent["floor_input"], "value": floor_target},
+                )
+                applied.append(f"порог SOC {round(current_floor * 100)}→{floor_target}%")
+            except Exception:
+                apply_errors.append("порог SOC")
+
     last_outage = max(
         (e.end for e in events if e.end is not None and e.source == "measured"), default=None
     )
@@ -666,8 +712,17 @@ def run() -> dict:
         if pv_day is not None
         else "• Солнце: прогноз недоступен (нет интернета и архива) — считаем худший случай 0 кВт·ч"
     )
+    apply_mode = bool(opts.get("apply_mode", False))
+    if apply_mode:
+        head = f"План батареи на {issue.astimezone(tz):%d.%m}"
+        head += (
+            " — применён в инвертор:" if not apply_errors
+            else " — применён частично (есть ошибки записи):"
+        )
+    else:
+        head = f"Теневой план на {issue.astimezone(tz):%d.%m} (без записи в инвертор):"
     lines = [
-        f"Теневой план на {issue.astimezone(tz):%d.%m} (без записи в инвертор):",
+        head,
         f"• Нагрузка 24 ч, кВт·ч: P50 {load_day['p50']} (P10 {load_day['p10']} … P90 {load_day['p90']})",
         pv_line,
         f"• Резерв отключений: {plan.reserve_kwh:.1f} кВт·ч "
@@ -732,6 +787,13 @@ def run() -> dict:
             "• Внимание: резерв не помещается, нехватка "
             f"{max(plan.shortfall_kwh, profile.max_shortfall_kwh):.1f} кВт·ч"
         )
+    if apply_mode:
+        if applied:
+            lines.append(f"• Записано в инвертор: {', '.join(applied)}")
+        else:
+            lines.append("• Инвертор: все целевые SOC совпадают с текущими — записей не было")
+        if apply_errors:
+            lines.append(f"• Ошибка записи: {', '.join(apply_errors)}")
     if weather_stale and weather_name is not None:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
@@ -743,6 +805,7 @@ def run() -> dict:
     report = {
         "issue_utc": issue.isoformat(),
         "site": site,
+        "apply_mode": apply_mode,
         "data": {
             "audit_rows_appended": appended,
             "audit_through": audit.index[-1].isoformat(),
@@ -794,6 +857,8 @@ def run() -> dict:
             "programs": programs,
             "would_raise_zones": would_raise,
             "optimizer": optimizer_plan,
+            "applied": applied,
+            "apply_errors": apply_errors,
         },
         "outage_risk": (
             {

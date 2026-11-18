@@ -41,7 +41,7 @@
 <body>
 <header>
   <h1>🔋 Теневой план батареи</h1>
-  <span class="badge">только советует · в инвертор не пишет</span>
+  <span class="badge" id="modebadge">только советует · в инвертор не пишет</span>
   <button id="retrain" class="secondary" onclick="retrainNow()">Переобучить модели</button>
   <button id="refresh" onclick="recalc()">Пересчитать сейчас</button>
 </header>
@@ -217,6 +217,13 @@ async function retrainNow() {
 
 function render(r) {
   document.getElementById("content").style.display = "block";
+  const badge = document.getElementById("modebadge");
+  if (r.apply_mode) {
+    badge.textContent = "⚡ применяет план в инвертор";
+    badge.style.background = "rgba(239,83,80,.18)";
+    badge.style.color = "var(--warn)";
+    badge.style.borderColor = "var(--warn)";
+  }
   const n = document.getElementById("notice");
   n.style.display = "block"; n.textContent = r.notification;
   const a = r.advisory;
