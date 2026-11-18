@@ -170,6 +170,7 @@ def _solve(
 def zone_targets(
     soc_opt: list[float], soc_init: float, programs: list[dict],
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
+    strategy: str = "ladder",
 ) -> list[dict]:
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
@@ -177,11 +178,16 @@ def zone_targets(
     Asymmetric rounding to the inverter's 5 % step:
     - charging window (SOC rises across it, e.g. cheap night hours) → the
       end-of-window SOC rounded UP — this is the charge target;
-    - discharging/holding window → the minimum SOC inside the window rounded
-      DOWN — a pure floor that never sits above the actual SOC, so it can
-      neither block planned discharge nor trigger charging at expensive
-      prices (a value above the real SOC makes the inverter grid-charge
-      toward it).
+    - discharging/holding window → rounded DOWN, so the floor never sits
+      above the real SOC: it can neither block planned discharge nor trigger
+      grid charging at expensive prices.
+
+    strategy selects the floor of the discharging windows:
+    - "ladder": the window's own minimum SOC — floors track the optimal
+      trajectory, saving energy for the evening peak and outages;
+    - "flat": the whole-horizon minimum SOC — one low floor everywhere, the
+      battery is spent whenever loads appear.
+    Charging windows are unaffected by the strategy.
     """
     matches = {}
     for program in programs:
@@ -195,6 +201,8 @@ def zone_targets(
 
     def clamp_pct(soc: float) -> float:
         return min(max(soc, min_soc), max_soc) * 100.0
+
+    horizon_min = min(soc_opt) if soc_opt else soc_init
 
     targets = []
     for program in programs:
@@ -218,7 +226,10 @@ def zone_targets(
         if end_soc > entry_soc + 0.005:
             pct = math.ceil(clamp_pct(end_soc) / 5.0) * 5
         else:
-            pct = math.floor(clamp_pct(min(soc_opt[i] for i in window)) / 5.0) * 5
+            floor_soc = min(soc_opt[i] for i in window)
+            if strategy == "flat":
+                floor_soc = min(floor_soc, horizon_min)
+            pct = math.floor(clamp_pct(floor_soc) / 5.0) * 5
         targets.append({**program, "optimal_soc_pct": pct})
     return targets
 
@@ -303,7 +314,9 @@ def run_plan(
         ),
         "grid_charge_kwh_cheap": round(grid_charge_kwh, 2),
         "tariff_enabled": bool(opts.get("tariff_enabled", False)),
+        "day_zone_strategy": str(opts.get("day_zone_strategy", "ladder")),
         "zone_targets": zone_targets(
-            soc_opt, soc_init, programs, starts, tz, min_soc, max_soc
+            soc_opt, soc_init, programs, starts, tz, min_soc, max_soc,
+            strategy=str(opts.get("day_zone_strategy", "ladder")),
         ),
     }
