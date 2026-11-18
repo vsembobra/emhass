@@ -25,9 +25,10 @@ import certifi
 import numpy as np
 import pandas as pd
 
-from emhass.battery_planning import ForecastStep, baseline_floor
+from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
 from emhass.outage_log import OutageEvent, read_events, record_observation_csv
+from emhass.outage_risk import outage_risk_profile
 from emhass.pv_quantiles import PvQuantileBundle, plane_power_kw
 from emhass.reserve import LoadObservation, ReserveSettings, calculate_reserve
 
@@ -548,8 +549,32 @@ def run() -> dict:
         )
         for i in range(HORIZON_HOURS)
     ]
-    recommendation = baseline_floor(steps, plan.reserve_kwh, settings)
-    recommended_floor = round(recommendation.floor_soc / 0.05) * 0.05
+
+    # Probabilistic outage layer: raise the reserve during historically risky
+    # local hours instead of relying only on the post-outage reactive hold.
+    risk = outage_risk_profile(events, issue, site["time_zone"])
+    reserve_by_hour = [plan.reserve_kwh] * HORIZON_HOURS
+    risk_windows: list[str] = []
+    if risk is not None and any(risk.risk_hours):
+        risk_energy = (
+            plan.critical_load_kw * risk.duration_p90_hours / settings.discharge_efficiency
+        )
+        for i in range(HORIZON_HOURS):
+            local_hour = starts[i].astimezone(tz).hour
+            if risk.risk_hours[local_hour]:
+                reserve_by_hour[i] = max(reserve_by_hour[i], risk_energy)
+        start_hour = None
+        for hour in range(25):  # group consecutive risky hours into windows
+            risky = hour < 24 and risk.risk_hours[hour]
+            if risky and start_hour is None:
+                start_hour = hour
+            elif not risky and start_hour is not None:
+                risk_windows.append(f"{start_hour:02d}–{hour:02d}")
+                start_hour = None
+
+    profile = floor_profile(steps, reserve_by_hour, settings)
+    floors = [round(step.floor_soc / 0.05) * 0.05 for step in profile.steps]
+    recommended_floor = floors[0]  # binding constraint is the current hour
 
     floor_entity = opts["floor_input_entity"]
     current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
@@ -558,7 +583,27 @@ def run() -> dict:
         soc = float(ha_get(f"/api/states/number.inverter_program_{n}_soc")["state"])
         start = ha_get(f"/api/states/time.inverter_program_{n}_time")["state"]
         programs.append({"n": n, "from": start, "soc_pct": soc})
-    would_raise = [p for p in programs if p["soc_pct"] / 100.0 < recommended_floor]
+    # Each TOU zone gets the floor of its own start hour (next occurrence in
+    # the horizon), not a single all-day value.
+    for program in programs:
+        hour = int(program["from"][:2])
+        match = next(
+            (
+                i
+                for i in range(HORIZON_HOURS)
+                if starts[i].astimezone(tz).hour == hour and starts[i] >= issue
+            ),
+            None,
+        )
+        program["recommended_soc_pct"] = (
+            round(floors[match] * 100) if match is not None else None
+        )
+    would_raise = [
+        p
+        for p in programs
+        if p.get("recommended_soc_pct") is not None
+        and p["soc_pct"] < p["recommended_soc_pct"]
+    ]
 
     battery_now = ha_get(f"/api/states/{SOC_SENSOR}")["state"]
     last_outage = max(
@@ -587,21 +632,28 @@ def run() -> dict:
         f"• Резерв отключений: {plan.reserve_kwh:.1f} кВт·ч "
         f"(критическая {plan.critical_load_kw:.2f} кВт × {plan.duration_hours:.1f} ч)"
         + (f", повышен держится до {hold_until}" if hold_until else ""),
-        f"• Рекомендуемый пол SOC: {recommended_floor:.0%} "
-        f"(сейчас {current_floor:.0%}, {delta_pp:+d} п.п.), батарея сейчас {battery_now}%",
+        f"• Пол SOC плавающий: сейчас {recommended_floor:.0%}, "
+        f"диапазон суток {min(floors):.0%}–{max(floors):.0%} "
+        f"(инвертор держит {current_floor:.0%}, {delta_pp:+d} п.п.), батарея сейчас {battery_now}%",
     ]
+    if risk_windows:
+        lines.append(
+            f"• По журналу отключения чаще всего в {', '.join(risk_windows)} ч — "
+            f"резерв в эти часы поднят ({risk.outages_count} отключений за "
+            f"{risk.days_observed:.0f} дней наблюдений)"
+        )
     if would_raise:
         zones = ", ".join(
-            f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{recommended_floor:.0%}"
+            f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{p['recommended_soc_pct']:.0f}%"
             for p in would_raise
         )
         lines.append(f"• Подняла бы SOC зон TOU: {zones}")
     else:
         lines.append("• Зоны TOU: без изменений")
-    if plan.shortfall_kwh > 0 or recommendation.shortfall_kwh > 0:
+    if plan.shortfall_kwh > 0 or profile.max_shortfall_kwh > 0:
         lines.append(
             "• Внимание: резерв не помещается, нехватка "
-            f"{max(plan.shortfall_kwh, recommendation.shortfall_kwh):.1f} кВт·ч"
+            f"{max(plan.shortfall_kwh, profile.max_shortfall_kwh):.1f} кВт·ч"
         )
     if weather_stale and weather_name is not None:
         lines.append(
@@ -642,16 +694,42 @@ def run() -> dict:
         },
         "advisory": {
             "recommended_floor_soc": recommended_floor,
-            "exact_floor_soc": round(recommendation.floor_soc, 4),
-            "energy_to_crossover_kwh": round(recommendation.energy_to_crossover_kwh, 3),
+            "exact_floor_soc": round(profile.steps[0].floor_soc, 4),
+            "floor_profile": [
+                {
+                    "start_local": profile.steps[i].start.astimezone(tz).strftime("%H:%M"),
+                    "floor_soc": floors[i],
+                    "crossover_local": (
+                        profile.steps[i].crossover.astimezone(tz).strftime("%H:%M")
+                        if profile.steps[i].crossover
+                        else None
+                    ),
+                }
+                for i in range(HORIZON_HOURS)
+            ],
+            "max_floor_soc": round(profile.max_floor_soc / 0.05) * 0.05,
+            "energy_to_crossover_kwh": round(profile.steps[0].stored_kwh, 3),
             "crossover_utc": (
-                recommendation.crossover.isoformat() if recommendation.crossover else None
+                profile.steps[0].crossover.isoformat() if profile.steps[0].crossover else None
             ),
             "current_floor_soc": current_floor,
             "delta_pp": delta_pp,
             "programs": programs,
             "would_raise_zones": would_raise,
         },
+        "outage_risk": (
+            {
+                "hourly_probability": [round(p, 4) for p in risk.hourly_probability],
+                "risk_hours": [h for h in range(24) if risk.risk_hours[h]],
+                "risk_windows": risk_windows,
+                "mean_duration_hours": round(risk.mean_duration_hours, 2),
+                "duration_p90_hours": round(risk.duration_p90_hours, 2),
+                "days_observed": round(risk.days_observed, 1),
+                "outages_count": risk.outages_count,
+            }
+            if risk is not None
+            else None
+        ),
         "battery_now_pct": battery_now,
         "notification": "\n".join(lines),
     }

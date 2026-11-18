@@ -74,6 +74,12 @@
   </div>
 
   <div class="card full">
+    <h3>Пол SOC по часам (плавающий)</h3>
+    <div class="sub" id="floornote" style="margin-bottom:8px"></div>
+    <div id="floorbars" style="display:flex;align-items:flex-end;gap:2px;height:90px;margin-bottom:20px"></div>
+  </div>
+
+  <div class="card full">
     <h3>Зоны TOU инвертора (6 программ)</h3>
     <table>
       <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Рекомендация</th></tr></thead>
@@ -225,11 +231,33 @@ function render(r) {
     (r.reserve.hold_until_local ? " · повышен до " + r.reserve.hold_until_local : "");
   const recPct = Math.round(a.recommended_floor_soc * 100);
   document.getElementById("zones").innerHTML = a.programs.map(p => {
-    const change = p.soc_pct < recPct;
+    const target = p.recommended_soc_pct != null ? Math.round(p.recommended_soc_pct) : recPct;
+    const change = p.soc_pct < target;
     return "<tr><td>Зона " + p.n + "</td><td>" + p.from.slice(0, 5) + "</td><td>" +
       Math.round(p.soc_pct) + "%</td><td>" +
-      (change ? '<span class="arrow">↑ ' + recPct + "%</span>" : "без изменений") + "</td></tr>";
+      (change ? '<span class="arrow">↑ ' + target + "%</span>" : "без изменений") + "</td></tr>";
   }).join("");
+  renderFloorProfile(a.floor_profile || [], r.outage_risk);
+}
+
+function renderFloorProfile(profile, risk) {
+  const bars = document.getElementById("floorbars");
+  if (!profile.length) { bars.innerHTML = '<span class="muted">нет данных</span>'; return; }
+  bars.innerHTML = profile.map(s => {
+    const h = Math.round(s.floor_soc * 100);
+    return '<div title="' + s.start_local + " — пол " + h + '%" style="flex:1;height:' +
+      Math.max(6, h * 0.85) + 'px;background:' + (h >= 60 ? "var(--warn)" : "var(--accent)") +
+      ';border-radius:3px 3px 0 0;position:relative">' +
+      '<div class="muted" style="position:absolute;bottom:-16px;left:0;font-size:10px">' +
+      s.start_local.slice(0, 2) + "</div></div>";
+  }).join("");
+  const note = document.getElementById("floornote");
+  const maxF = Math.max(...profile.map(s => s.floor_soc));
+  const minF = Math.min(...profile.map(s => s.floor_soc));
+  let text = "диапазон суток " + Math.round(minF * 100) + "–" + Math.round(maxF * 100) + "%";
+  if (risk && risk.risk_windows && risk.risk_windows.length)
+    text += " · окно риска отключений: " + risk.risk_windows.join(", ") + " ч";
+  note.textContent = text;
 }
 
 function renderHistory(items) {
