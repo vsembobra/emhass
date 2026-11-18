@@ -22,6 +22,7 @@ passing_data.md
 differences.md
 advanced_math_model.md
 forecasts.md
+forecast_quantiles.md
 mlforecaster.md
 mlregressor.md
 thermal_model.md

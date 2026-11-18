@@ -45,6 +45,10 @@ dependencies = [
 
 [project.optional-dependencies]
 docs = ["sphinx", "pydata-sphinx-theme", "sphinx-design", "myst-parser", "sphinx-llms-txt"]
+# Opt-in CPU gradient boosting for the load/PV quantile forecasters
+# (src/emhass/load_quantiles.py, src/emhass/pv_quantiles.py). Default installs
+# must not require LightGBM; the modules import it lazily.
+quantile = ["lightgbm>=4.5,<5"]
 test = [
     "pytest",
     "pytz",

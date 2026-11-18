@@ -361,6 +361,16 @@ A few things to keep in mind when reading the report:
 - `typical` here is derived from the retrieved history window rather than the long-term typical profile used in production, and it needs prior same-month, same-weekday history, so on a short window it may cover fewer days than the other methods (compare the `n` columns).
 - The report's history starts at the load sensor's first recorded (non-missing) value, and a recorded 0 W can mark that start. If the retrieval window begins before the sensor had any data (for example a recently added sensor), that earlier stretch is left out rather than turned into 0 W history, so the report may cover fewer days than requested or return the "not enough history" message. From the first recorded value onwards, the history is cleaned with your usual `set_zero_min`, `sensor_replace_zero` and `sensor_linear_interp` settings. This only affects the calibration report; the history preparation used by the optimizations is unchanged.
 
+### Opt-in quantile forecasts (load and PV)
+
+For advisory reserve planning there are standalone P10/P50/P90 forecasters,
+`emhass.load_quantiles` and `emhass.pv_quantiles`, based on CPU LightGBM with a
+lazy optional dependency (`emhass[quantile]`). They are not part of the
+optimizer-facing forecast methods above: a caller explicitly loads a trained
+bundle, and a missing or unusable bundle falls back to the configured standard
+method. See [Opt-in quantile forecasts](forecast_quantiles.md) for the feature
+and leakage contract, calibration, and CLI.
+
 ## Load cost forecast
 
 The default method for load cost forecast is defined for a peak and non-peak hours contract type. This is obtained using `method=hp_hc_periods`.
