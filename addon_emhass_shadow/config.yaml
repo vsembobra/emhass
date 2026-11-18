@@ -2,10 +2,11 @@ name: "EMHASS Shadow — теневой план батареи"
 description: >-
   Теневой режим EMHASS: ежедневный сбор данных из Recorder, квантильные
   прогнозы нагрузки и солнечной генерации, расчёт резерва отключений и
-  рекомендаций по нижнему порогу SOC и зонам TOU. Модели периодически
-  переобучаются на накопленных данных объекта, точность прогнозов
-  отслеживается в панели. В инвертор ничего не записывает.
-version: "0.2.0"
+  MILP-оптимизатор (CVXPY/HiGHS) суточного плана батареи: плавающий пол SOC,
+  целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
+  периодически переобучаются на накопленных данных объекта, точность
+  прогнозов отслеживается в панели. В инвертор ничего не записывает.
+version: "0.3.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -36,7 +37,13 @@ options:
   floor_input_entity: input_number.deye_soc_backup
   run_time: "06:47"
   notifications: true
+  retrain_enabled: true
   retrain_interval_days: 7
+  optimizer_enabled: true
+  tariff_enabled: false
+  tariff_normal_price: 2.0
+  tariff_cheap_price: 1.0
+  tariff_cheap_windows: "23:00-07:00"
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -51,4 +58,10 @@ schema:
   floor_input_entity: str
   run_time: match(^([01]\d|2[0-3]):[0-5]\d$)
   notifications: bool
+  retrain_enabled: bool
   retrain_interval_days: int(1,30)
+  optimizer_enabled: bool
+  tariff_enabled: bool
+  tariff_normal_price: float(0,1000)
+  tariff_cheap_price: float(0,1000)
+  tariff_cheap_windows: str

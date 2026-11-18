@@ -8,6 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
 
 RUN pip install --no-cache-dir numpy pandas pvlib lightgbm scikit-learn certifi
 
+# Separate layer: cvxpy + HiGHS pull large wheels (scipy, highspy), give pip
+# more patience on slow uplinks. aiofiles/aiohttp/orjson/plotly/pytz/pyyaml
+# are the module-level imports of emhass.utils pulled in by emhass.optimization.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 \
+    cvxpy aiofiles aiohttp orjson plotly pytz pyyaml
+
 WORKDIR /opt
 COPY src/ /opt/emhass_src/src/
 ENV PYTHONPATH=/opt/emhass_src/src

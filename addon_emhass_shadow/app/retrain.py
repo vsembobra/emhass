@@ -20,7 +20,6 @@ import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from emhass.load_quantiles import LoadQuantileBundle
@@ -67,14 +66,16 @@ def _save_state(state: dict) -> None:
 def retrain_status() -> dict:
     state = _load_state()
     interval = _interval_days()
+    enabled = _enabled()
     last = state.get("last_retrain_utc")
     nxt = None
-    if last:
+    if last and enabled:
         nxt = (datetime.fromisoformat(last) + timedelta(days=interval)).isoformat()
     return {
         "last_retrain_utc": last,
         "next_retrain_utc": nxt,
         "interval_days": interval,
+        "enabled": enabled,
         "models": state.get("models", {}),
     }
 
@@ -85,6 +86,14 @@ def _interval_days() -> int:
         return max(1, int(opts.get("retrain_interval_days", 7)))
     except (OSError, json.JSONDecodeError, ValueError):
         return 7
+
+
+def _enabled() -> bool:
+    try:
+        opts = json.loads((DATA / "options.json").read_text())
+        return bool(opts.get("retrain_enabled", True))
+    except (OSError, json.JSONDecodeError):
+        return True
 
 
 def _audit_frame() -> pd.DataFrame:
@@ -224,7 +233,13 @@ def _retrain_pv(audit: pd.DataFrame, site: dict) -> dict:
 
 
 def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
-    """Retrain both bundles when the configured interval elapsed (or forced)."""
+    """Retrain both bundles when the configured interval elapsed (or forced).
+
+    The retrain_enabled option gates only the automatic schedule; a forced run
+    (panel button) is an explicit action and always goes ahead.
+    """
+    if not force and not _enabled():
+        return retrain_status()
     state = _load_state()
     interval = _interval_days()
     last = state.get("last_retrain_utc")

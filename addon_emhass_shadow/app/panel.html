@@ -79,10 +79,16 @@
     <div id="floorbars" style="display:flex;align-items:flex-end;gap:2px;height:90px;margin-bottom:20px"></div>
   </div>
 
+  <div class="card full" id="optcard" style="display:none">
+    <h3>Оптимальный план (MILP-оптимизатор)</h3>
+    <div class="sub" id="optnote" style="margin-bottom:8px"></div>
+    <div id="optbars" style="display:flex;align-items:flex-end;gap:2px;height:90px;margin-bottom:20px"></div>
+  </div>
+
   <div class="card full">
     <h3>Зоны TOU инвертора (6 программ)</h3>
     <table>
-      <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Рекомендация</th></tr></thead>
+      <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Пол (эвристика)</th><th>Оптимизатор</th></tr></thead>
       <tbody id="zones"></tbody>
     </table>
   </div>
@@ -144,9 +150,12 @@ function renderStatus(s) {
   if (s.audit_rows) parts.push("строк аудита: " + s.audit_rows);
   if (s.retrain) {
     const r = s.retrain;
+    if (r.enabled === false) parts.push("переобучение: выключено в настройках");
     if (r.last_retrain_utc) parts.push("переобучено: " + new Date(r.last_retrain_utc).toLocaleString("ru-RU"));
-    if (r.next_retrain_utc) parts.push("следующее переобучение: " + new Date(r.next_retrain_utc).toLocaleDateString("ru-RU"));
-    else parts.push("переобучение: при следующем расчёте");
+    if (r.enabled !== false) {
+      if (r.next_retrain_utc) parts.push("следующее переобучение: " + new Date(r.next_retrain_utc).toLocaleDateString("ru-RU"));
+      else parts.push("переобучение: при следующем расчёте");
+    }
     const m = r.models || {};
     const bad = ["load", "pv"].filter(k => m[k] && m[k].status === "failed");
     if (bad.length) parts.push("⚠️ переобучение не удалось: " + bad.map(k => (k === "load" ? "нагрузка" : "солнце")).join(", "));
@@ -230,14 +239,49 @@ function render(r) {
     "критическая " + r.reserve.critical_load_kw + " кВт × " + r.reserve.duration_hours + " ч" +
     (r.reserve.hold_until_local ? " · повышен до " + r.reserve.hold_until_local : "");
   const recPct = Math.round(a.recommended_floor_soc * 100);
+  const optZones = {};
+  if (a.optimizer && a.optimizer.zone_targets)
+    a.optimizer.zone_targets.forEach(t => { optZones[t.n] = t.optimal_soc_pct; });
   document.getElementById("zones").innerHTML = a.programs.map(p => {
     const target = p.recommended_soc_pct != null ? Math.round(p.recommended_soc_pct) : recPct;
     const change = p.soc_pct < target;
+    const optT = optZones[p.n];
+    const optCell = optT == null ? "—" :
+      (Math.abs(optT - p.soc_pct) >= 5
+        ? '<span class="arrow">' + (optT > p.soc_pct ? "↑ " : "↓ ") + optT + "%</span>"
+        : "без изменений (" + optT + "%)");
     return "<tr><td>Зона " + p.n + "</td><td>" + p.from.slice(0, 5) + "</td><td>" +
       Math.round(p.soc_pct) + "%</td><td>" +
-      (change ? '<span class="arrow">↑ ' + target + "%</span>" : "без изменений") + "</td></tr>";
+      (change ? '<span class="arrow">↑ ' + target + "%</span>" : "без изменений") + "</td><td>" +
+      optCell + "</td></tr>";
   }).join("");
   renderFloorProfile(a.floor_profile || [], r.outage_risk);
+  renderOptimizer(a.optimizer, a.floor_profile || []);
+}
+
+function renderOptimizer(opt, profile) {
+  const card = document.getElementById("optcard");
+  if (!opt) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  const bits = ["статус: " + opt.status];
+  if (opt.cost_plan != null) bits.push("стоимость дня " + opt.cost_plan);
+  if (opt.cost_baseline != null) bits.push("без батареи " + opt.cost_baseline);
+  if (opt.savings != null) bits.push("экономия " + opt.savings);
+  if (opt.tariff_enabled && opt.grid_charge_kwh_cheap >= 0.3)
+    bits.push("ночная зарядка из сети " + opt.grid_charge_kwh_cheap + " кВт·ч");
+  if (opt.floor_relaxed) bits.push("⚠️ пол смягчён до минимума — прогноз не достигает резерва");
+  document.getElementById("optnote").textContent = bits.join(" · ");
+  const starts = profile.map(s => s.start_local);
+  document.getElementById("optbars").innerHTML = opt.soc_opt.map((s, i) => {
+    const h = Math.round(s * 100);
+    const floor = profile[i] ? Math.round(profile[i].floor_soc * 100) : 0;
+    const below = h < floor - 1;
+    return '<div title="' + (starts[i] || "") + " — SOC " + h + '% (пол ' + floor + '%)" ' +
+      'style="flex:1;height:' + Math.max(6, h * 0.85) + 'px;background:' +
+      (below ? "var(--bad)" : "var(--good)") + ';border-radius:3px 3px 0 0;position:relative">' +
+      '<div class="muted" style="position:absolute;bottom:-16px;left:0;font-size:10px">' +
+      (starts[i] || "").slice(0, 2) + "</div></div>";
+  }).join("");
 }
 
 function renderFloorProfile(profile, risk) {

@@ -14,7 +14,6 @@ import csv
 import json
 import os
 import ssl
-import sys
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -606,6 +605,23 @@ def run() -> dict:
     ]
 
     battery_now = ha_get(f"/api/states/{SOC_SENSOR}")["state"]
+
+    # MILP layer: optimize the same 24 h horizon against the tariff and the
+    # floating floor; advisory only. Never let it break the daily plan.
+    optimizer_plan = None
+    if opts.get("optimizer_enabled", True):
+        try:
+            import optimize
+
+            load_p50 = [
+                float(load_prediction["load_p50_kw"].iloc[i]) for i in range(HORIZON_HOURS)
+            ]
+            optimizer_plan = optimize.run_plan(
+                starts, pv_p50, load_p50, floors, float(battery_now) / 100.0, programs, opts
+            )
+        except Exception:
+            optimizer_plan = None
+
     last_outage = max(
         (e.end for e in events if e.end is not None and e.source == "measured"), default=None
     )
@@ -650,6 +666,42 @@ def run() -> dict:
         lines.append(f"• Подняла бы SOC зон TOU: {zones}")
     else:
         lines.append("• Зоны TOU: без изменений")
+    if optimizer_plan is not None:
+        opt_line = (
+            f"• Оптимизатор (MILP): день обойдётся в {optimizer_plan['cost_plan']:.1f}"
+        )
+        if optimizer_plan.get("savings") is not None:
+            opt_line += (
+                f", без батареи было бы {optimizer_plan['cost_baseline']:.1f} — "
+                f"экономия {optimizer_plan['savings']:.1f}"
+            )
+        if optimizer_plan.get("tariff_enabled"):
+            opt_line += " (в тарифных единицах)"
+        lines.append(opt_line)
+        if optimizer_plan["grid_charge_kwh_cheap"] >= 0.3:
+            lines.append(
+                f"• Ночная зарядка из сети по дешёвому тарифу: "
+                f"{optimizer_plan['grid_charge_kwh_cheap']:.1f} кВт·ч"
+            )
+        if optimizer_plan["floor_relaxed"]:
+            lines.append(
+                "• Оптимизатор: плавающий пол недостижим по прогнозу — "
+                "план посчитан с плоским минимумом SOC"
+            )
+        zone_changes = [
+            t
+            for t in optimizer_plan["zone_targets"]
+            if t.get("optimal_soc_pct") is not None
+            and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= 5
+        ]
+        if zone_changes:
+            zones = ", ".join(
+                f"зона {t['n']} ({t['from'][:5]}) {t['soc_pct']:.0f}→{t['optimal_soc_pct']:.0f}%"
+                for t in zone_changes
+            )
+            lines.append(f"• Целевые SOC зон от оптимизатора: {zones}")
+    elif opts.get("optimizer_enabled", True):
+        lines.append("• Оптимизатор: расчёт не удался, действует эвристика пола SOC")
     if plan.shortfall_kwh > 0 or profile.max_shortfall_kwh > 0:
         lines.append(
             "• Внимание: резерв не помещается, нехватка "
@@ -716,6 +768,7 @@ def run() -> dict:
             "delta_pp": delta_pp,
             "programs": programs,
             "would_raise_zones": would_raise,
+            "optimizer": optimizer_plan,
         },
         "outage_risk": (
             {
