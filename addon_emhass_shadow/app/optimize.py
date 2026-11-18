@@ -186,8 +186,17 @@ def zone_targets(
         if match is None:
             targets.append({**program, "optimal_soc_pct": None})
             continue
+        # Next zone start in cyclic horizon order; a zone crossing the
+        # horizon edge (e.g. 00:00-07:00 when the horizon starts at 01:00)
+        # wraps around and ends at the earliest start index.
         later = [i for i in starts_idx if i > match]
-        soc = soc_opt[later[0] - 1] if later else soc_opt[-1]
+        if later:
+            soc = soc_opt[later[0] - 1]
+        elif starts_idx:
+            nxt = starts_idx[0]
+            soc = soc_init if nxt == 0 else soc_opt[nxt - 1]
+        else:
+            soc = soc_opt[-1]
         soc = min(max(soc, min_soc), max_soc)
         targets.append({**program, "optimal_soc_pct": round(soc * 20) * 5})
     return targets
