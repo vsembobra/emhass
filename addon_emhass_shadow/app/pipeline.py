@@ -38,28 +38,50 @@ SITE_ID = "home"
 HORIZON_HOURS = 24
 METRICS = DATA / "metrics.jsonl"
 
-MEAN_SENSORS = {
-    "load_kw": ("sensor.inverter_load_power", 0.001),
-    "critical_load_kw": ("sensor.inverter_load_ups_power", 0.001),
-    "pv_measured_kw": ("sensor.inverter_pv_power", 0.001),
-    "battery_power_kw_raw_sign": ("sensor.inverter_battery_power", 0.001),
-    "grid_power_kw_raw_sign": ("sensor.inverter_grid_power", 0.001),
-    "temp_air_observed_c": ("sensor.home_temperature", 1.0),
+MEAN_SENSOR_FIELDS = {
+    "load_kw": ("entity_load_power", 0.001),
+    "critical_load_kw": ("entity_critical_load_power", 0.001),
+    "pv_measured_kw": ("entity_pv_power", 0.001),
+    "battery_power_kw_raw_sign": ("entity_battery_power", 0.001),
+    "grid_power_kw_raw_sign": ("entity_grid_power", 0.001),
+    "temp_air_observed_c": ("entity_outdoor_temperature", 1.0),
 }
-SOC_SENSOR = "sensor.inverter_battery"
-EXPORT_COUNTER = "sensor.inverter_total_energy_export"
-VOLTAGE_SENSORS = {
-    "grid_l1_min_v": "sensor.inverter_grid_l1_voltage",
-    "grid_l2_min_v": "sensor.inverter_grid_l2_voltage",
-    "grid_l3_min_v": "sensor.inverter_grid_l3_voltage",
-}
-GRID_BINARY = "binary_sensor.inverter_grid"
+TOU_ZONES = 6
 
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def options() -> dict:
     return json.loads((DATA / "options.json").read_text())
+
+
+def resolve_entities(opts: dict) -> dict:
+    """Entity map: every HA entity id comes from the add-on options.
+
+    TOU zone entities use templates with {n} (zone number, 1..6) so a
+    different naming scheme is one string instead of twelve.
+    """
+    return {
+        "mean_sensors": {
+            field: (opts[key], scale)
+            for field, (key, scale) in MEAN_SENSOR_FIELDS.items()
+        },
+        "soc": opts["entity_battery_soc"],
+        "export_counter": opts["entity_export_counter"],
+        "grid_binary": opts["entity_grid_status"],
+        "voltages": {
+            "grid_l1_min_v": opts["entity_grid_l1_voltage"],
+            "grid_l2_min_v": opts["entity_grid_l2_voltage"],
+            "grid_l3_min_v": opts["entity_grid_l3_voltage"],
+        },
+        "tou_soc": [
+            opts["tou_soc_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+        ],
+        "tou_time": [
+            opts["tou_time_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+        ],
+        "floor_input": opts["floor_input_entity"],
+    }
 
 
 def _token() -> str:
@@ -165,17 +187,17 @@ def grid_status_series(states):
     return sorted(series)
 
 
-def build_audit_rows(history, hours, latitude, longitude):
+def build_audit_rows(history, hours, latitude, longitude, ent):
     means = {
         field: numeric_samples(history.get(entity, []), scale)
-        for field, (entity, scale) in MEAN_SENSORS.items()
+        for field, (entity, scale) in ent["mean_sensors"].items()
     }
-    soc = numeric_samples(history.get(SOC_SENSOR, []), 0.01)
+    soc = numeric_samples(history.get(ent["soc"], []), 0.01)
     voltages = {
         field: numeric_samples(history.get(entity, []), 1.0)
-        for field, entity in VOLTAGE_SENSORS.items()
+        for field, entity in ent["voltages"].items()
     }
-    grid_series = grid_status_series(history.get(GRID_BINARY, []))
+    grid_series = grid_status_series(history.get(ent["grid_binary"], []))
     history_start = grid_series[0][0] if grid_series else None
 
     rows = []
@@ -187,14 +209,14 @@ def build_audit_rows(history, hours, latitude, longitude):
         carried_soc = _carried(soc, hour)
         row["soc_mean"] = float(np.mean(soc_hour)) if soc_hour else carried_soc
         row["soc_max"] = float(max(soc_hour)) if soc_hour else carried_soc
-        row["export_kwh"] = counter_delta(history.get(EXPORT_COUNTER, []), hour)
+        row["export_kwh"] = counter_delta(history.get(ent["export_counter"], []), hour)
         for field, samples in voltages.items():
             row[field] = hourly_min(samples, hour)
         elevation = solar_elevation(latitude, longitude, hour)
         row["solar_elevation_deg"] = elevation
 
         in_hour = [s for at, s in grid_series if hour <= at < hour + timedelta(hours=1)]
-        mins = [row[f] for f in VOLTAGE_SENSORS if row[f] is not None]
+        mins = [row[f] for f in ent["voltages"] if row[f] is not None]
         low_voltage = bool(mins) and min(mins) <= 50.0
         if history_start is not None and hour >= history_start.replace(
             minute=0, second=0, microsecond=0
@@ -246,7 +268,7 @@ def build_audit_rows(history, hours, latitude, longitude):
     return rows
 
 
-def update_audit(site) -> tuple[pd.DataFrame, int]:
+def update_audit(site, ent) -> tuple[pd.DataFrame, int]:
     audit_path = DATA / "hourly_audit.jsonl"
     audit = pd.read_json(audit_path, lines=True)
     audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
@@ -261,12 +283,12 @@ def update_audit(site) -> tuple[pd.DataFrame, int]:
         hours.append(cursor)
         cursor += timedelta(hours=1)
     entities = (
-        [e for e, _ in MEAN_SENSORS.values()]
-        + list(VOLTAGE_SENSORS.values())
-        + [SOC_SENSOR, EXPORT_COUNTER, GRID_BINARY]
+        [e for e, _ in ent["mean_sensors"].values()]
+        + list(ent["voltages"].values())
+        + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
     )
     history = fetch_history(last, now_hour + timedelta(hours=1), entities)
-    rows = build_audit_rows(history, hours, site["latitude"], site["longitude"])
+    rows = build_audit_rows(history, hours, site["latitude"], site["longitude"], ent)
     with audit_path.open("a", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row) + "\n")
@@ -290,10 +312,10 @@ def _last_observation() -> datetime | None:
     return datetime.fromisoformat(row[0]) if row and row[0] else None
 
 
-def update_outage_log() -> int:
+def update_outage_log(ent) -> int:
     now = datetime.now(UTC)
-    history = fetch_history(now - timedelta(hours=48), now, [GRID_BINARY])
-    series = grid_status_series(history.get(GRID_BINARY, []))
+    history = fetch_history(now - timedelta(hours=48), now, [ent["grid_binary"]])
+    series = grid_status_series(history.get(ent["grid_binary"], []))
     cursor_at = _last_observation()
     if cursor_at is not None:
         series = [sample for sample in series if sample[0] > cursor_at]
@@ -463,6 +485,7 @@ def _retrain_note() -> str | None:
 
 def run() -> dict:
     opts = options()
+    ent = resolve_entities(opts)
     site = {
         "latitude": opts["latitude"],
         "longitude": opts["longitude"],
@@ -470,8 +493,8 @@ def run() -> dict:
     }
     tz = ZoneInfo(site["time_zone"])
 
-    audit, appended = update_audit(site)
-    new_transitions = update_outage_log()
+    audit, appended = update_audit(site, ent)
+    new_transitions = update_outage_log(ent)
 
     issue = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     starts = pd.date_range(issue, periods=HORIZON_HOURS, freq="h")
@@ -575,12 +598,14 @@ def run() -> dict:
     floors = [round(step.floor_soc / 0.05) * 0.05 for step in profile.steps]
     recommended_floor = floors[0]  # binding constraint is the current hour
 
-    floor_entity = opts["floor_input_entity"]
+    floor_entity = ent["floor_input"]
     current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
     programs = []
-    for n in range(1, 7):
-        soc = float(ha_get(f"/api/states/number.inverter_program_{n}_soc")["state"])
-        start = ha_get(f"/api/states/time.inverter_program_{n}_time")["state"]
+    for n, (soc_entity, time_entity) in enumerate(
+        zip(ent["tou_soc"], ent["tou_time"], strict=True), start=1
+    ):
+        soc = float(ha_get(f"/api/states/{soc_entity}")["state"])
+        start = ha_get(f"/api/states/{time_entity}")["state"]
         programs.append({"n": n, "from": start, "soc_pct": soc})
     # Each TOU zone gets the floor of its own start hour (next occurrence in
     # the horizon), not a single all-day value.
@@ -604,7 +629,7 @@ def run() -> dict:
         and p["soc_pct"] < p["recommended_soc_pct"]
     ]
 
-    battery_now = ha_get(f"/api/states/{SOC_SENSOR}")["state"]
+    battery_now = ha_get(f"/api/states/{ent['soc']}")["state"]
 
     # MILP layer: optimize the same 24 h horizon against the tariff and the
     # floating floor; advisory only. Never let it break the daily plan.
