@@ -65,3 +65,128 @@ schema:
   tariff_normal_price: float(0,1000)
   tariff_cheap_price: float(0,1000)
   tariff_cheap_windows: str
+translations:
+  ru:
+    configuration:
+      latitude:
+        name: Широта
+        description: Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды.
+      longitude:
+        name: Долгота
+        description: Координата объекта, например 34.10887.
+      time_zone:
+        name: Часовой пояс
+        description: Имя из базы IANA, например Europe/Istanbul. Все окна и зоны считаются по местному времени.
+      capacity_kwh:
+        name: Ёмкость батареи, кВт·ч
+        description: Полная номинальная ёмкость АКБ. Например 32 для 32 кВт·ч.
+      min_soc:
+        name: Минимальный SOC
+        description: Нижняя граница заряда в долях (0.10 = 10%). Ниже неё планировщик не опустит батарею.
+      max_soc:
+        name: Максимальный SOC
+        description: Верхняя граница заряда в долях (1.00 = 100%).
+      discharge_efficiency:
+        name: КПД разряда
+        description: Доля энергии, доходящей до нагрузки при разряде (0.95 = 95%).
+      charge_efficiency:
+        name: КПД заряда
+        description: Доля энергии, доходящая до батареи при заряде (0.95 = 95%).
+      max_charge_kw:
+        name: Макс. мощность заряда, кВт
+        description: Ограничение инвертора на заряд АКБ. Например 5.
+      max_discharge_kw:
+        name: Макс. мощность разряда, кВт
+        description: Ограничение инвертора на разряд АКБ. Например 5.
+      floor_input_entity:
+        name: Сущность текущего порога SOC
+        description: input_number, где хранится нижний порог SOC инвертора в процентах, например input_number.deye_soc_backup.
+      run_time:
+        name: Время ежедневного расчёта
+        description: ЧЧ:ММ по местному времени. Расчёт и уведомление выполняются раз в день в этот момент.
+      notifications:
+        name: Уведомления
+        description: Показывать итог расчёта уведомлением в Home Assistant.
+      retrain_enabled:
+        name: Автоматическое переобучение
+        description: Модели прогноза дообучаются на данных объекта с заданным интервалом. Кнопка переобучения в панели работает независимо от этого переключателя.
+      retrain_interval_days:
+        name: Интервал переобучения, дней
+        description: Как часто модели переобучаются автоматически (1–30).
+      optimizer_enabled:
+        name: MILP-оптимизатор
+        description: Суточный оптимальный план заряда/разряда с тарифами и целевыми SOC зон TOU. Если выключен — действует только эвристика пола SOC.
+      tariff_enabled:
+        name: Ночной дешёвый тариф
+        description: Включите, если электричество дешевле в заданные часы — оптимизатор будет заряжать АКБ из сети в дешёвое окно и разряжать в дорогое.
+      tariff_normal_price:
+        name: Обычная цена
+        description: Цена кВт·ч вне дешёвых окон, в вашей валюте. Можно в относительных единицах — важно соотношение с дешёвой ценой.
+      tariff_cheap_price:
+        name: Дешёвая цена
+        description: Цена кВт·ч внутри дешёвых окон.
+      tariff_cheap_windows:
+        name: Окна дешёвого тарифа
+        description: Местное время, ЧЧ:ММ-ЧЧ:ММ; несколько окон через запятую. Окно может переходить через полночь, например 23:00-07:00, 13:00-15:00.
+  en:
+    configuration:
+      latitude:
+        name: Latitude
+        description: Site coordinate, e.g. 44.94892. Used for solar geometry and weather.
+      longitude:
+        name: Longitude
+        description: Site coordinate, e.g. 34.10887.
+      time_zone:
+        name: Time zone
+        description: IANA name, e.g. Europe/Istanbul. All windows and zones use local time.
+      capacity_kwh:
+        name: Battery capacity, kWh
+        description: Full nominal battery capacity, e.g. 32.
+      min_soc:
+        name: Minimum SOC
+        description: Lower state-of-charge bound as a fraction (0.10 = 10%). The planner never discharges below it.
+      max_soc:
+        name: Maximum SOC
+        description: Upper state-of-charge bound as a fraction (1.00 = 100%).
+      discharge_efficiency:
+        name: Discharge efficiency
+        description: Share of battery energy reaching the loads (0.95 = 95%).
+      charge_efficiency:
+        name: Charge efficiency
+        description: Share of input energy stored in the battery (0.95 = 95%).
+      max_charge_kw:
+        name: Max charge power, kW
+        description: Inverter charge limit for the battery, e.g. 5.
+      max_discharge_kw:
+        name: Max discharge power, kW
+        description: Inverter discharge limit for the battery, e.g. 5.
+      floor_input_entity:
+        name: Current floor SOC entity
+        description: input_number holding the inverter's lower SOC threshold in percent, e.g. input_number.deye_soc_backup.
+      run_time:
+        name: Daily run time
+        description: HH:MM local. The plan and notification are produced once a day at this time.
+      notifications:
+        name: Notifications
+        description: Show the plan summary as a Home Assistant notification.
+      retrain_enabled:
+        name: Automatic retraining
+        description: Forecast models retrain on site data at the configured interval. The panel retrain button works regardless.
+      retrain_interval_days:
+        name: Retrain interval, days
+        description: How often models retrain automatically (1-30).
+      optimizer_enabled:
+        name: MILP optimizer
+        description: Optimal day-ahead charge/discharge plan with tariffs and per-zone TOU SOC targets. When off, only the SOC floor heuristic runs.
+      tariff_enabled:
+        name: Cheap night tariff
+        description: Enable if electricity is cheaper during set hours — the optimizer will charge from the grid in cheap windows and discharge in expensive ones.
+      tariff_normal_price:
+        name: Normal price
+        description: Price per kWh outside cheap windows, in your currency. Relative values are fine — the ratio to the cheap price is what matters.
+      tariff_cheap_price:
+        name: Cheap price
+        description: Price per kWh inside cheap windows.
+      tariff_cheap_windows:
+        name: Cheap tariff windows
+        description: Local time, HH:MM-HH:MM; several windows comma-separated. A window may wrap midnight, e.g. 23:00-07:00, 13:00-15:00.
