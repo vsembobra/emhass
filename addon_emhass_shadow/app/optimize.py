@@ -9,6 +9,7 @@ Shadow mode: results are advisory only, nothing is written to the inverter.
 """
 
 import logging
+import math
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -170,13 +171,17 @@ def zone_targets(
     soc_opt: list[float], soc_init: float, programs: list[dict],
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
 ) -> list[dict]:
-    """Target SOC per TOU zone: the optimal SOC at the END of the zone's window.
+    """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
+    both the discharge floor AND the grid-charge target inside the window.
 
-    Deye semantics: a zone's Batt% is the level the battery is driven toward
-    during the window (charged up to with grid charge on, discharged down to
-    otherwise), so the meaningful setpoint is where the optimal trajectory
-    wants the SOC when the window closes — the start of the next zone, or
-    the horizon end for the zone that runs past the last solved hour.
+    Asymmetric rounding to the inverter's 5 % step:
+    - charging window (SOC rises across it, e.g. cheap night hours) → the
+      end-of-window SOC rounded UP — this is the charge target;
+    - discharging/holding window → the minimum SOC inside the window rounded
+      DOWN — a pure floor that never sits above the actual SOC, so it can
+      neither block planned discharge nor trigger charging at expensive
+      prices (a value above the real SOC makes the inverter grid-charge
+      toward it).
     """
     matches = {}
     for program in programs:
@@ -187,25 +192,34 @@ def zone_targets(
         )
         matches[program["n"]] = match
     starts_idx = sorted(i for i in matches.values() if i is not None)
+
+    def clamp_pct(soc: float) -> float:
+        return min(max(soc, min_soc), max_soc) * 100.0
+
     targets = []
     for program in programs:
         match = matches[program["n"]]
         if match is None:
             targets.append({**program, "optimal_soc_pct": None})
             continue
-        # Next zone start in cyclic horizon order; a zone crossing the
-        # horizon edge (e.g. 00:00-07:00 when the horizon starts at 01:00)
-        # wraps around and ends at the earliest start index.
+        # Window runs from this zone's start to the next zone start in cyclic
+        # horizon order; a zone crossing the horizon edge (e.g. 00:00-07:00
+        # when the horizon starts at 01:00) wraps around to the earliest one.
         later = [i for i in starts_idx if i > match]
-        if later:
-            soc = soc_opt[later[0] - 1]
-        elif starts_idx:
-            nxt = starts_idx[0]
-            soc = soc_init if nxt == 0 else soc_opt[nxt - 1]
+        end = later[0] if later else (starts_idx[0] if starts_idx else len(soc_opt))
+        if end > match:
+            window = list(range(match, end))
         else:
-            soc = soc_opt[-1]
-        soc = min(max(soc, min_soc), max_soc)
-        targets.append({**program, "optimal_soc_pct": round(soc * 20) * 5})
+            window = list(range(match, len(soc_opt))) + list(range(0, end))
+        entry_soc = soc_init if match == 0 else soc_opt[match - 1]
+        end_soc = soc_init if end == 0 else soc_opt[end - 1]
+        if not window:
+            window = [match]
+        if end_soc > entry_soc + 0.005:
+            pct = math.ceil(clamp_pct(end_soc) / 5.0) * 5
+        else:
+            pct = math.floor(clamp_pct(min(soc_opt[i] for i in window)) / 5.0) * 5
+        targets.append({**program, "optimal_soc_pct": pct})
     return targets
 
 
