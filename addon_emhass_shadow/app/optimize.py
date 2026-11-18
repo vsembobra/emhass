@@ -163,18 +163,31 @@ def zone_targets(
     soc_opt: list[float], soc_init: float, programs: list[dict],
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
 ) -> list[dict]:
-    """Target SOC per TOU zone: the optimal SOC at the zone's start hour."""
-    targets = []
+    """Target SOC per TOU zone: the optimal SOC at the END of the zone's window.
+
+    Deye semantics: a zone's Batt% is the level the battery is driven toward
+    during the window (charged up to with grid charge on, discharged down to
+    otherwise), so the meaningful setpoint is where the optimal trajectory
+    wants the SOC when the window closes — the start of the next zone, or
+    the horizon end for the zone that runs past the last solved hour.
+    """
+    matches = {}
     for program in programs:
         hour = int(program["from"][:2])
         match = next(
             (i for i in range(len(starts)) if starts[i].tz_convert(tz).hour == hour),
             None,
         )
+        matches[program["n"]] = match
+    starts_idx = sorted(i for i in matches.values() if i is not None)
+    targets = []
+    for program in programs:
+        match = matches[program["n"]]
         if match is None:
             targets.append({**program, "optimal_soc_pct": None})
             continue
-        soc = soc_init if match == 0 else soc_opt[match - 1]
+        later = [i for i in starts_idx if i > match]
+        soc = soc_opt[later[0] - 1] if later else soc_opt[-1]
         soc = min(max(soc, min_soc), max_soc)
         targets.append({**program, "optimal_soc_pct": round(soc * 20) * 5})
     return targets
