@@ -550,6 +550,13 @@ def _fallback_pv_forecast(
     return list(p10), list(p50), list(p90)
 
 
+def _soc_bounds(opts: dict) -> tuple[float, float]:
+    """Percent keys (min_soc_pct) win; pre-0.7 fraction keys still work."""
+    if "min_soc_pct" in opts:
+        return float(opts["min_soc_pct"]) / 100.0, float(opts["max_soc_pct"]) / 100.0
+    return float(opts["min_soc"]), float(opts["max_soc"])
+
+
 def run() -> dict:
     opts = options()
     ent = resolve_entities(opts)
@@ -623,8 +630,8 @@ def run() -> dict:
     settings = ReserveSettings(
         nominal_capacity_kwh=opts["capacity_kwh"],
         soh=1.0,
-        floor_soc=opts["min_soc"],
-        max_soc=opts["max_soc"],
+        floor_soc=_soc_bounds(opts)[0],
+        max_soc=_soc_bounds(opts)[1],
         discharge_efficiency=opts["discharge_efficiency"],
         cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
         cold_start_hours=2.0,
@@ -744,8 +751,8 @@ def run() -> dict:
             for p in programs:
                 if p.get("recommended_soc_pct") is not None:
                     zone_pct[p["n"]] = p["recommended_soc_pct"]
-        min_pct = int(round(float(opts["min_soc"]) * 100))
-        max_pct = int(round(float(opts["max_soc"]) * 100))
+        min_pct = int(round(_soc_bounds(opts)[0] * 100))
+        max_pct = int(round(_soc_bounds(opts)[1] * 100))
         for p in programs:
             target = zone_pct.get(p["n"])
             if target is None:

@@ -54,13 +54,20 @@ def tariff_prices(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[fl
     return prices
 
 
+def soc_bounds(opts: dict) -> tuple[float, float]:
+    """SOC bounds as fractions; accepts percent keys (min_soc_pct) and the
+    pre-0.7 fraction keys (min_soc) so existing configs keep working."""
+    if "min_soc_pct" in opts:
+        return float(opts["min_soc_pct"]) / 100.0, float(opts["max_soc_pct"]) / 100.0
+    return float(opts["min_soc"]), float(opts["max_soc"])
+
+
 def _build_optimization(opts: dict, tz_name: str, battery_off: bool) -> Optimization:
     logger = logging.getLogger("emhass_shadow.optimize")
     logger.handlers = []
     logger.addHandler(logging.NullHandler())
 
-    min_soc = float(opts["min_soc"])
-    max_soc = float(opts["max_soc"])
+    min_soc, max_soc = soc_bounds(opts)
     charge_w = 0.0 if battery_off else float(opts["max_charge_kw"]) * 1000.0
     discharge_w = 0.0 if battery_off else float(opts["max_discharge_kw"]) * 1000.0
 
@@ -221,7 +228,7 @@ def run_plan(
     """
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
-    min_soc, max_soc = float(opts["min_soc"]), float(opts["max_soc"])
+    min_soc, max_soc = soc_bounds(opts)
     prices = tariff_prices(starts, tz, opts)
     pv_w = np.maximum(np.asarray(pv_p50_kw, dtype=float), 0.0) * 1000.0
     load_w = np.maximum(np.asarray(load_p50_kw, dtype=float), 0.0) * 1000.0

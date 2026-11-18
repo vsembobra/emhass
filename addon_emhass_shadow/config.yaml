@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.6.2"
+version: "0.7.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -31,8 +31,8 @@ options:
   panel_kwp: 7.0
   panel_tilt_deg: 26.0
   panel_azimuth_deg: 195.0
-  min_soc: 0.10
-  max_soc: 1.00
+  min_soc_pct: 10.0
+  max_soc_pct: 100.0
   discharge_efficiency: 0.95
   charge_efficiency: 0.95
   max_charge_kw: 5.0
@@ -70,8 +70,8 @@ schema:
   panel_kwp: float(0.5,100)
   panel_tilt_deg: float(0,90)
   panel_azimuth_deg: float(0,360)
-  min_soc: float(0,0.5)
-  max_soc: float(0.5,1)
+  min_soc_pct: float(0,50)
+  max_soc_pct: float(50,100)
   discharge_efficiency: float(0.5,1)
   charge_efficiency: float(0.5,1)
   max_charge_kw: float(0.5,50)
@@ -125,12 +125,12 @@ translations:
       panel_azimuth_deg:
         name: Азимут панелей, градусы
         description: "Куда смотрят панели: 180 = строго на юг, 90 = восток, 270 = запад. 15° западнее юга = 195."
-      min_soc:
-        name: Минимальный SOC
-        description: Нижняя граница заряда в долях (0.10 = 10%). Ниже неё планировщик не опустит батарею.
-      max_soc:
-        name: Максимальный SOC
-        description: Верхняя граница заряда в долях (1.00 = 100%).
+      min_soc_pct:
+        name: Минимальный SOC, %
+        description: Абсолютное дно разряда в процентах (25 = не разряжать ниже 25%). Резерв отключений может держать пол выше — этот параметр лишь жёсткая нижняя граница.
+      max_soc_pct:
+        name: Максимальный SOC, %
+        description: До скольки процентов разрешено заряжать батарею (100 = полностью).
       discharge_efficiency:
         name: КПД разряда
         description: Доля энергии, доходящей до нагрузки при разряде (0.95 = 95%).
@@ -241,12 +241,12 @@ translations:
       panel_azimuth_deg:
         name: Panel azimuth, degrees
         description: "Facing direction: 180 = due south, 90 = east, 270 = west. 15 degrees west of south = 195."
-      min_soc:
-        name: Minimum SOC
-        description: Lower state-of-charge bound as a fraction (0.10 = 10%). The planner never discharges below it.
-      max_soc:
-        name: Maximum SOC
-        description: Upper state-of-charge bound as a fraction (1.00 = 100%).
+      min_soc_pct:
+        name: Minimum SOC, %
+        description: Absolute discharge floor in percent (25 = never discharge below 25%). The outage reserve may hold the floor higher — this is only the hard lower bound.
+      max_soc_pct:
+        name: Maximum SOC, %
+        description: How far the battery may be charged, in percent (100 = full).
       discharge_efficiency:
         name: Discharge efficiency
         description: Share of battery energy reaching the loads (0.95 = 95%).
