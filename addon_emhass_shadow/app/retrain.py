@@ -23,7 +23,7 @@ from pathlib import Path
 import pandas as pd
 
 from emhass.load_quantiles import LoadQuantileBundle
-from emhass.pv_quantiles import PvQuantileBundle, plane_power_kw
+from emhass.pv_quantiles import PvGeometry, PvQuantileBundle, plane_power_kw
 
 DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
 SHARE = Path(os.environ.get("EMHASS_SHADOW_SHARE", "/share/emhass_shadow"))
@@ -118,7 +118,12 @@ def _swap_in(tmp: Path, final: Path) -> None:
 
 def _retrain_load(audit: pd.DataFrame) -> dict:
     final = MODELS / "load_quantiles_v1"
-    current = LoadQuantileBundle.load(final)  # reuse its feature config
+    if (final / "bundle.json").exists():
+        current = LoadQuantileBundle.load(final)
+        config, seasonal = current.config, current.seasonal
+    else:
+        # Fresh install: fit from scratch on whatever history has accrued.
+        config, seasonal = None, None
     grid = pd.DataFrame(index=audit.index)
     grid["temp_air_observed_c"] = pd.to_numeric(audit["temp_air_observed_c"], errors="coerce")
     load = pd.to_numeric(audit["load_kw"], errors="coerce")
@@ -127,7 +132,9 @@ def _retrain_load(audit: pd.DataFrame) -> dict:
     grid["load_kw"] = load.where(audit["load_filter"] == "keep")
     split = grid.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS)
     train, calib = grid.loc[:split], grid.loc[split + pd.Timedelta(hours=1) :]
-    bundle = LoadQuantileBundle.fit(train, config=current.config, seasonal=current.seasonal)
+    if train["load_kw"].notna().sum() < 48:
+        train, calib = grid, grid.loc[grid.index[-24:]]
+    bundle = LoadQuantileBundle.fit(train, config=config, seasonal=seasonal)
     if calib["load_kw"].notna().sum() >= 24:
         bundle.calibrate(calib)
     tmp = final.with_name(final.name + ".new")
@@ -190,10 +197,27 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
 
 def _retrain_pv(audit: pd.DataFrame, site: dict) -> dict:
     final = MODELS / "pv_quantiles_v1"
-    current = PvQuantileBundle.load(final)  # reuse confirmed site geometry
+    if (final / "bundle.json").exists():
+        current = PvQuantileBundle.load(final)  # reuse confirmed site geometry
+        geometry = current.geometry
+        ratio_max = current.ratio_max
+        min_clearsky = current.min_clearsky_kw
+    else:
+        # Fresh install: start from the panel parameters in the add-on
+        # options; weekly retraining refines the ratio model on real data.
+        geometry = PvGeometry(
+            float(site["latitude"]),
+            float(site["longitude"]),
+            float(site["panel_tilt_deg"]),
+            float(site["panel_azimuth_deg"]),
+            float(site["panel_kwp"]),
+            estimated_from_data=True,
+        )
+        ratio_max = 1.2
+        min_clearsky = 0.1
     weather = _ensure_weather_history(site, audit.index[0])
     poa = plane_power_kw(
-        current.geometry,
+        geometry,
         weather.index,
         weather["shortwave_radiation_previous_day1"],
         weather["direct_normal_irradiance_previous_day1"],
@@ -209,11 +233,14 @@ def _retrain_pv(audit: pd.DataFrame, site: dict) -> dict:
     frame["pv_measured_kw"] = frame["pv_measured_kw"].where(frame["poa_forecast_kw"].notna())
     split = frame.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS)
     train, calib = frame.loc[:split], frame.loc[split + pd.Timedelta(hours=1) :]
+    # Fresh install with a short audit: fit on everything instead of failing.
+    if train["pv_measured_kw"].notna().sum() < 48:
+        train, calib = frame, frame.loc[frame.index[-24:]]
     bundle = PvQuantileBundle.fit(
         train,
-        current.geometry,
-        ratio_max=current.ratio_max,
-        min_clearsky_kw=current.min_clearsky_kw,
+        geometry,
+        ratio_max=ratio_max,
+        min_clearsky_kw=min_clearsky,
     )
     try:
         bundle.calibrate(calib)
@@ -249,7 +276,13 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             return retrain_status()
     if site is None:
         opts = json.loads((DATA / "options.json").read_text())
-        site = {"latitude": opts["latitude"], "longitude": opts["longitude"]}
+        site = {
+            "latitude": opts["latitude"],
+            "longitude": opts["longitude"],
+            "panel_kwp": opts.get("panel_kwp", 7.0),
+            "panel_tilt_deg": opts.get("panel_tilt_deg", 26.0),
+            "panel_azimuth_deg": opts.get("panel_azimuth_deg", 195.0),
+        }
     result = {"started_utc": datetime.now(UTC).isoformat(), "models": {}}
     try:
         audit = _audit_frame()

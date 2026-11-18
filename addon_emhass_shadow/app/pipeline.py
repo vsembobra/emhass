@@ -28,7 +28,12 @@ from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
 from emhass.outage_log import OutageEvent, read_events, record_observation_csv
 from emhass.outage_risk import outage_risk_profile
-from emhass.pv_quantiles import PvQuantileBundle, plane_power_kw
+from emhass.pv_quantiles import (
+    PvGeometry,
+    PvQuantileBundle,
+    clear_sky_power_kw,
+    plane_power_kw,
+)
 from emhass.reserve import LoadObservation, ReserveSettings, calculate_reserve
 
 DATA = Path("/data")
@@ -270,11 +275,17 @@ def build_audit_rows(history, hours, latitude, longitude, ent):
 
 def update_audit(site, ent) -> tuple[pd.DataFrame, int]:
     audit_path = DATA / "hourly_audit.jsonl"
-    audit = pd.read_json(audit_path, lines=True)
-    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
-    audit = audit.set_index("start_utc").sort_index()
-    last = audit.index[-1]
     now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    if audit_path.exists():
+        audit = pd.read_json(audit_path, lines=True)
+        audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
+        audit = audit.set_index("start_utc").sort_index()
+        last = audit.index[-1]
+    else:
+        # Fresh install: no audit yet, backfill the last 24 h so the very
+        # first run already produces a plan.
+        audit = pd.DataFrame()
+        last = now_hour - timedelta(hours=24)
     if last >= now_hour - timedelta(hours=1):
         return audit, 0
     hours = []
@@ -483,6 +494,62 @@ def _retrain_note() -> str | None:
     )
 
 
+def _fallback_load_prediction(audit: pd.DataFrame, starts: pd.DatetimeIndex, tz) -> pd.DataFrame:
+    """Persistence forecast for fresh installs before the models exist.
+
+    Same-local-hour mean of clean audit history; a flat 0.5 kW when there is
+    no history at all. Bands are deliberately wide (±40/50 %) so downstream
+    planning stays conservative until LightGBM takes over.
+    """
+    hist = audit["load_kw"].where(audit["load_filter"] == "keep").dropna()
+    if len(hist):
+        by_hour = hist.groupby(hist.index.tz_convert(tz).hour).mean()
+        p50 = np.array(
+            [float(by_hour.get(s.tz_convert(tz).hour, np.nan)) for s in starts]
+        )
+        p50 = np.where(np.isnan(p50), float(hist.mean()), p50)
+    else:
+        p50 = np.full(len(starts), 0.5)
+    return pd.DataFrame(
+        {
+            "load_p10_kw": p50 * 0.6,
+            "load_p50_kw": p50,
+            "load_p90_kw": p50 * 1.5,
+        },
+        index=starts,
+    )
+
+
+def _site_pv_geometry(opts: dict) -> PvGeometry:
+    return PvGeometry(
+        float(opts["latitude"]),
+        float(opts["longitude"]),
+        float(opts["panel_tilt_deg"]),
+        float(opts["panel_azimuth_deg"]),
+        float(opts["panel_kwp"]),
+    )
+
+
+def _fallback_pv_forecast(
+    starts: pd.DatetimeIndex, opts: dict, weather: pd.DataFrame | None
+) -> tuple[list, list, list]:
+    """Clear-sky derated by cloud cover; zeros when even that is impossible."""
+    try:
+        clearsky = clear_sky_power_kw(_site_pv_geometry(opts), starts).to_numpy()
+    except Exception:
+        zeros = [0.0] * len(starts)
+        return zeros, zeros, zeros
+    if weather is not None and "cloud_cover" in weather:
+        cloud = weather["cloud_cover"].reindex(starts).to_numpy(dtype=float)
+        factor = np.where(np.isnan(cloud), 0.5, 1.0 - 0.75 * cloud / 100.0)
+    else:
+        factor = np.full(len(starts), 0.5)
+    p50 = clearsky * factor
+    p10 = p50 * 0.3
+    p90 = clearsky * 0.85
+    return list(p10), list(p50), list(p90)
+
+
 def run() -> dict:
     opts = options()
     ent = resolve_entities(opts)
@@ -499,35 +566,49 @@ def run() -> dict:
     issue = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     starts = pd.date_range(issue, periods=HORIZON_HOURS, freq="h")
 
-    load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
-    grid = audit[["temp_air_observed_c", "load_kw"]].copy()
-    grid = grid.reindex(grid.index.union(starts))
-    load_prediction = load_bundle.predict(grid, issue_time=issue).loc[starts]
+    models_learning = False
+    try:
+        load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
+        grid = audit[["temp_air_observed_c", "load_kw"]].copy()
+        grid = grid.reindex(grid.index.union(starts))
+        load_prediction = load_bundle.predict(grid, issue_time=issue).loc[starts]
+    except (OSError, ValueError, KeyError):
+        models_learning = True
+        load_prediction = _fallback_load_prediction(audit, starts, tz)
 
-    pv_bundle = PvQuantileBundle.load(DATA / "models" / "pv_quantiles_v1")
+    pv_bundle = None
+    try:
+        pv_bundle = PvQuantileBundle.load(DATA / "models" / "pv_quantiles_v1")
+    except (OSError, ValueError):
+        models_learning = True
     try:
         weather, weather_name, weather_stale = archive_weather(site)
-        poa = plane_power_kw(
-            pv_bundle.geometry,
-            weather.index,
-            weather["shortwave_radiation"],
-            weather["direct_normal_irradiance"],
-            weather["diffuse_radiation"],
-        )
-        pv_frame = pd.DataFrame(
-            {
-                "pv_measured_kw": np.nan,
-                "poa_forecast_kw": poa,
-                "cloud_cover_pct": weather["cloud_cover"],
-                "temp_air_c": weather["temperature_2m"],
-            }
-        ).reindex(starts)
-        pv_prediction = pv_bundle.predict(pv_frame)
-        pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
-        pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
-        pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
+        if pv_bundle is not None:
+            poa = plane_power_kw(
+                pv_bundle.geometry,
+                weather.index,
+                weather["shortwave_radiation"],
+                weather["direct_normal_irradiance"],
+                weather["diffuse_radiation"],
+            )
+            pv_frame = pd.DataFrame(
+                {
+                    "pv_measured_kw": np.nan,
+                    "poa_forecast_kw": poa,
+                    "cloud_cover_pct": weather["cloud_cover"],
+                    "temp_air_c": weather["temperature_2m"],
+                }
+            ).reindex(starts)
+            pv_prediction = pv_bundle.predict(pv_frame)
+            pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
+            pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
+            pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(HORIZON_HOURS)]
+        else:
+            pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts, opts, weather)
         pv_day = {
-            q: round(float(pv_prediction[f"pv_{q}_kw"].sum()), 2) for q in ("p10", "p50", "p90")
+            "p10": round(float(np.sum(pv_p10)), 2),
+            "p50": round(float(np.sum(pv_p50)), 2),
+            "p90": round(float(np.sum(pv_p90)), 2),
         }
     except OSError:
         # No internet and no archived vintage at all: assume zero solar, the
@@ -545,7 +626,7 @@ def run() -> dict:
         floor_soc=opts["min_soc"],
         max_soc=opts["max_soc"],
         discharge_efficiency=opts["discharge_efficiency"],
-        cold_start_kw=float(critical.quantile(0.9)),
+        cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
         cold_start_hours=2.0,
         window_days=14.0,
         quantile=0.9,
@@ -794,6 +875,11 @@ def run() -> dict:
             lines.append("• Инвертор: все целевые SOC совпадают с текущими — записей не было")
         if apply_errors:
             lines.append(f"• Ошибка записи: {', '.join(apply_errors)}")
+    if models_learning:
+        lines.append(
+            "• Модели прогноза ещё обучаются на данных этого объекта — "
+            "пока используется упрощённый прогноз; точность вырастет через несколько дней"
+        )
     if weather_stale and weather_name is not None:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
@@ -812,6 +898,7 @@ def run() -> dict:
             "grid_transitions_recorded": new_transitions,
             "weather_archive": weather_name,
             "weather_stale": weather_stale,
+            "models_learning": models_learning,
         },
         "hourly": {
             "starts_utc": [s.isoformat() for s in starts],

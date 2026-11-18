@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.5.0"
+version: "0.6.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -28,6 +28,9 @@ options:
   longitude: 34.10887
   time_zone: Europe/Istanbul
   capacity_kwh: 32.0
+  panel_kwp: 7.0
+  panel_tilt_deg: 26.0
+  panel_azimuth_deg: 195.0
   min_soc: 0.10
   max_soc: 1.00
   discharge_efficiency: 0.95
@@ -64,6 +67,9 @@ schema:
   longitude: float(-180,180)
   time_zone: str
   capacity_kwh: float(1,200)
+  panel_kwp: float(0.5,100)
+  panel_tilt_deg: float(0,90)
+  panel_azimuth_deg: float(0,360)
   min_soc: float(0,0.5)
   max_soc: float(0.5,1)
   discharge_efficiency: float(0.5,1)
@@ -110,6 +116,15 @@ translations:
       capacity_kwh:
         name: Ёмкость батареи, кВт·ч
         description: Полная номинальная ёмкость АКБ. Например 32 для 32 кВт·ч.
+      panel_kwp:
+        name: Мощность панелей, кВтп
+        description: Суммарная паспортная мощность солнечных панелей, например 7. Используется для прогноза солнца, пока модель не переобучилась на ваших данных.
+      panel_tilt_deg:
+        name: Наклон панелей, градусы
+        description: 0 = лежат горизонтально, 90 = вертикально. Например 26.
+      panel_azimuth_deg:
+        name: Азимут панелей, градусы
+        description: "Куда смотрят панели: 180 = строго на юг, 90 = восток, 270 = запад. 15° западнее юга = 195."
       min_soc:
         name: Минимальный SOC
         description: Нижняя граница заряда в долях (0.10 = 10%). Ниже неё планировщик не опустит батарею.
@@ -217,6 +232,15 @@ translations:
       capacity_kwh:
         name: Battery capacity, kWh
         description: Full nominal battery capacity, e.g. 32.
+      panel_kwp:
+        name: Panel capacity, kWp
+        description: Total nameplate power of the solar array, e.g. 7. Used for the PV forecast until the model has retrained on your data.
+      panel_tilt_deg:
+        name: Panel tilt, degrees
+        description: 0 = flat, 90 = vertical. E.g. 26.
+      panel_azimuth_deg:
+        name: Panel azimuth, degrees
+        description: "Facing direction: 180 = due south, 90 = east, 270 = west. 15 degrees west of south = 195."
       min_soc:
         name: Minimum SOC
         description: Lower state-of-charge bound as a fraction (0.10 = 10%). The planner never discharges below it.
