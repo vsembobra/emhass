@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.8.1"
+version: "0.8.2"
 slug: emhass_shadow
 init: false
 arch:
@@ -149,7 +149,7 @@ translations:
         description: Ограничение инвертора на разряд АКБ. Например 5.
       floor_input_entity:
         name: Сущность текущего порога SOC
-        description: input_number, где хранится нижний порог SOC инвертора в процентах, например input_number.deye_soc_backup.
+        description: input_number или number, где хранится нижний порог SOC инвертора в процентах, например input_number.deye_soc_backup или number.inverter_battery_low_soc.
       entity_load_power:
         name: Сущность — мощность нагрузки
         description: Мощность потребителей в ваттах, например sensor.inverter_load_power.
@@ -271,7 +271,7 @@ translations:
         description: Inverter discharge limit for the battery, e.g. 5.
       floor_input_entity:
         name: Current floor SOC entity
-        description: input_number holding the inverter's lower SOC threshold in percent, e.g. input_number.deye_soc_backup.
+        description: input_number or number holding the inverter's lower SOC threshold in percent, e.g. input_number.deye_soc_backup or number.inverter_battery_low_soc.
       entity_load_power:
         name: Entity — load power
         description: Consumer power in watts, e.g. sensor.inverter_load_power.

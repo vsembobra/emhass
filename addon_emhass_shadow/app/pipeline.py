@@ -765,7 +765,14 @@ def run() -> dict:
     recommended_floor = floors[0]  # binding constraint is the current hour
 
     floor_entity = ent["floor_input"]
-    current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
+    floor_warning: str | None = None
+    try:
+        current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
+    except Exception:
+        # A missing/unreadable floor entity must not kill the whole run:
+        # assume the configured minimum and say so in the report.
+        current_floor = _soc_bounds(opts)[0]
+        floor_warning = f"сущность порога SOC ({floor_entity}) недоступна"
     programs = []
     for n, (soc_entity, time_entity) in enumerate(
         zip(ent["tou_soc"], ent["tou_time"], strict=True), start=1
@@ -855,8 +862,10 @@ def run() -> dict:
         floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
         if abs(floor_target - round(current_floor * 100)) >= 5:
             try:
+                # Domain follows the entity id: number.* and input_number.*
+                # share the set_value service name but live in own domains.
                 ha_service(
-                    "input_number",
+                    ent["floor_input"].split(".", 1)[0],
                     "set_value",
                     {"entity_id": ent["floor_input"], "value": floor_target},
                 )
@@ -920,6 +929,10 @@ def run() -> dict:
         lines.append(
             f"• Завтра: нагрузка P50 {load_day2['p50']} кВт·ч, солнце P50 {pv_day2['p50']} "
             f"кВт·ч — {outlook}"
+        )
+    if floor_warning:
+        lines.append(
+            f"• Внимание: {floor_warning} — текущий порог показан как минимум SOC"
         )
     if risk_windows:
         lines.append(
