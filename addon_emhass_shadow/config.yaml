@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.7.8"
+version: "0.8.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -62,6 +62,8 @@ options:
   tariff_cheap_price: 1.0
   tariff_cheap_windows: "23:00-07:00"
   reserve_cold_start_hours: 2.0
+  reserve_pv_aware: true
+  entity_battery_soh: sensor.inverter_battery_soh
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -101,6 +103,8 @@ schema:
   tariff_cheap_price: float(0,1000)
   tariff_cheap_windows: str
   reserve_cold_start_hours: float(1,20)
+  reserve_pv_aware: bool
+  entity_battery_soh: str?
 translations:
   ru:
     configuration:
@@ -218,6 +222,12 @@ translations:
       reserve_cold_start_hours:
         name: Резерв холодного старта, часы
         description: "Базовый резерв отключений в часах работы критической нагрузки (1–20, по умолчанию 2). Это нижняя полка: она действует всегда, даже когда отключений давно не было. Чем больше значение, тем выше минимальный SOC, который аддон не позволит проедать."
+      reserve_pv_aware:
+        name: Резерв с учётом солнца
+        description: "ВКЛ: в часы, когда пессимистичный прогноз солнца перекрывает критическую нагрузку, резерв отключений на эти часы снижается (ночной резерв не меняется). ВЫКЛ: резерв одинаковый круглые сутки."
+      entity_battery_soh:
+        name: Сущность — износ батареи (SoH)
+        description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh. Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = считать батарею новой (100%)."
   en:
     configuration:
       latitude:
@@ -334,3 +344,9 @@ translations:
       reserve_cold_start_hours:
         name: Cold start reserve, hours
         description: "Baseline outage reserve in hours of critical load (1-20, default 2). This is the bottom shelf: it applies always, even after long quiet periods. Higher values raise the minimum SOC the add-on will not let the battery drain below."
+      reserve_pv_aware:
+        name: PV-aware reserve
+        description: "ON: during hours where the pessimistic solar forecast covers the critical load, the outage reserve for those hours is reduced (the night reserve is unchanged). OFF: the reserve is flat around the clock."
+      entity_battery_soh:
+        name: Entity — battery SoH
+        description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh. Used for reserve sizing and optimizer energy accounting. Empty = assume a new battery (100%)."

@@ -18,7 +18,7 @@ import pandas as pd
 
 from emhass.optimization import Optimization
 
-HOURS = 24
+DAY_HOURS = 24  # applied/reporting day; the planning horizon may be longer (MPC)
 
 
 def _cheap_windows(opts: dict) -> list[tuple[int, int]]:
@@ -77,7 +77,8 @@ def soc_bounds(opts: dict) -> tuple[float, float]:
 
 
 def _build_optimization(
-    opts: dict, tz_name: str, battery_off: bool, soc_final_reward_factor: float = 0.0
+    opts: dict, tz_name: str, battery_off: bool, soc_final_reward_factor: float = 0.0,
+    horizon_hours: int = DAY_HOURS,
 ) -> Optimization:
     logger = logging.getLogger("emhass_shadow.optimize")
     logger.handlers = []
@@ -94,7 +95,7 @@ def _build_optimization(
         "sensor_power_load_no_var_loads": "load",
     }
     optim_conf = {
-        "delta_forecast_daily": pd.Timedelta(hours=HOURS),
+        "delta_forecast_daily": pd.Timedelta(hours=horizon_hours),
         "num_threads": 0,
         "lp_solver": "HiGHS",
         "set_use_battery": True,
@@ -152,7 +153,7 @@ def _build_optimization(
         "profit",
         emhass_conf,
         logger,
-        opt_time_delta=HOURS,
+        opt_time_delta=horizon_hours,
     )
 
 
@@ -299,8 +300,11 @@ def run_plan(
     programs: list[dict],
     opts: dict,
 ) -> dict | None:
-    """Optimal 24 h plan; None when the solver cannot produce one.
+    """Optimal plan over len(starts) hours (24 or 48); None when infeasible.
 
+    With a 48 h horizon the plan is MPC-style: tomorrow's hours inform
+    today's charge/discharge, but only the first day drives zone targets,
+    the cheap-charge total and the day-1 cost figures.
     floors are the shadow pipeline's per-hour minimum SOC fractions (already
     rounded to 5 %); they are clipped into the configured battery band and
     handed to the solver as a hard end-of-step floor profile. The baseline
@@ -310,6 +314,8 @@ def run_plan(
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
     min_soc, max_soc = soc_bounds(opts)
+    horizon = len(starts)
+    day1 = min(DAY_HOURS, horizon)
     prices = tariff_prices(starts, tz, opts)
     pv_w = np.maximum(np.asarray(pv_p50_kw, dtype=float), 0.0) * 1000.0
     load_w = np.maximum(np.asarray(load_p50_kw, dtype=float), 0.0) * 1000.0
@@ -325,7 +331,8 @@ def run_plan(
     reward_factor = 0.9 * min(prices) / price_last if price_last > 0 else 0.0
 
     optimizer = _build_optimization(
-        opts, tz_name, battery_off=False, soc_final_reward_factor=reward_factor
+        opts, tz_name, battery_off=False, soc_final_reward_factor=reward_factor,
+        horizon_hours=horizon,
     )
     result = _solve(optimizer, starts, prices, pv_w, load_w, soc_init, floor_profile)
     status = str(optimizer.optim_status)
@@ -334,7 +341,7 @@ def run_plan(
         # A hard floor the forecasts cannot reach must not kill the plan:
         # retry with the flat configured minimum and mark the fallback.
         result = _solve(
-            optimizer, starts, prices, pv_w, load_w, soc_init, [min_soc] * len(starts)
+            optimizer, starts, prices, pv_w, load_w, soc_init, [min_soc] * horizon
         )
         status = str(optimizer.optim_status)
         relaxed = True
@@ -347,20 +354,33 @@ def run_plan(
     # cost_profit is revenue minus spend, so money spent is its negation.
     spent_plan = -float(result["cost_profit"].sum())
 
-    baseline = _build_optimization(opts, tz_name, battery_off=True)
+    baseline = _build_optimization(opts, tz_name, battery_off=True, horizon_hours=horizon)
     base_result = _solve(
-        baseline, starts, prices, pv_w, load_w, soc_init, [soc_init] * len(starts)
+        baseline, starts, prices, pv_w, load_w, soc_init, [soc_init] * horizon
     )
-    spent_baseline = (
-        -float(base_result["cost_profit"].sum())
-        if str(baseline.optim_status).lower() == "optimal"
-        else None
+    base_ok = str(baseline.optim_status).lower() == "optimal"
+    spent_baseline = -float(base_result["cost_profit"].sum()) if base_ok else None
+
+    # Day-1 spend: what the notification means by "today". The full-horizon
+    # figures include tomorrow's preparation (e.g. tonight's cheap charge that
+    # pays off tomorrow evening), which is why they are reported separately.
+    spent_plan_day1 = (
+        float(sum(p_grid[i] / 1000.0 * prices[i] for i in range(day1)))
+        if p_grid is not None else None
+    )
+    base_grid = (
+        [float(v) for v in base_result["P_grid_pos"]]
+        if base_ok and "P_grid_pos" in base_result else None
+    )
+    spent_baseline_day1 = (
+        float(sum(base_grid[i] / 1000.0 * prices[i] for i in range(day1)))
+        if base_grid is not None else None
     )
 
     cheap = float(opts.get("tariff_cheap_price", 1.0))
     grid_charge_kwh = 0.0
     if p_grid is not None and p_batt is not None:
-        for i in range(len(starts)):
+        for i in range(day1):  # only today's charge is actionable now
             charging = p_batt[i] < -50.0
             cheap_hour = opts.get("tariff_enabled", False) and prices[i] <= cheap + 1e-9
             if charging and cheap_hour:
@@ -369,6 +389,7 @@ def run_plan(
     return {
         "status": status,
         "floor_relaxed": relaxed,
+        "horizon_hours": horizon,
         "prices": prices,
         "soc_opt": [round(s, 4) for s in soc_opt],
         "p_grid_kw": [round(v / 1000.0, 3) for v in p_grid] if p_grid else None,
@@ -378,11 +399,21 @@ def run_plan(
         "savings": (
             round(spent_baseline - spent_plan, 2) if spent_baseline is not None else None
         ),
+        "cost_plan_day1": round(spent_plan_day1, 2) if spent_plan_day1 is not None else None,
+        "cost_baseline_day1": (
+            round(spent_baseline_day1, 2) if spent_baseline_day1 is not None else None
+        ),
+        "savings_day1": (
+            round(spent_baseline_day1 - spent_plan_day1, 2)
+            if spent_plan_day1 is not None and spent_baseline_day1 is not None else None
+        ),
         "grid_charge_kwh_cheap": round(grid_charge_kwh, 2),
         "tariff_enabled": bool(opts.get("tariff_enabled", False)),
         "day_zone_strategy": str(opts.get("day_zone_strategy", "ladder")),
+        # TOU zones live in the first day; tomorrow's half of the trajectory
+        # is context for today's decisions, not an applied target.
         "zone_targets": zone_targets(
-            soc_opt, soc_init, programs, starts, tz, min_soc, max_soc,
+            soc_opt[:day1], soc_init, programs, starts[:day1], tz, min_soc, max_soc,
             strategy=str(opts.get("day_zone_strategy", "ladder")),
             cheap_windows=_cheap_windows(opts),
         ),

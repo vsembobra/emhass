@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from math import isfinite
+from math import ceil, isfinite
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo
 
@@ -147,6 +147,40 @@ def _overlaps_local_hour(start: datetime, end: datetime, hour: int, zone: ZoneIn
             hours=1, minutes=-local.minute, seconds=-local.second, microseconds=-local.microsecond
         )
     return False
+
+
+def pv_aware_reserve(
+    reserves: Sequence[float],
+    pv_p10_kw: Sequence[float],
+    duration_hours: float,
+    discharge_efficiency: float,
+    baseline_kwh: float,
+) -> list[float]:
+    """Lower the per-hour outage reserve where pessimistic PV covers it.
+
+    For an outage starting in hour ``i`` and lasting ``duration_hours``, the
+    battery must cover the critical load only where the sun does not: the P10
+    PV energy inside the outage window is subtracted from that hour's
+    reserve. The window wraps over the sequence (the sequences are
+    day-periodic), so evening hours borrow tomorrow morning's sun. The result
+    never drops below the cold-start ``baseline_kwh`` and never exceeds the
+    input value: solar awareness only relaxes the reserve, it never raises
+    it.
+    """
+    count = len(reserves)
+    if len(pv_p10_kw) != count or count == 0:
+        raise ValueError("pv_p10_kw must match the reserve sequence length")
+    finite_number(duration_hours, "outage duration")
+    finite_number(baseline_kwh, "baseline reserve")
+    window = max(1, ceil(duration_hours))
+    pv = [max(0.0, float(value)) for value in pv_p10_kw]
+    adjusted = []
+    for i in range(count):
+        pv_energy = sum(pv[(i + k) % count] for k in range(window))
+        adjusted.append(
+            max(baseline_kwh, float(reserves[i]) - pv_energy / discharge_efficiency)
+        )
+    return adjusted
 
 
 def calculate_reserve(
