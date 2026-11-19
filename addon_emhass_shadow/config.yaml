@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.8.2"
+version: "0.8.3"
 slug: emhass_shadow
 init: false
 arch:
@@ -152,40 +152,40 @@ translations:
         description: input_number или number, где хранится нижний порог SOC инвертора в процентах, например input_number.deye_soc_backup или number.inverter_battery_low_soc.
       entity_load_power:
         name: Сущность — мощность нагрузки
-        description: Мощность потребителей в ваттах, например sensor.inverter_load_power.
+        description: "Что: мощность всех потребителей дома. Единицы: ватты. Пример: sensor.inverter_load_power. Основной ряд для прогноза нагрузки."
       entity_critical_load_power:
         name: Сущность — критическая нагрузка
-        description: Мощность резервируемых (UPS) потребителей в ваттах. По ней считается резерв на случай отключения сети.
+        description: "Что: мощность резервируемых (UPS) потребителей. Единицы: ватты. Пример: sensor.inverter_load_ups_power. По ней считается резерв на случай отключения сети."
       entity_pv_power:
         name: Сущность — мощность солнца
-        description: Мощность солнечных панелей в ваттах, например sensor.inverter_pv_power.
+        description: "Что: мощность солнечных панелей. Единицы: ватты. Пример: sensor.inverter_pv_power. Ряд для обучения модели солнечной генерации."
       entity_battery_power:
         name: Сущность — мощность батареи
-        description: "В ваттах; знак по конвенции вашей интеграции (у Deye: минус = заряд)."
+        description: "Что: мощность заряда/разряда АКБ. Единицы: ватты; знак по конвенции вашей интеграции (у Deye: минус = заряд). Пример: sensor.inverter_battery_power."
       entity_grid_power:
         name: Сущность — мощность сети
-        description: Обмен с сетью в ваттах; плюс = потребление из сети.
+        description: "Что: обмен с сетью. Единицы: ватты; плюс = потребление из сети. Пример: sensor.inverter_grid_power."
       entity_battery_soc:
         name: Сущность — заряд батареи
-        description: Текущий SOC в процентах, например sensor.inverter_battery.
+        description: "Что: текущий уровень заряда АКБ. Единицы: проценты (0–100). Пример: sensor.inverter_battery."
       entity_outdoor_temperature:
         name: Сущность — уличная температура
-        description: В °C. Улучшает прогноз нагрузки; можно указать любой уличный датчик.
+        description: "Что: температура на улице. Единицы: °C. Подойдёт любой уличный датчик. Пример: sensor.home_temperature. Улучшает прогноз нагрузки."
       entity_grid_status:
         name: Сущность — статус сети
-        description: "binary_sensor: on = сеть есть, off = отключение. По нему ведётся журнал отключений."
+        description: "Что: наличие сети. Тип: binary_sensor (on = сеть есть, off = отключение). Пример: binary_sensor.inverter_grid. По нему ведётся журнал отключений."
       entity_grid_voltage:
         name: Сущность — напряжение сети
-        description: Необязательно, можно оставить пустым. Любая фаза в вольтах. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории.
+        description: "Необязательно, можно оставить пустым. Что: напряжение любой фазы. Единицы: вольты. Пример: sensor.inverter_grid_l1_voltage. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории."
       entity_export_counter:
         name: Сущность — счётчик отдачи в сеть
-        description: Суммарная отданная энергия в кВт·ч. Нет продажи в сеть — оставьте как есть, счётчик покажет ноль.
+        description: "Что: суммарная отданная в сеть энергия. Единицы: кВт·ч (нарастающий счётчик). Пример: sensor.inverter_total_energy_export. Нет продажи в сеть — оставьте как есть, покажет ноль."
       tou_soc_entity_template:
         name: Шаблон сущностей SOC зон TOU
-        description: Шаблон с {n} вместо номера зоны (1–6), например number.inverter_program_{n}_soc.
+        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: number.inverter_program_{n}_soc разворачивается в number.inverter_program_1_soc … number.inverter_program_6_soc."
       tou_time_entity_template:
         name: Шаблон сущностей времени зон TOU
-        description: Шаблон с {n} вместо номера зоны (1–6), например time.inverter_program_{n}_time.
+        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: time.inverter_program_{n}_time разворачивается в time.inverter_program_1_time … time.inverter_program_6_time."
       run_time:
         name: Время ежедневного расчёта
         description: ЧЧ:ММ по местному времени. Расчёт и уведомление выполняются раз в день в этот момент.
@@ -274,40 +274,40 @@ translations:
         description: input_number or number holding the inverter's lower SOC threshold in percent, e.g. input_number.deye_soc_backup or number.inverter_battery_low_soc.
       entity_load_power:
         name: Entity — load power
-        description: Consumer power in watts, e.g. sensor.inverter_load_power.
+        description: "What: total house consumption power. Units: watts. Example: sensor.inverter_load_power. The main series for the load forecast."
       entity_critical_load_power:
         name: Entity — critical load power
-        description: Backup/UPS loads power in watts. Drives the outage reserve sizing.
+        description: "What: backup/UPS loads power. Units: watts. Example: sensor.inverter_load_ups_power. Drives the outage reserve sizing."
       entity_pv_power:
         name: Entity — PV power
-        description: Solar array power in watts, e.g. sensor.inverter_pv_power.
+        description: "What: solar array power. Units: watts. Example: sensor.inverter_pv_power. Training series for the solar forecast model."
       entity_battery_power:
         name: Entity — battery power
-        description: "In watts; sign follows your integration's convention (Deye: negative = charging)."
+        description: "What: battery charge/discharge power. Units: watts; sign follows your integration's convention (Deye: negative = charging). Example: sensor.inverter_battery_power."
       entity_grid_power:
         name: Entity — grid power
-        description: Grid exchange in watts; positive = importing.
+        description: "What: grid exchange. Units: watts; positive = importing. Example: sensor.inverter_grid_power."
       entity_battery_soc:
         name: Entity — battery SOC
-        description: Current state of charge in percent, e.g. sensor.inverter_battery.
+        description: "What: current battery state of charge. Units: percent (0-100). Example: sensor.inverter_battery."
       entity_outdoor_temperature:
         name: Entity — outdoor temperature
-        description: In °C. Improves the load forecast; any outdoor sensor works.
+        description: "What: outdoor temperature. Units: °C. Any outdoor sensor works. Example: sensor.home_temperature. Improves the load forecast."
       entity_grid_status:
         name: Entity — grid status
-        description: "binary_sensor: on = grid up, off = outage. Feeds the outage log."
+        description: "What: grid availability. Type: binary_sensor (on = grid up, off = outage). Example: binary_sensor.inverter_grid. Feeds the outage log."
       entity_grid_voltage:
         name: Entity — grid voltage
-        description: Optional, may be left empty. Any phase, in volts. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history.
+        description: "Optional, may be left empty. What: any phase voltage. Units: volts. Example: sensor.inverter_grid_l1_voltage. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history."
       entity_export_counter:
         name: Entity — grid export counter
-        description: Total exported energy in kWh. No feed-in? Keep the default, it will read zero.
+        description: "What: total energy exported to the grid. Units: kWh (cumulative counter). Example: sensor.inverter_total_energy_export. No feed-in? Keep the default, it will read zero."
       tou_soc_entity_template:
         name: TOU zone SOC entity template
-        description: Template with {n} for the zone number (1-6), e.g. number.inverter_program_{n}_soc.
+        description: "Template with {n} for the zone number (1-6). Example: number.inverter_program_{n}_soc expands to number.inverter_program_1_soc … number.inverter_program_6_soc."
       tou_time_entity_template:
         name: TOU zone time entity template
-        description: Template with {n} for the zone number (1-6), e.g. time.inverter_program_{n}_time.
+        description: "Template with {n} for the zone number (1-6). Example: time.inverter_program_{n}_time expands to time.inverter_program_1_time … time.inverter_program_6_time."
       run_time:
         name: Daily run time
         description: HH:MM local. The plan and notification are produced once a day at this time.
