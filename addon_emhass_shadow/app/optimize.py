@@ -76,7 +76,9 @@ def soc_bounds(opts: dict) -> tuple[float, float]:
     return float(opts["min_soc"]), float(opts["max_soc"])
 
 
-def _build_optimization(opts: dict, tz_name: str, battery_off: bool) -> Optimization:
+def _build_optimization(
+    opts: dict, tz_name: str, battery_off: bool, soc_final_reward_factor: float = 0.0
+) -> Optimization:
     logger = logging.getLogger("emhass_shadow.optimize")
     logger.handlers = []
     logger.addHandler(logging.NullHandler())
@@ -115,6 +117,7 @@ def _build_optimization(opts: dict, tz_name: str, battery_off: bool) -> Optimiza
         "end_timesteps_of_each_deferrable_load": [],
         "lp_solver_timeout": 45,
         "lp_solver_mip_rel_gap": 0.01,
+        "battery_soc_final_reward_factor": soc_final_reward_factor,
     }
     plant_conf = {
         "inverter_is_hybrid": False,
@@ -313,7 +316,17 @@ def run_plan(
     soc_init = min(max(soc_init, min_soc), max_soc)
     floor_profile = [min(max(f, min_soc), max_soc) for f in floors]
 
-    optimizer = _build_optimization(opts, tz_name, battery_off=False)
+    # Value leftover SOC just below the cheapest import: PV surplus is always
+    # worth absorbing (reward > 0), but buying grid energy merely to overshoot
+    # the terminal target never pays (reward < cheapest price). Without this
+    # the soft terminal equality is ~hard, and a sunny horizon is forced to
+    # curtail storable PV just to land exactly on the target.
+    price_last = prices[-1]
+    reward_factor = 0.9 * min(prices) / price_last if price_last > 0 else 0.0
+
+    optimizer = _build_optimization(
+        opts, tz_name, battery_off=False, soc_final_reward_factor=reward_factor
+    )
     result = _solve(optimizer, starts, prices, pv_w, load_w, soc_init, floor_profile)
     status = str(optimizer.optim_status)
     relaxed = False
