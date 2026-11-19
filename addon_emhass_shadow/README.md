@@ -63,7 +63,7 @@
 | Обмен с сетью, Вт | `sensor.inverter_grid_power` |
 | Заряд батареи, % | `sensor.inverter_battery` |
 | Статус сети | `binary_sensor.inverter_grid` |
-| Напряжение фаз L1–L3, В | `sensor.inverter_grid_l1_voltage` и т.д. |
+| Напряжение сети (любая фаза), В — необязательно | `sensor.inverter_grid_l1_voltage` |
 | Счётчик отдачи в сеть, кВт·ч | `sensor.inverter_total_energy_export` |
 | Уличная температура, °C | `sensor.home_temperature` |
 | SOC зон TOU (шаблон, 1–6) | `number.inverter_program_{n}_soc` |

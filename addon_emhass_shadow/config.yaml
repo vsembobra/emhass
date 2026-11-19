@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.7.5"
+version: "0.7.6"
 slug: emhass_shadow
 init: false
 arch:
@@ -46,9 +46,7 @@ options:
   entity_battery_soc: sensor.inverter_battery
   entity_outdoor_temperature: sensor.home_temperature
   entity_grid_status: binary_sensor.inverter_grid
-  entity_grid_l1_voltage: sensor.inverter_grid_l1_voltage
-  entity_grid_l2_voltage: sensor.inverter_grid_l2_voltage
-  entity_grid_l3_voltage: sensor.inverter_grid_l3_voltage
+  entity_grid_voltage: sensor.inverter_grid_l1_voltage
   entity_export_counter: sensor.inverter_total_energy_export
   tou_soc_entity_template: number.inverter_program_{n}_soc
   tou_time_entity_template: time.inverter_program_{n}_time
@@ -86,9 +84,7 @@ schema:
   entity_battery_soc: str
   entity_outdoor_temperature: str
   entity_grid_status: str
-  entity_grid_l1_voltage: str?
-  entity_grid_l2_voltage: str?
-  entity_grid_l3_voltage: str?
+  entity_grid_voltage: str?
   entity_export_counter: str
   tou_soc_entity_template: str
   tou_time_entity_template: str
@@ -172,15 +168,9 @@ translations:
       entity_grid_status:
         name: Сущность — статус сети
         description: "binary_sensor: on = сеть есть, off = отключение. По нему ведётся журнал отключений."
-      entity_grid_l1_voltage:
-        name: Сущность — напряжение сети L1
-        description: Необязательно, можно оставить пустым. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории. Фаза L1 в вольтах.
-      entity_grid_l2_voltage:
-        name: Сущность — напряжение сети L2
-        description: Необязательно. Фаза L2 в вольтах. Для однофазной системы укажите ту же сущность, что и L1, или оставьте пустым.
-      entity_grid_l3_voltage:
-        name: Сущность — напряжение сети L3
-        description: Необязательно. Фаза L3 в вольтах. Для однофазной системы укажите ту же сущность, что и L1, или оставьте пустым.
+      entity_grid_voltage:
+        name: Сущность — напряжение сети
+        description: Необязательно, можно оставить пустым. Любая фаза в вольтах. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории.
       entity_export_counter:
         name: Сущность — счётчик отдачи в сеть
         description: Суммарная отданная энергия в кВт·ч. Нет продажи в сеть — оставьте как есть, счётчик покажет ноль.
@@ -291,15 +281,9 @@ translations:
       entity_grid_status:
         name: Entity — grid status
         description: "binary_sensor: on = grid up, off = outage. Feeds the outage log."
-      entity_grid_l1_voltage:
-        name: Entity — grid voltage L1
-        description: Optional, may be left empty. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history. Phase L1 in volts.
-      entity_grid_l2_voltage:
-        name: Entity — grid voltage L2
-        description: Optional. Phase L2 in volts. For single-phase systems point it at the same entity as L1, or leave empty.
-      entity_grid_l3_voltage:
-        name: Entity — grid voltage L3
-        description: Optional. Phase L3 in volts. For single-phase systems point it at the same entity as L1, or leave empty.
+      entity_grid_voltage:
+        name: Entity — grid voltage
+        description: Optional, may be left empty. Any phase, in volts. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history.
       entity_export_counter:
         name: Entity — grid export counter
         description: Total exported energy in kWh. No feed-in? Keep the default, it will read zero.

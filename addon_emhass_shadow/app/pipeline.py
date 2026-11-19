@@ -74,15 +74,11 @@ def resolve_entities(opts: dict) -> dict:
         "soc": opts["entity_battery_soc"],
         "export_counter": opts["entity_export_counter"],
         "grid_binary": opts["entity_grid_status"],
-        "voltages": {
-            field: opts[key]
-            for field, key in (
-                ("grid_l1_min_v", "entity_grid_l1_voltage"),
-                ("grid_l2_min_v", "entity_grid_l2_voltage"),
-                ("grid_l3_min_v", "entity_grid_l3_voltage"),
-            )
-            if str(opts.get(key) or "").strip()
-        },
+        "voltages": (
+            {"grid_min_v": opts["entity_grid_voltage"]}
+            if str(opts.get("entity_grid_voltage") or "").strip()
+            else {}
+        ),
         "tou_soc": [
             opts["tou_soc_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
         ],
