@@ -21,6 +21,35 @@ from emhass.optimization import Optimization
 HOURS = 24
 
 
+def _cheap_windows(opts: dict) -> list[tuple[int, int]]:
+    """Parsed tariff_cheap_windows as (begin, end) minute-of-day pairs.
+
+    A window may wrap midnight ("23:00-07:00"). Unparseable chunks are
+    skipped. Used both for prices and for telling the night charge zone
+    apart from the expensive period in zone_targets.
+    """
+    windows = []
+    for chunk in str(opts.get("tariff_cheap_windows", "")).split(","):
+        chunk = chunk.strip()
+        if not chunk or "-" not in chunk:
+            continue
+        begin, end = chunk.split("-", 1)
+        try:
+            bh, bm = (int(x) for x in begin.strip().split(":"))
+            eh, em = (int(x) for x in end.strip().split(":"))
+        except ValueError:
+            continue
+        windows.append((bh * 60 + bm, eh * 60 + em))
+    return windows
+
+
+def _is_cheap_minute(minute: int, windows: list[tuple[int, int]]) -> bool:
+    return any(
+        begin <= minute < end if begin < end else minute >= begin or minute < end
+        for begin, end in windows
+    )
+
+
 def tariff_prices(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[float]:
     """Per-hour import price: cheap inside tariff_cheap_windows, normal else.
 
@@ -30,28 +59,12 @@ def tariff_prices(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[fl
     """
     normal = float(opts.get("tariff_normal_price", 1.0))
     cheap = float(opts.get("tariff_cheap_price", 1.0))
-    windows = []
-    if opts.get("tariff_enabled", False):
-        for chunk in str(opts.get("tariff_cheap_windows", "")).split(","):
-            chunk = chunk.strip()
-            if not chunk or "-" not in chunk:
-                continue
-            begin, end = chunk.split("-", 1)
-            try:
-                bh, bm = (int(x) for x in begin.strip().split(":"))
-                eh, em = (int(x) for x in end.strip().split(":"))
-            except ValueError:
-                continue
-            windows.append((bh * 60 + bm, eh * 60 + em))
+    windows = _cheap_windows(opts) if opts.get("tariff_enabled", False) else []
     prices = []
     for stamp in starts:
         local = stamp.tz_convert(tz)
         minute = local.hour * 60 + local.minute
-        is_cheap = any(
-            begin <= minute < end if begin < end else minute >= begin or minute < end
-            for begin, end in windows
-        )
-        prices.append(cheap if is_cheap else normal)
+        prices.append(cheap if _is_cheap_minute(minute, windows) else normal)
     return prices
 
 
@@ -152,13 +165,20 @@ def _solve(
     inputs = pd.DataFrame(
         {"unit_load_cost": prices, "unit_prod_price": [0.0] * len(starts)}, index=starts
     )
+    # Terminal target: the reserve level of the hour right AFTER the horizon,
+    # which in this day-periodic floor profile is floor_profile[0]. Using the
+    # last hour's floor — the daily low, "the sun will recharge anyway" —
+    # forces the solver to drain into the evening and curtail midday PV
+    # (export is closed, so the surplus has nowhere else to go). EMHASS
+    # enforces soc_final softly but at 100x the max tariff, i.e. ~hard.
+    soc_final = max(floor_profile[-1], floor_profile[0])
     return optimizer.perform_naive_mpc_optim(
         inputs,
         pd.Series(pv_w, index=starts),
         pd.Series(load_w, index=starts),
         len(starts),
         soc_init=soc_init,
-        soc_final=floor_profile[-1],
+        soc_final=soc_final,
         def_total_hours=[],
         def_total_timestep=[],
         def_start_timestep=[],
@@ -167,10 +187,35 @@ def _solve(
     )
 
 
+def _charge_target_kept(
+    window: list[int],
+    strategy: str,
+    cheap_windows: list[tuple[int, int]] | None,
+    starts: pd.DatetimeIndex,
+    tz: ZoneInfo,
+) -> bool:
+    """Whether a charging window keeps its rounded-up charge target.
+
+    Only "flat" presses charging windows, and only outside the cheap night
+    hours: with the target pressed to the flat floor the inverter cannot
+    grid-charge at peak prices when PV falls short of the plan. None means
+    the caller gave no window info — keep the target (legacy behavior).
+    """
+    if strategy != "flat" or cheap_windows is None:
+        return True
+    return all(
+        _is_cheap_minute(
+            (lambda local: local.hour * 60 + local.minute)(starts[i].tz_convert(tz)),
+            cheap_windows,
+        )
+        for i in window
+    )
+
+
 def zone_targets(
     soc_opt: list[float], soc_init: float, programs: list[dict],
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
-    strategy: str = "ladder",
+    strategy: str = "ladder", cheap_windows: list[tuple[int, int]] | None = None,
 ) -> list[dict]:
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
@@ -187,7 +232,11 @@ def zone_targets(
       trajectory, saving energy for the evening peak and outages;
     - "flat": the whole-horizon minimum SOC — one low floor everywhere, the
       battery is spent whenever loads appear.
-    Charging windows are unaffected by the strategy.
+    Charging windows are unaffected by "ladder". In "flat" a charging window
+    keeps its rounded-up target only when the whole window sits inside
+    tariff_cheap_windows (the night charge zone); a charging window in the
+    expensive period is pressed to the same flat floor, so the inverter
+    cannot grid-charge at peak prices when PV falls short of the plan.
     """
     matches = {}
     for program in programs:
@@ -220,10 +269,14 @@ def zone_targets(
         else:
             window = list(range(match, len(soc_opt))) + list(range(0, end))
         entry_soc = soc_init if match == 0 else soc_opt[match - 1]
-        end_soc = soc_init if end == 0 else soc_opt[end - 1]
+        # end == 0: the window wraps past the horizon end to the zone starting
+        # at the horizon's first step. Its true end is the last step's SOC —
+        # soc_init here would fake a rising window (today's battery level used
+        # as tomorrow's window end) and pin the zone to a bogus charge target.
+        end_soc = soc_opt[-1] if end == 0 else soc_opt[end - 1]
         if not window:
             window = [match]
-        if end_soc > entry_soc + 0.005:
+        if end_soc > entry_soc + 0.005 and _charge_target_kept(window, strategy, cheap_windows, starts, tz):
             pct = math.ceil(clamp_pct(end_soc) / 5.0) * 5
         else:
             floor_soc = min(soc_opt[i] for i in window)
@@ -318,5 +371,6 @@ def run_plan(
         "zone_targets": zone_targets(
             soc_opt, soc_init, programs, starts, tz, min_soc, max_soc,
             strategy=str(opts.get("day_zone_strategy", "ladder")),
+            cheap_windows=_cheap_windows(opts),
         ),
     }

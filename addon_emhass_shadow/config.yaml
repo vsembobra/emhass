@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.7.6"
+version: "0.7.7"
 slug: emhass_shadow
 init: false
 arch:
@@ -200,7 +200,7 @@ translations:
         description: Суточный оптимальный план заряда/разряда с тарифами и целевыми SOC зон TOU. Если выключен — действует только эвристика пола SOC.
       day_zone_strategy:
         name: Стратегия дневных зон
-        description: "ladder (лестница): пол каждой зоны следует оптимальной траектории — бережёт энергию для вечернего пика и на случай отключения. flat (плоский пол): одно минимальное значение на весь дорогой период — максимум гибкости, батарея тратится по мере появления нагрузки. На зону ночного заряда не влияет."
+        description: "ladder (лестница): пол каждой зоны следует оптимальной траектории — бережёт энергию для вечернего пика и на случай отключения. flat (плоский пол): одно минимальное значение на весь дорогой период, включая дневные зарядные окна — инвертор не будет заряжать АКБ из сети в пик, даже если солнца окажется меньше прогноза. На зону ночного заряда (окна дешёвого тарифа) не влияет."
       tariff_enabled:
         name: Ночной дешёвый тариф
         description: Включите, если электричество дешевле в заданные часы — оптимизатор будет заряжать АКБ из сети в дешёвое окно и разряжать в дорогое.
@@ -313,7 +313,7 @@ translations:
         description: Optimal day-ahead charge/discharge plan with tariffs and per-zone TOU SOC targets. When off, only the SOC floor heuristic runs.
       day_zone_strategy:
         name: Daytime zone strategy
-        description: "ladder: each zone's floor follows the optimal trajectory — saves energy for the evening peak and outage reserve. flat: one minimum value across the whole expensive period — maximum flexibility, the battery is spent as loads appear. Does not affect the night charge zone."
+        description: "ladder: each zone's floor follows the optimal trajectory — saves energy for the evening peak and outage reserve. flat: one minimum value across the whole expensive period, including daytime charging windows — the inverter will not grid-charge the battery at peak prices even if PV falls short of the plan. Does not affect the night charge zone (cheap tariff windows)."
       tariff_enabled:
         name: Cheap night tariff
         description: Enable if electricity is cheaper during set hours — the optimizer will charge from the grid in cheap windows and discharge in expensive ones.
