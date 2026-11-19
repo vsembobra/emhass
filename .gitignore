@@ -172,7 +172,9 @@ docs/EMHASS_presentation.pdf
 # DS_Store files
 */.DS_Store
 .DS_Store
-# EMHASS Shadow add-on: trained models are site-private, src/ is a deploy-time
-# copy of the repo's own src/emhass (see addon_emhass_shadow/deploy.sh)
-addon_emhass_shadow/models/
-addon_emhass_shadow/src/
+# EMHASS Shadow add-on: trained models are site-private (only a placeholder is
+# committed so the Dockerfile's COPY models/ works on fresh repo installs).
+# src/ IS committed: the add-on must build standalone when the repo is added
+# to the HA add-on store (deploy.sh re-syncs it from src/emhass each deploy).
+addon_emhass_shadow/models/*
+!addon_emhass_shadow/models/.gitkeep

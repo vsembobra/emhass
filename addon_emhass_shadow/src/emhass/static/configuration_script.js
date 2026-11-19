@@ -1,0 +1,1472 @@
+//javascript file for dynamically processing configuration page
+
+//used static files
+//param_definitions.json : stores information about parameters (E.g. their defaults, their type, and what parameter section to be in)
+//configuration_list.html : template html to act as a base for the list view. (Params get dynamically added after)
+
+//Div layout
+/* <div configuration-container>
+  <div class="section-card">
+    <div class="section-card-header"> POSSIBLE HEADER INPUT HERE WITH PARAMETER ID</div>
+    <div class="section-body">
+      <div id="PARAMETER-NAME" class="param">
+        <div class="param-input">input/s here</div>
+      </div>
+    </div>
+  </div>
+</div>; */
+
+//#610: the 15 per-battery array params in the "Battery" section (plant_conf +
+//optim_conf, see utils.py BATT_ARRAY_PARAMS_PLANT_CONF/BATT_ARRAY_PARAMS_OPTIM_CONF/
+//BATT_WEIGHT_PARAMS). Kept as an explicit list (not "every array.* param in the
+//Battery section") because number_of_batteries itself is int (not array.*), so a
+//generic filter would already exclude it - this list exists so the
+//"number_of_batteries" header case below only grows/shrinks these, never the
+//section's other array.* siblings if any get added later.
+const BATTERY_ARRAY_PARAMS = [
+  "weight_battery_discharge",
+  "weight_battery_charge",
+  "battery_discharge_power_max",
+  "battery_charge_power_max",
+  "battery_discharge_efficiency",
+  "battery_charge_efficiency",
+  "battery_nominal_energy_capacity",
+  "battery_minimum_state_of_charge",
+  "battery_maximum_state_of_charge",
+  "battery_target_state_of_charge",
+  "battery_stress_cost",
+  "battery_soc_deficit_threshold",
+  "battery_soc_deficit_cost",
+  "battery_soc_surplus_threshold",
+  "battery_soc_surplus_cost",
+];
+
+//#1116: the per-load array params in the "Deferrable Loads" section whose
+//cardinality is driven by number_of_deferrable_loads (mirrors
+//BATTERY_ARRAY_PARAMS/number_of_batteries above). heat_topology is
+//deliberately excluded - it is a single object param (input: "object"), not
+//a per-load array.* value, so it must stay exactly one input regardless of
+//number_of_deferrable_loads.
+const DEFERRABLE_ARRAY_PARAMS = [
+  "nominal_power_of_deferrable_loads",
+  "minimum_power_of_deferrable_loads",
+  "cost_forecast_per_deferrable_load",
+  "is_electric_load",
+  "operating_hours_of_each_deferrable_load",
+  "treat_deferrable_load_as_semi_cont",
+  "set_deferrable_load_single_constant",
+  "set_deferrable_startup_penalty",
+  "deferrable_load_max_cost",
+  "set_deferrable_max_startups",
+  "def_minimum_on_time",
+  "def_minimum_off_time",
+  "start_timesteps_of_each_deferrable_load",
+  "end_timesteps_of_each_deferrable_load",
+];
+
+//#1150: the per-inverter list params in the "System" section whose length is
+//driven by number_of_inverters (mirrors BATTERY_ARRAY_PARAMS/number_of_batteries
+//above). They are the same lists as INVERTER_CAP_PARAMS and
+//INVERTER_BROADCAST_PARAMS in utils.py.
+//The two power curves are left out because each is one JSON field holding the
+//whole list of curves, and the two index lists because battery_inverter_index
+//has one entry per battery and pv_plant_inverter_index one per PV plant.
+const INVERTER_CAP_PARAMS = ["inverter_ac_output_max", "inverter_ac_input_max"];
+const INVERTER_BROADCAST_PARAMS = [
+  "inverter_efficiency_dc_ac",
+  "inverter_efficiency_ac_dc",
+  "inverter_stress_cost",
+  "compute_curtailment",
+];
+const INVERTER_ARRAY_PARAMS = [...INVERTER_CAP_PARAMS, ...INVERTER_BROADCAST_PARAMS];
+//the inverter lists follow number_of_inverters only up to this count, so a typo
+//such as 1000000 cannot add millions of inputs and hang the page. The backend
+//has no upper bound on number_of_inverters; 100 matches MAX_BATTERIES in utils.py
+const INVERTER_SYNC_LIMIT = 100;
+//the two power curves, editable above one inverter whatever inverter_is_hybrid
+//says (see updateInverterCurveAccess)
+const INVERTER_CURVE_PARAMS = ["inverter_power_curve_dc_ac", "inverter_power_curve_ac_dc"];
+
+//a request still pending after this long fails with an error instead of leaving the page waiting
+//(browsers without AbortSignal.timeout keep waiting, as before)
+const REQUEST_TIMEOUT_MS = 30000;
+
+//on page reload
+window.onload = async function () {
+  ///fetch configuration parameters from definitions json file
+  let param_definitions = await getParamDefinitions();
+  //obtain configuration from emhass (pull)
+  let config = param_definitions && (await obtainConfig());
+  //obtain configuration_list.html html as a template to dynamically to render parameters in a list view (parameters as input items)
+  let list_html = config && (await getListHTML());
+  //fail closed: a failed load is not an empty configuration. Render no form, allow no save, say how to recover
+  if (!list_html) {
+    document.getElementById("save").disabled = true;
+    document.getElementById("alert-text").textContent += "\r\n\u2022 Reload the page to try again.";
+    return;
+  }
+  //load list parameter page (default)
+  loadConfigurationListView(param_definitions, config, list_html);
+
+  //add event listener to save button
+  document
+    .getElementById("save")
+    .addEventListener("click", () => saveConfiguration(param_definitions));
+
+  //add event listener to yaml button (convert yaml to json in box view)
+  document.getElementById("yaml").addEventListener("click", () => yamlToJson());
+  //hide yaml button by default (display in box view)
+  document.getElementById("yaml").style.display = "none";
+
+  //add event listener to defaults button
+  document
+    .getElementById("defaults")
+    .addEventListener("click", () =>
+      ToggleView(param_definitions, list_html, true)
+    );
+
+  //add event listener to json-toggle button (toggle between json box and list view)
+  document
+    .getElementById("json-toggle")
+    .addEventListener("click", () =>
+      ToggleView(param_definitions, list_html, false)
+    );
+};
+
+//obtain file containing information about parameters (definitions)
+//returns null when the definitions could not be obtained
+async function getParamDefinitions() {
+  try {
+    const response = await fetch(`static/data/param_definitions.json`, {
+      cache: "no-cache", //revalidate: the definitions change with the release
+      signal: AbortSignal.timeout?.(REQUEST_TIMEOUT_MS),
+    });
+    if (response.status !== 200 && response.status !== 201) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    //alert error in alert box
+    errorAlert(`Unable to obtain definitions file: ${error.message}`);
+    return null;
+  }
+}
+
+//request a configuration from emhass: the saved one or the defaults
+//returns null when it could not be obtained (never an empty config)
+async function fetchConfig(url, what) {
+  config = {};
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout?.(REQUEST_TIMEOUT_MS),
+    });
+    let response_status = response.status; //return status
+    //if request failed
+    if (response_status !== 200 && response_status !== 201) {
+      showChangeStatus(response_status, await readErrorLog(response));
+      return null;
+    }
+    //else extract json rom data
+    let blob = await response.blob(); //get data blob
+    config = await new Response(blob).json(); //obtain json from blob
+    //an empty object would render the parameter defaults as if they were the saved settings
+    if (config === null || typeof config !== "object" || Array.isArray(config) || Object.keys(config).length === 0) {
+      throw new Error("the response is not a non-empty configuration object");
+    }
+    showChangeStatus(response_status, {});
+    return config;
+  } catch (error) {
+    showChangeStatus(0, [`Unable to obtain ${what}: ${error.message}`]);
+    return null;
+  }
+}
+
+//obtain emhass config (from saved params extracted/simplified into the config format)
+async function obtainConfig() {
+  return fetchConfig(`get-config`, "the configuration");
+}
+
+//obtain emhass default config (to present the default parameters in view)
+async function ObtainDefaultConfig() {
+  return fetchConfig(`get-config/defaults`, "the default configuration");
+}
+
+//error messages of a failed response: the JSON list sent by emhass, else the HTTP status
+async function readErrorLog(response) {
+  try {
+    const log = await response.json();
+    if (Array.isArray(log) && log.length) {
+      return log;
+    }
+  } catch (error) {
+    //not JSON (e.g. a proxy error page)
+  }
+  return [`HTTP ${response.status}`];
+}
+
+//get html data from configuration_list.html (list template)
+//returns null when the template could not be obtained
+async function getListHTML() {
+  try {
+    const response = await fetch(`static/configuration_list.html`, {
+      cache: "no-cache", //revalidate: the template changes with the release
+      signal: AbortSignal.timeout?.(REQUEST_TIMEOUT_MS),
+    });
+    if (response.status !== 200 && response.status !== 201) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    let blob = await response.blob(); //get data blob
+    const html = await new Response(blob).text(); //obtain html from blob
+    //an empty template cannot render a form: report it instead of failing closed without a message
+    if (!html.trim()) {
+      throw new Error("the file is empty");
+    }
+    return html;
+  } catch (error) {
+    errorAlert(`Unable to obtain configuration_list.html file: ${error.message}`);
+    return null;
+  }
+}
+
+//load list configuration view
+function loadConfigurationListView(param_definitions, config, list_html) {
+  if (list_html == null || config == null || param_definitions == null) {
+    return 1;
+  }
+
+  //list parameters used in the section headers
+  //#610: number_of_batteries added to auto-sync the 15 per-battery array params
+  //(mirrors number_of_deferrable_loads), see the "number_of_batteries" case in headerElement
+  //(number_of_inverters is not a header input: its lists follow it through setupInverterSync)
+  let header_input_list = ["set_use_battery", "set_use_pv", "number_of_deferrable_loads", "number_of_batteries"];
+
+  //get the main container and append list template html
+  document.getElementById("configuration-container").innerHTML = list_html;
+
+  //loop through configuration sections ('Local','System','Tariff','Solar System (PV)') in definitions file
+  for (let section in param_definitions) {
+    // build each section by adding parameters with their corresponding input elements
+    buildParamContainers(
+      section,
+      param_definitions[section],
+      config,
+      header_input_list
+    );
+
+    //after sections have been built, add event listeners for section header inputs
+    //loop though headers
+    for (let header_input_param of header_input_list) {
+      if (param_definitions[section].hasOwnProperty(header_input_param)) {
+        //grab default from definitions file
+        let value = param_definitions[section][header_input_param]["default_value"];
+        //find input element (using the parameter name as the input element ID)
+        let header_input_element = document.getElementById(header_input_param);
+        if (header_input_element !== null) {
+          //add event listener to element (trigger on input change)
+          header_input_element.addEventListener("input", (e) =>
+            headerElement(e.target, param_definitions, config)
+          );
+          //check the EMHASS config to see if it contains a stored param value
+          //else keep default
+          value = checkConfigParam(value, config, header_input_param);
+          //set value of input
+          header_input_element.value = value;
+          //checkboxes (for Booleans) also set value to "checked"
+          if (header_input_element.type == "checkbox") {
+            header_input_element.checked = value;
+          }
+          //manually trigger the header parameter input event listener for setting up initial section state
+          headerElement(header_input_element, param_definitions, config);
+        }
+      }
+    }
+  }
+
+  //#1150: size the per-inverter lists to number_of_inverters
+  setupInverterSync(param_definitions, config);
+
+  // Dynamic hiding for InfluxDB options
+  const use_influx_param = "use_influxdb";
+  const influx_related_params = [
+    "influxdb_host",
+    "influxdb_port",
+    "influxdb_username",
+    "influxdb_password",
+    "influxdb_database",
+    "influxdb_measurement",
+    "influxdb_retention_policy",
+    "influxdb_use_ssl",
+    "influxdb_verify_ssl"
+  ];
+
+  const influx_toggle_div = document.getElementById(use_influx_param);
+  if (influx_toggle_div) {
+    // The actual input is inside the div with the ID
+    const influx_input = influx_toggle_div.querySelector("input");
+    if (influx_input) {
+      const toggleInfluxVisibility = () => {
+        const isChecked = influx_input.checked;
+        influx_related_params.forEach(paramId => {
+          const paramDiv = document.getElementById(paramId);
+          if (paramDiv) {
+            paramDiv.style.display = isChecked ? "" : "none";
+          }
+        });
+      };
+
+      // Add listener and set initial state
+      influx_input.addEventListener("change", toggleInfluxVisibility);
+      toggleInfluxVisibility();
+    }
+  }
+
+  // ML Forecaster Visibility Logic
+  const forecast_method_param = "load_forecast_method";
+  const ml_related_params = [
+    "model_type",
+    "var_model",
+    "sklearn_model",
+    "regression_model",
+    "num_lags",
+    "split_date_delta",
+    "n_trials",
+    "perform_backtest"
+  ];
+
+  const forecast_method_div = document.getElementById(forecast_method_param);
+  if (forecast_method_div) {
+    const method_select = forecast_method_div.querySelector("select, input");
+    if (method_select) {
+      const toggleMLVisibility = () => {
+        const isML = method_select.value === "mlforecaster";
+        ml_related_params.forEach(paramId => {
+          const paramDiv = document.getElementById(paramId);
+          if (paramDiv) {
+            paramDiv.style.display = isML ? "" : "none";
+          }
+        });
+      };
+      // Add listener and set initial state
+      method_select.addEventListener("change", toggleMLVisibility);
+      method_select.addEventListener("input", toggleMLVisibility); // Handle both select and text input types
+      toggleMLVisibility();
+    }
+  }
+}
+
+//build sections body, containing parameter/param containers (containing parameter/param inputs)
+function buildParamContainers(
+  section,
+  section_parameters_definitions,
+  config,
+  header_input_list
+) {
+  //get the section container element
+  let SectionContainer = document.getElementById(section);
+  //get the body container inside the section (where the parameters will be appended)
+  let SectionParamElement = SectionContainer.getElementsByClassName("section-body");
+  if (SectionContainer == null || SectionParamElement.length == 0) {
+    console.error("Unable to find Section container or Section Body");
+    return 0;
+  }
+
+  //loop though the sections parameters in definition file, generate and append param (div) elements for the section
+  for (const [
+    parameter_definition_name,
+    parameter_definition_object,
+  ] of Object.entries(section_parameters_definitions)) {
+    //check parameter definitions have the required key values
+    if (
+      !("friendly_name" in parameter_definition_object) ||
+      !("Description" in parameter_definition_object) ||
+      !("input" in parameter_definition_object) ||
+      !("default_value" in parameter_definition_object)
+    ) {
+      console.log(
+        parameter_definition_name +
+          " is missing some required values in the definitions file"
+      );
+      continue;
+    }
+    if (
+      parameter_definition_object["input"] === "select" &&
+      !("select_options" in parameter_definition_object)
+    ) {
+      console.log(
+        parameter_definition_name +
+          " is missing select_options values in the definitions file"
+      );
+      continue;
+    }
+
+    //check if param is set in the section header, if so skip building param
+    if (header_input_list.includes(parameter_definition_name)) {
+      continue;
+    }
+
+    //if parameter type == array.*, append plus and minus buttons in param div so
+    //the user can grow/shrink the list. Three groups of array.* params are excluded
+    //because their length is managed elsewhere: the DEFERRABLE_ARRAY_PARAMS in
+    //the "Deferrable Loads" section (by number_of_deferrable_loads), the 15
+    //BATTERY_ARRAY_PARAMS in the "Battery" section (by number_of_batteries) and
+    //the INVERTER_ARRAY_PARAMS in the "System" section (by number_of_inverters,
+    //see setupInverterSync) - a free +/- button on those would desync their
+    //length and crash check_batt_params/check_def_loads (or be refused by
+    //check_inverter_params) on save. Any other array.* param in
+    //those sections (e.g. the #540 Part B capacity_cost_per_kw /
+    //capacity_charge_interval_timesteps in Battery, which are NOT per-battery)
+    //still gets the normal generic +/- controls - the allow-lists, not the
+    //section name, own cardinality.
+    let array_buttons = "";
+    if (
+      parameter_definition_object["input"].search("array.") > -1 &&
+      !(
+        parameter_definition_object["input"] === "array.array.float" &&
+        Array.isArray(parameter_definition_object["default_value"])
+      ) &&
+      !(section == "Deferrable Loads" && DEFERRABLE_ARRAY_PARAMS.includes(parameter_definition_name)) &&
+      !(section == "Battery" && BATTERY_ARRAY_PARAMS.includes(parameter_definition_name)) &&
+      !(section == "System" && INVERTER_ARRAY_PARAMS.includes(parameter_definition_name))
+    ) {
+      array_buttons = `
+                  <button type="button" class="input-plus ${parameter_definition_name}">+</button>
+                  <button type="button" class="input-minus ${parameter_definition_name}">-</button>
+                  <br>
+                  `;
+    }
+
+    //generates and appends param container into section
+    //buildParamElement() builds the parameter input/s and returns html to append in param-input
+    SectionParamElement[0].innerHTML += `
+          <div class="param" id="${parameter_definition_name}">
+             <h5>${
+               parameter_definition_object["friendly_name"]
+             }:</h5> <i>${parameter_definition_name}</i> </br>
+              ${array_buttons}
+             <div class="param-input"> 
+                  ${buildParamElement(
+                    parameter_definition_object,
+                    parameter_definition_name,
+                    config
+                  )}
+             </div>
+              <p>${parameter_definition_object["Description"]}</p>
+          </div>
+          `;
+  }
+
+  //after looping though, build and appending the parameters in the corresponding section:
+  //create add button (array plus) event listeners
+  //plusElements() indexes its 2nd arg as param_definitions[section][name]; this
+  //function only receives the single section's definitions, so wrap them back
+  //under the section key. (The bare `param_definitions` used here previously is
+  //not in this function's scope - the generic +/- path threw ReferenceError on
+  //click; it was only ever reached by load_peak_hour_periods until #540 Part B
+  //routed capacity_cost_per_kw / capacity_charge_interval_timesteps through it.)
+  let plus = SectionContainer.querySelectorAll(".input-plus");
+  plus.forEach(function (answer) {
+    answer.addEventListener("click", () =>
+      plusElements(
+        answer.classList[1],
+        { [section]: section_parameters_definitions },
+        section,
+        {}
+      )
+    );
+  });
+
+  //create subtract button (array minus) event listeners
+  let minus = SectionContainer.querySelectorAll(".input-minus");
+  minus.forEach(function (answer) {
+    answer.addEventListener("click", () => minusElements(answer.classList[1]));
+  });
+
+  //check initial checkbox state, check "value" of input and match to "checked" value
+  let checkbox = SectionContainer.querySelectorAll("input[type='checkbox']");
+  checkbox.forEach(function (answer) {
+    let value = answer.value === "true";
+    answer.checked = value;
+  });
+
+  //loop though sections params again, check if param has a requirement, if so add a event listener to the required param input
+  //if required param gets changed, trigger function to check if that required parameter matches the required value for the param
+  //if false, add css class to param element to shadow it, to show that its unaccessible
+  for (const [
+    parameter_definition_name,
+    parameter_definition_object,
+  ] of Object.entries(section_parameters_definitions)) {
+    //check if param has a requirement from definitions file
+    if ("requires" in parameter_definition_object) {
+      // get param requirement element
+      const requirement_element = document.getElementById(
+        Object.keys(parameter_definition_object["requires"])[0]
+      );
+      if (requirement_element == null) {
+        console.debug(
+          "unable to find " +
+            Object.keys(parameter_definition_object["requires"])[0] +
+            " param div container element"
+        );
+        continue;
+      }
+
+      // get param element that has requirement
+      const param_element = document.getElementById(parameter_definition_name);
+      if (param_element == null) {
+        console.debug(
+          "unable to find " +
+            parameter_definition_name +
+            " param div container element"
+        );
+        continue;
+      }
+
+      //obtain required param inputs, add event listeners
+      let requirement_inputs =
+        requirement_element.getElementsByClassName("param_input");
+      //grab required value
+      const requirement_value = Object.values(
+        parameter_definition_object["requires"]
+      )[0];
+
+      //for all required inputs
+      for (const input of requirement_inputs) {
+        //if listener not already attached
+        if (input.getAttribute("listener") !== "true") {
+          //create event listener with arguments referencing the required param. param with requirement and required value
+          input.addEventListener("input", () =>
+            checkRequirements(input, param_element, requirement_value)
+          );
+          //manually run function to gain initial param element initial state
+          checkRequirements(input, param_element, requirement_value);
+        }
+      }
+    }
+  }
+}
+
+//HTML-encode a configuration-derived value for use inside a double-quoted
+//attribute or as element text, so it is always parsed as data (#1290).
+//String() keeps the textual form template interpolation produced before.
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+//create html input element/s for a param container (called by buildParamContainers)
+function buildParamElement(
+  parameter_definition_object,
+  parameter_definition_name,
+  config
+) {
+  let type = "";
+  let inputs = "";
+  let type_specific_html = "";
+  let type_specific_html_end = "";
+  let placeholder = ""
+
+  //switch statement to adjust generated html according to the parameter data type (definitions in definitions file)
+  switch (parameter_definition_object["input"]) {
+    case "array.int":
+    //number
+    case "int":
+      type = "number";
+      placeholder = Number.parseInt(parameter_definition_object["default_value"]);
+      break;
+    case "array.float":
+    case "float":
+      type = "number";
+      placeholder = Number.parseFloat(parameter_definition_object["default_value"]);
+      break;
+    //text (string)
+    case "array.string":
+    case "string":
+      type = "text";
+      placeholder = parameter_definition_object["default_value"];
+      break;
+    case "array.time":
+    //time ("00:00")
+    case "time":
+      type = "time";
+      break;
+    //checkbox (boolean)
+    case "array.boolean":
+    case "boolean":
+      type = "checkbox";
+      type_specific_html = `
+              <label class="switch">
+              `;
+      type_specific_html_end = `
+              <span class="slider"></span>
+              </label>
+              `;
+      //#1116: default_value comes straight from the JSON definitions file, so a
+      //declared boolean default (e.g. is_electric_load: true) parses as an
+      //actual JS boolean, not the string "true" - comparing only against the
+      //string left every declared-true default computing to false.
+      placeholder =
+        parameter_definition_object["default_value"] === true ||
+        parameter_definition_object["default_value"] === "true";
+      break;
+    //selects (pick)
+    case "select":
+      //format selects later
+      break;
+    case "object":
+    case "array.array.float":
+      type = "text";
+      placeholder = parameter_definition_object["default_value"] === null
+        ? ""
+        : JSON.stringify(parameter_definition_object["default_value"]);
+      break;
+  }
+
+  //check default values saved in param definitions
+  //definitions default value is used if none is found in the configs, or an array element has been added in the ui (deferrable load number increase or plus button pressed)
+  //check if a param value is saved in the config file (if so overwrite definition default)
+  let value = checkConfigParam(placeholder, config, parameter_definition_name);
+
+  // A static numeric table (array.array.float with a list default, e.g. the
+  // battery charge derating or the inverter power curves) uses one JSON field.
+  // Per-load nested arrays declare a null default, may hold null entries and
+  // keep their own per-load rendering and save paths.
+  if (parameter_definition_object["input"] === "array.array.float" &&
+      Array.isArray(parameter_definition_object["default_value"])) {
+    const json = typeof value === "string" ? value : JSON.stringify(value ?? []);
+    const escaped = json.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+    return `<input class="param_input" type="text" placeholder="[]" value="${escaped}">`;
+  }
+  // Object parameters (nested JSON such as heat_topology) get a multi-line
+  // textarea: a one-line <input> is unusable for large nested structures.
+  // Absent config, JSON null and the legacy string "null" all render as an
+  // empty box. Content is entity-escaped; the browser decodes it back, so the
+  // value round-trips through saveConfiguration's JSON.parse unchanged.
+  if (parameter_definition_object["input"] === "object") {
+    let json_text = "";
+    if (value !== null && value !== undefined && value !== "" && value !== "null") {
+      json_text = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+    }
+    json_text = json_text
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+    const placeholder_attr = String(placeholder ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+    return `<textarea class="param_input param-json" rows="10" spellcheck="false" placeholder="${placeholder_attr}">${json_text}</textarea>`;
+  }
+
+  //generate and return param input html,
+  //check if param value is not an object, if so assume its a single value.
+  if (typeof value !== "object") {
+    //if select, generate and return select elements instead of input
+    if (parameter_definition_object["input"] == "select") {
+      let inputs = `<select class="param_input">`;
+      for (const options of parameter_definition_object["select_options"]) {
+        let selected = ""
+        //if item in select is the same as the config value, then append "selected" tag
+        if (options==value) {selected = `selected="selected"`}
+        //explicit value: without it the browser derives the value from the option text,
+        //stripping and collapsing whitespace, so saveConfiguration would read it altered
+        inputs += `<option ${selected} value="${escapeHtml(options)}">${escapeHtml(options)}</option>`;
+      }
+      inputs += `</select>`;
+      return inputs;
+    }
+    // generate param input html and return
+    else {
+      //#1116: set the checked attribute directly at render time - dynamically
+      //added rows (plusElements) never run buildParamContainers' one-time
+      //checkbox normalisation pass, so a checkbox created there must already
+      //reflect its true/false value without relying on that later pass.
+      let checked_attr = type === "checkbox" && value === true ? "checked" : "";
+      return `
+          ${type_specific_html}
+          <input class="param_input" type="${type}" placeholder="${escapeHtml(parameter_definition_object["default_value"])}" value="${escapeHtml(value)}" ${checked_attr}>
+          ${type_specific_html_end}
+          `;
+    }
+  }
+  // else if object, loop though array of values, generate input element per value, and and return
+  else {
+    // null default: render a single empty input so the section keeps rendering
+    if (value === null) {
+      return `
+          ${type_specific_html}
+          <input class="param_input" type="${type}" placeholder="${escapeHtml(placeholder)}" value="">
+          ${type_specific_html_end}
+          `;
+    }
+    //for items such as load_peak_hour_periods (object of objects with arrays)
+    // exclude null: typeof null === "object" is a JS gotcha — null elements must fall to the array branch
+    if (typeof Object.values(value)[0] === "object" && Object.values(value)[0] !== null) {
+      for (let param of Object.values(value)) {
+        for (let items of Object.values(param)) {
+          inputs += `<input class="param_input" type="${type}" placeholder="${escapeHtml(Object.values(items)[0])}" value="${escapeHtml(
+            Object.values(items)[0]
+          )}">`;
+        }
+        inputs += `</br>`;
+      }
+      return inputs;
+    }
+    // array of values
+    else {
+      let inputs = "";
+      for (let param of value) {
+        //#1116: same as the single-value branch above - set checked directly
+        //so a freshly-created array.boolean row (e.g. adding a deferrable
+        //load) starts in the correct state without a separate normalisation pass.
+        let checked_attr = type === "checkbox" && param === true ? "checked" : "";
+        inputs += `
+          ${type_specific_html}
+          <input class="param_input" type="${type}" placeholder="${escapeHtml(parameter_definition_object["default_value"])}" value="${escapeHtml(param)}" ${checked_attr}>
+          ${type_specific_html_end}
+          `;
+      }
+      return inputs;
+    }
+  }
+}
+
+//add param inputs in param div container (for type array)
+function plusElements(
+  parameter_definition_name,
+  param_definitions,
+  section,
+  config
+) {
+  let param_element = document.getElementById(parameter_definition_name);
+  if (param_element == null) {
+    console.log(
+      "Unable to find " + parameter_definition_name + " param div container"
+    );
+    return 1;
+  }
+  let param_input_container =
+    param_element.getElementsByClassName("param-input")[0];
+  // Append a new input WITHOUT re-serialising the existing ones. `innerHTML +=`
+  // would round-trip every sibling through its HTML string form, which only
+  // carries the `value` attribute - any value the user has typed but not saved
+  // lives on the input's `.value` property and would be reset (e.g. entering
+  // 3, 7 then removing and re-adding the 2nd row blanked the first back to its
+  // default). insertAdjacentHTML parses and inserts only the new node.
+  param_input_container.insertAdjacentHTML(
+    "beforeend",
+    buildParamElement(
+      param_definitions[section][parameter_definition_name],
+      parameter_definition_name,
+      config
+    )
+  );
+}
+
+//Remove param inputs in param div container (minimum `minimum_inputs`, default 1).
+//#1116: the deferrable-loads shrink path passes 0 so number_of_deferrable_loads
+//can reach 0 (EMHASS accepts num_def_loads=0); every other caller (generic
+//+/-, number_of_batteries) omits the argument and keeps the prior minimum-1
+//floor unchanged.
+function minusElements(param, minimum_inputs = 1) {
+  let param_element = document.getElementById(param);
+  let param_input
+  if (param_element == null) {
+    console.log(
+      "Unable to find " + param + " param div container"
+    );
+    return 1;
+  }
+  let param_input_list = param_element.getElementsByTagName("input");
+  if (param_input_list.length == 0) {
+    console.log(
+      "Unable to find " + param + " param input/s"
+    );
+    return 1;
+  }
+
+  //verify if input is a boolean (if so remove parent slider/switch element with input)
+  if (
+    param_input_list[param_input_list.length - 1].parentNode.tagName === "LABEL"
+  ) {
+    param_input = param_input_list[param_input_list.length - 1].parentNode;
+  } else {
+    param_input = param_input_list[param_input_list.length - 1];
+  }
+
+  //if param is "load_peak_hour_periods", remove both start and end param inputs as well as the line brake tag separating the inputs
+  if (param == "load_peak_hour_periods") {
+    if (param_input_list.length > 2) {
+      let brs = document.getElementById(param).getElementsByTagName("br");
+      param_input_list[param_input_list.length - 1].remove();
+      param_input_list[param_input_list.length - 1].remove();
+      brs[brs.length - 1].remove();
+    }
+  } else if (param_input_list.length > minimum_inputs) {
+    param_input.remove();
+  }
+}
+
+//check requirement_element inputs,
+//if requirement_element don't match requirement_value, add .requirement-disable class to param_element
+//else remove class
+function checkRequirements(
+  requirement_element,
+  param_element,
+  requirement_value
+) {
+  let requirement_element_value
+  //get current value of required element
+  if (requirement_element.type == "checkbox") {
+    requirement_element_value = requirement_element.checked;
+  } else {
+    requirement_element_value = requirement_element.value;
+  }
+
+  if (requirement_element_value != requirement_value) {
+    if (!param_element.classList.contains("requirement-disable")) {
+      param_element.classList.add("requirement-disable");
+    }
+  } else if (param_element.classList.contains("requirement-disable")) {
+      param_element.classList.remove("requirement-disable");
+  }
+}
+
+//on header input change, execute accordingly
+function headerElement(element, param_definitions, config) {
+  //obtain section body element
+  let section_card = element.closest(".section-card");
+  let param_list 
+  let difference
+  if (section_card == null) {
+    console.log("Unable to obtain section-card");
+    return 1;
+  }
+  let param_container = section_card.getElementsByClassName("section-body");
+  if (param_container.length > 0) {
+    param_container = section_card.getElementsByClassName("section-body")[0];
+  } else {
+    console.log("Unable to obtain section-body");
+    return 1;
+  }
+
+  switch (element.id) {
+    //if set_use_battery, add or remove battery section (inc. params)
+    case "set_use_battery":
+      if (element.checked) {
+        param_container.innerHTML = "";
+        //#610: also exclude number_of_batteries here (its own header case below
+        //owns it) - otherwise this rebuild would render a SECOND, duplicate
+        //"number_of_batteries" .param row inside the section body alongside the
+        //real header input, since this rebuild's own exclusion list is separate
+        //from the outer header_input_list used at initial page load.
+        buildParamContainers("Battery", param_definitions["Battery"], config, [
+          "set_use_battery",
+          "number_of_batteries",
+        ]);
+        element.checked = true;
+      } else {
+        param_container.innerHTML = "";
+      }
+      break;
+
+    //if set_use_pv, add or remove PV section (inc. related params)
+    case "set_use_pv":
+      if (element.checked) {
+        param_container.innerHTML = "";
+        buildParamContainers("Solar System (PV)", param_definitions["Solar System (PV)"], config, [
+          "set_use_pv",
+        ]);
+        element.checked = true;
+      } else {
+        param_container.innerHTML = "";
+      }
+      break;
+
+    //if number_of_deferrable_loads, the number of inputs in the "Deferrable Loads" section should add up to number_of_deferrable_loads value in header
+    //#1116: only the genuine per-load array params (DEFERRABLE_ARRAY_PARAMS) are
+    //grown/shrunk here - not every ".param" in the section, since heat_topology
+    //is a single object param whose cardinality is not tied to
+    //number_of_deferrable_loads (mirrors the number_of_batteries case below).
+    case "number_of_deferrable_loads":
+      //get a list of only the deferrable-load array params in section
+      param_list = Array.from(
+        param_container.getElementsByClassName("param")
+      ).filter((p) => DEFERRABLE_ARRAY_PARAMS.includes(p.id));
+      if (param_list.length <= 0) {
+        console.log(
+          "There has been an issue counting the amount of params in number_of_deferrable_loads"
+        );
+        return 1;
+      }
+      //calculate how much off the first deferrable-load array param's input elements amount to is, comparing to the number_of_deferrable_loads value
+      difference =
+        Number.parseInt(element.value) -
+        param_list[0].querySelectorAll("input").length;
+      //add elements based on how many elements are missing
+      if (difference > 0) {
+        for (let i = difference; i >= 1; i--) {
+          for (const param of param_list) {
+            //append element, do not pass config to obtain default parameter from definitions file
+            plusElements(param.id, param_definitions, "Deferrable Loads", {});
+          }
+        }
+      }
+      //subtract elements based how many elements its over
+      //#1116: pass minimum 0 - number_of_deferrable_loads may reach 0 (EMHASS
+      //accepts num_def_loads=0), unlike the generic/battery paths below which
+      //keep the default minimum-1 floor.
+      if (difference < 0) {
+        for (let i = difference; i <= -1; i++) {
+          for (const param of param_list) {
+            minusElements(param.id, 0);
+          }
+        }
+      }
+      break;
+
+    //#610: the 15 per-battery array params
+    //(BATTERY_ARRAY_PARAMS) in the "Battery" section should add up to
+    //number_of_batteries, mirroring the number_of_deferrable_loads case above.
+    //Unlike "Deferrable Loads", "Battery" also holds global scalar flags
+    //(set_use_battery, set_nocharge_from_grid, set_battery_dynamic, ...) that
+    //must NOT be grown/shrunk by this count, so param_list is filtered down to
+    //BATTERY_ARRAY_PARAMS rather than every ".param" in the section.
+    case "number_of_batteries":
+      //get a list of only the battery array params in section
+      param_list = Array.from(
+        param_container.getElementsByClassName("param")
+      ).filter((p) => BATTERY_ARRAY_PARAMS.includes(p.id));
+      if (param_list.length <= 0) {
+        console.log(
+          "There has been an issue counting the amount of params in number_of_batteries"
+        );
+        return 1;
+      }
+      //calculate how much off the first battery array param's input elements amount to is, comparing to the number_of_batteries value
+      difference =
+        Number.parseInt(element.value) -
+        param_list[0].querySelectorAll("input").length;
+      //add elements based on how many elements are missing
+      if (difference > 0) {
+        for (let i = difference; i >= 1; i--) {
+          for (const param of param_list) {
+            //append element, do not pass config to obtain default parameter from definitions file
+            plusElements(param.id, param_definitions, "Battery", {});
+          }
+        }
+      }
+      //subtract elements based how many elements its over
+      if (difference < 0) {
+        for (let i = difference; i <= -1; i++) {
+          for (const param of param_list) {
+            minusElements(param.id);
+          }
+        }
+      }
+      break;
+  }
+}
+
+//#1150: number_of_inverters as a whole number of at least 1, else null (an
+//emptied, fractional or partly typed count)
+//(Number() reads "", " " and null as 0, which the check below refuses)
+function parseInverterCount(raw) {
+  const count = Number(raw);
+  return Number.isInteger(count) && count >= 1 ? count : null;
+}
+
+//#1150: the first input of a param row, or undefined when the row is missing
+function paramInputOf(param_id) {
+  return document.getElementById(param_id)?.getElementsByClassName("param_input")[0];
+}
+
+//#1150: keep the INVERTER_ARRAY_PARAMS at number_of_inverters entries, the way
+//the "number_of_batteries" header case keeps the battery lists at
+//number_of_batteries. number_of_inverters stays a normal row with its label and
+//help in the System section, with the lists it sizes, so this listens on that
+//row's input rather than on a section header input.
+function setupInverterSync(param_definitions, config) {
+  const count_input = paramInputOf("number_of_inverters");
+  if (count_input == null) {
+    return;
+  }
+  //first render: shape the lists from the stored configuration
+  syncInverterLists(count_input.value, param_definitions, config);
+  updateInverterCurveAccess(count_input.value, param_definitions);
+  //"change" rather than "input": typing 12 would otherwise pass through 1 on the
+  //way and drop what was typed in the rows from the second inverter on
+  count_input.addEventListener("change", () => {
+    syncInverterLists(count_input.value, param_definitions, null);
+    updateInverterCurveAccess(count_input.value, param_definitions);
+  });
+  //buildParamContainers attached the generic "requires" listener to this input
+  //before this runs, and listeners fire in the order they were added, so this
+  //one has the last word on the curves
+  const hybrid_input = paramInputOf("inverter_is_hybrid");
+  if (hybrid_input != null) {
+    hybrid_input.addEventListener("input", () =>
+      updateInverterCurveAccess(count_input.value, param_definitions)
+    );
+  }
+}
+
+//#1150: the alert box text of the last alert syncInverterLists raised, so a
+//later sync that works can take it down again (and never anyone else's alert)
+let inverter_sync_alert = null;
+
+//#1150: grow or shrink each INVERTER_ARRAY_PARAMS list to the count. Each list
+//is counted on its own, so lists of different lengths all end at the count.
+//`config` is the stored configuration on the first render and null after a
+//change of the count. The first render must not change what a stored
+//configuration means, so it only grows a list from a single row (a scalar, a
+//one-entry list or a missing key), the way the backend reads a single value.
+//Any other list whose length differs from the count stays as stored, an alert
+//names it, and the save refuses it by name as it does without this sync.
+function syncInverterLists(raw_count, param_definitions, config) {
+  const count = parseInverterCount(raw_count);
+  if (count === null) {
+    //leave the lists alone: the save reports a count that is not usable
+    return;
+  }
+  if (count > INVERTER_SYNC_LIMIT) {
+    showInverterSyncAlert(
+      `number_of_inverters is ${String(raw_count).trim()}: the per-inverter lists follow it only up to ${INVERTER_SYNC_LIMIT} inverters, so they were left as they are.`
+    );
+    return;
+  }
+  const first_render = config != null;
+  const mismatched = [];
+  for (const name of INVERTER_ARRAY_PARAMS) {
+    const param_element = document.getElementById(name);
+    if (param_element == null) {
+      continue;
+    }
+    let rows = param_element.getElementsByClassName("param_input").length;
+    if (first_render && rows !== count && rows !== 1) {
+      mismatched.push(`${name} (${rows} entries)`);
+      continue;
+    }
+    const fill = inverterNewRowFill(name, first_render ? config : null);
+    for (; rows < count; rows++) {
+      plusElements(name, param_definitions, "System", fill);
+    }
+    for (; rows > count; rows--) {
+      minusElements(name);
+    }
+  }
+  if (mismatched.length > 0) {
+    showInverterSyncAlert(
+      `number_of_inverters is ${count} but the stored configuration has ${mismatched.join(", ")}. They are shown as stored and the save will refuse them until each has ${count}. To resize them, change number_of_inverters to another value and back.`
+    );
+  } else {
+    clearInverterSyncAlert();
+  }
+}
+
+//#1150: what a new row holds, as the `config` argument of plusElements. A cap
+//row starts empty: above one inverter the backend refuses a cap that is just
+//the 5000 W default or a copy of a one-inverter site total, so the save asks
+//for each inverter's cap instead of storing one of those. A broadcast row takes
+//the definition default after a change of the count, as new battery rows do. On
+//the first render (`config` set) a broadcast param stored as one value repeats
+//it, since that value means every inverter to the backend; a key missing from
+//the stored configuration keeps the definition default, which the backend
+//broadcasts too.
+function inverterNewRowFill(name, config) {
+  if (INVERTER_CAP_PARAMS.includes(name)) {
+    return { [name]: null };
+  }
+  if (config == null || !(name in config)) {
+    return {};
+  }
+  const stored = config[name];
+  return { [name]: Array.isArray(stored) ? stored[0] : stored };
+}
+
+function showInverterSyncAlert(text) {
+  errorAlert(text);
+  inverter_sync_alert = document.getElementById("alert-text")?.textContent ?? null;
+}
+
+function clearInverterSyncAlert() {
+  //an alert box showing any other text belongs to someone else and stays
+  if (
+    inverter_sync_alert !== null &&
+    document.getElementById("alert-text")?.textContent === inverter_sync_alert
+  ) {
+    document.getElementById("alert").style.display = "none";
+  }
+  inverter_sync_alert = null;
+}
+
+//#1150: above one inverter the power curves are used whatever inverter_is_hybrid
+//says (the backend does not read it there), so they stay editable; at one
+//inverter, or with a count that is not usable, they keep the "requires" rule
+//from the definitions file
+function updateInverterCurveAccess(raw_count, param_definitions) {
+  const count = parseInverterCount(raw_count);
+  for (const name of INVERTER_CURVE_PARAMS) {
+    const param_element = document.getElementById(name);
+    const requires = param_definitions?.["System"]?.[name]?.["requires"];
+    if (param_element == null || requires == null) {
+      continue;
+    }
+    const requirement_input = paramInputOf(Object.keys(requires)[0]);
+    if (count !== null && count > 1) {
+      param_element.classList.remove("requirement-disable");
+    } else if (requirement_input != null) {
+      checkRequirements(requirement_input, param_element, Object.values(requires)[0]);
+    }
+  }
+}
+
+//checks parameter value in config, updates value if exists
+function checkConfigParam(value, config, parameter_definition_name) {
+  if (config !== null && config !== undefined) {
+    //check if parameter has a saved value
+    if (parameter_definition_name in config) {
+      value = config[parameter_definition_name];
+    }
+  }
+  return value;
+}
+
+//send all parameter input values to EMHASS, to save to config.json and param.pkl
+async function saveConfiguration(param_definitions) {
+  //start wth none
+  let config = {};
+  let param_inputs
+  let param_element
+
+  //if section-cards (config sections/list) exists
+  let config_card = document.getElementsByClassName("section-card");
+  //check if page is in list or box view
+  let config_box_element = document.getElementById("config-box");
+
+  //if true, in list view
+  if (Boolean(config_card.length)) {
+    //retrieve params and their input/s by looping though param_definitions list
+    //loop through the sections
+    for (const [section, section_object] of Object.entries(
+      param_definitions
+    )) {
+      //loop through parameters
+      for (let [
+        parameter_definition_name,
+        parameter_definition_object,
+      ] of Object.entries(section_object)) {
+        let param_values = []; //stores the obtained param input values
+        let param_array = false;
+        //get param container
+        param_element = document.getElementById(parameter_definition_name);
+        if (param_element == null) {
+          console.debug(
+            "unable to find " +
+              parameter_definition_name +
+              " param div container element, skipping this param"
+          );
+        }
+        //extract input/s and their value/s from param container div
+        else {
+          if (param_element.tagName !== "INPUT") {
+            param_inputs = param_element.getElementsByClassName("param_input");
+          } else {
+            //check if param_element is also param_input (ex. for header parameters)
+            param_inputs = [param_element];
+          }
+
+          // loop though param_inputs, extract the element/s values
+          for (let input of param_inputs) {
+            switch (input.type) {
+              case "number":
+                param_values.push(Number.parseFloat(input.value));
+                break;
+              case "checkbox":
+                param_values.push(input.checked);
+                break;
+              default:
+                param_values.push(input.value);
+                break;
+            }
+          }
+          //obtain param input type from param_definitions, check if param should be formatted as an array
+          param_array = Boolean(
+            !parameter_definition_object["input"].search("array")
+          );
+
+          //build parameters using values extracted from param_inputs
+
+          // Static numeric tables must be saved as JSON, not flattened strings.
+          // Only the structure is checked here; the physics of each table is
+          // validated authoritatively in Python.
+          if (parameter_definition_object["input"] === "array.array.float" &&
+              Array.isArray(parameter_definition_object["default_value"])) {
+            try {
+              const value = JSON.parse((param_values[0] ?? "").trim() || "[]");
+              const numericRow = (row) => Array.isArray(row) &&
+                row.every((item) => typeof item === "number" && Number.isFinite(item));
+              const numericTable = (table) => Array.isArray(table) && table.every(numericRow);
+              if (!numericTable(value) &&
+                  !(Array.isArray(value) && value.every(numericTable))) {
+                throw new Error("Expected nested numeric arrays");
+              }
+              config[parameter_definition_name] = value;
+            } catch (_) {
+              errorAlert(parameter_definition_name + ": enter a JSON array of numeric rows or tables, for example [[0.5, 0.84]].");
+              return 0;
+            }
+            continue;
+          }
+
+          // object-type: JSON.parse the textarea value; treat "" and "null" as
+          // JSON null. Trim so stray whitespace/newlines in an otherwise empty
+          // textarea do not read as invalid JSON.
+          if (parameter_definition_object["input"] === "object") {
+            const raw = (param_values[0] ?? "").toString().trim();
+            if (raw === "" || raw === "null") {
+              config[parameter_definition_name] = null;
+            } else {
+              try {
+                config[parameter_definition_name] = JSON.parse(raw);
+              } catch (_) {
+                errorAlert(parameter_definition_name + ": invalid JSON — please check the value and try again.");
+                return 0;
+              }
+            }
+            continue;
+          }
+
+          // If time with 2 sets (load_peak_hour_periods)
+          if (
+            parameter_definition_object["input"] == "array.time" &&
+            param_values.length % 2 === 0
+          ) {
+            config[parameter_definition_name] = {};
+            for (let i = 0; i < param_values.length; i++) {
+              config[parameter_definition_name][
+                "period_hp_" +
+                  (Object.keys(config[parameter_definition_name]).length + 1)
+              ] = [{ start: param_values[i] }, { end: param_values[++i] }];
+            }
+            continue;
+          }
+
+          //single value
+          if (param_values.length && !param_array) {
+            config[parameter_definition_name] = param_values[0];
+          }
+
+          //array value
+          else if (param_values.length) {
+            config[parameter_definition_name] = param_values;
+          }
+          //#1116: Deferrable Loads may intentionally render zero managed rows
+          //when number_of_deferrable_loads=0. Submit those owned fields as []
+          //without changing zero-input save semantics for unrelated arrays.
+          else if (
+            param_array &&
+            section === "Deferrable Loads" &&
+            DEFERRABLE_ARRAY_PARAMS.includes(parameter_definition_name)
+          ) {
+            config[parameter_definition_name] = [];
+          }
+        }
+      }
+    }
+  }
+
+  //if box view, extract json from box view
+  else if (config_box_element !== null) {
+    //try and parse json from box
+    try {
+      config = JSON.parse(config_box_element.value);
+    } catch (error) {
+      //if json error, show in alert box
+      document.getElementById("alert-text").textContent =
+        "\r\n" +
+        error +
+        "\r\n" +
+        "JSON Error: String values may not be wrapped in quotes";
+      document.getElementById("alert").style.display = "block";
+      document.getElementById("alert").style.textAlign = "center";
+      return 0;
+    }
+  }
+  // else, cant find box or list view
+  else {
+    errorAlert("There has been an error verifying box or list view");
+  }
+
+  //finally, send built config to emhass
+  const timeout = AbortSignal.timeout?.(REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`set-config`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(config),
+      signal: timeout,
+    });
+    const saved = response.status === 200 || response.status === 201;
+    showChangeStatus(response.status, saved ? [] : await readErrorLog(response));
+  } catch (error) {
+    //a request that timed out may still have been applied by the server (older Chrome aborts with an
+    //AbortError rather than a TimeoutError, so ask the signal)
+    const outcome = timeout?.aborted ? " The server may still have saved it." : "";
+    showChangeStatus(0, [`Unable to save the configuration: ${error.message}.${outcome} Reload the page to check the stored settings.`]);
+  }
+}
+
+//Toggle between box (json) and list view
+async function ToggleView(param_definitions, list_html, default_reset) {
+  let selected = "";
+  config = {};
+
+  //find out if list or box view is active
+  let configuration_container = document.getElementById("configuration-container");
+  if (configuration_container == null) {
+    errorAlert("Unable to find Configuration Container element");
+  }
+  //get yaml button
+  let yaml_button = document.getElementById("yaml");
+  if (yaml_button == null) {
+    console.log("Unable to obtain yaml button");
+  }
+
+  // if section-cards (config sections/list) exists
+  let config_card = configuration_container.getElementsByClassName("section-card");
+  //selected view (0 = box)
+  let selected_view = Boolean(config_card.length);
+
+  //if default_reset is passed do not switch views, instead reinitialize view with default config as values
+  if (default_reset) {
+    selected_view = !selected_view;
+    //obtain default config as config (when pressing the default button)
+    config = await ObtainDefaultConfig();
+  } else {
+    //obtain latest config
+    config = await obtainConfig();
+  }
+  //keep the current view if the configuration could not be obtained
+  if (config === null) {
+    return;
+  }
+
+  //if array is empty assume json box is selected
+  if (selected_view) {
+    selected = "list";
+  } else {
+    selected = "box";
+  }
+  //remove contents of current view
+  configuration_container.innerHTML = "";
+  //build new view
+  switch (selected) {
+    case "box":
+      //load list
+      loadConfigurationListView(param_definitions, config, list_html);
+      yaml_button.style.display = "none";
+      break;
+    case "list":
+      //load box
+      loadConfigurationBoxPage(config);
+      yaml_button.style.display = "block";
+      break;
+  }
+}
+
+//load box (json textarea) view
+async function loadConfigurationBoxPage(config) {
+  //get configuration container element
+  let configuration_container = document.getElementById("configuration-container");
+  if (configuration_container == null) {
+    errorAlert("Unable to find Configuration Container element");
+  }
+  //append configuration container with textbox area
+  configuration_container.innerHTML = `
+      <textarea id="config-box" rows="30" placeholder="{}"></textarea>
+      `;
+  //set created textarea box with retrieved config
+  //.value, not innerHTML: a textarea's HTML parsing would decode &amp; etc. in the data (#1290)
+  document.getElementById("config-box").value = JSON.stringify(
+    config,
+    null,
+    2
+  );
+}
+
+//function in control of status icons and alert box from a fetch request
+async function showChangeStatus(status, logJson) {
+  let loading = document.getElementById("loader"); //element showing statuses
+  if (loading === null) {
+    console.log("unable to find loader element");
+    return 1;
+  }
+  if (status === 200 || status === 201) {
+    //if status is 200 or 201, then show a tick
+    loading.innerHTML = `<p class=tick>&#x2713;</p>`;
+    //a request that succeeds ends the failure shown for the one before it
+    document.getElementById("alert").style.display = "none";
+  } else {
+    //then show a cross
+    loading.classList.remove("loading");
+    loading.innerHTML = `<p class=cross>&#x292C;</p>`; //show cross icon to indicate an error
+    if (logJson.length != 0 && document.getElementById("alert-text") !== null) {
+      document.getElementById("alert-text").textContent =
+        "\r\n\u2022 " + logJson.join("\r\n\u2022 "); //show received log data in alert box
+      document.getElementById("alert").style.display = "block";
+      document.getElementById("alert").style.textAlign = "left";
+    }
+  }
+  //remove tick/cross after some time
+  setTimeout(() => {
+    loading.innerHTML = "";
+  }, 4000);
+}
+
+//simple function to write text to the alert box
+async function errorAlert(text) {
+  if (
+    document.getElementById("alert-text") !== null &&
+    document.getElementById("alert") !== null
+  ) {
+    document.getElementById("alert-text").textContent = "\r\n" + text + "\r\n";
+    document.getElementById("alert").style.display = "block";
+    document.getElementById("alert").style.textAlign = "left";
+  }
+  return 0;
+}
+
+//convert yaml box into json box
+async function yamlToJson() {
+  //get box element
+  let config_box_element = document.getElementById("config-box");
+  if (config_box_element == null) {
+    errorAlert("Unable to obtain config box");
+  } else {
+    const response = await fetch(`get-json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: config_box_element.value,
+    });
+    let response_status = response.status; //return status
+    if (response_status == 201) {
+      showChangeStatus(response_status, {});
+      let blob = await response.blob(); //get data blob
+      config = await new Response(blob).json(); //obtain json from blob
+      config_box_element.value = JSON.stringify(config, null, 2);
+    } else {
+      showChangeStatus(response_status, await response.json());
+    }
+  }
+  return 0;
+}
