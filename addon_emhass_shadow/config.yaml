@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.7.4"
+version: "0.7.5"
 slug: emhass_shadow
 init: false
 arch:
@@ -46,9 +46,9 @@ options:
   entity_battery_soc: sensor.inverter_battery
   entity_outdoor_temperature: sensor.home_temperature
   entity_grid_status: binary_sensor.inverter_grid
-  entity_grid_l1_voltage: ""
-  entity_grid_l2_voltage: ""
-  entity_grid_l3_voltage: ""
+  entity_grid_l1_voltage: sensor.inverter_grid_l1_voltage
+  entity_grid_l2_voltage: sensor.inverter_grid_l2_voltage
+  entity_grid_l3_voltage: sensor.inverter_grid_l3_voltage
   entity_export_counter: sensor.inverter_total_energy_export
   tou_soc_entity_template: number.inverter_program_{n}_soc
   tou_time_entity_template: time.inverter_program_{n}_time
