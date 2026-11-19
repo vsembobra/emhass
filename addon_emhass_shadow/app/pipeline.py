@@ -634,7 +634,7 @@ def run() -> dict:
         max_soc=_soc_bounds(opts)[1],
         discharge_efficiency=opts["discharge_efficiency"],
         cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
-        cold_start_hours=2.0,
+        cold_start_hours=min(20.0, max(1.0, float(opts.get("reserve_cold_start_hours", 2.0)))),
         window_days=14.0,
         quantile=0.9,
         margin=0.0,
