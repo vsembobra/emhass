@@ -30,17 +30,8 @@ def _cheap_windows(opts: dict) -> list[tuple[int, int]]:
     skipped. Used both for prices and for telling the night charge zone
     apart from the expensive period in zone_targets.
     """
-    return _parse_windows(opts.get("tariff_cheap_windows", ""))
-
-
-def _peak_windows(opts: dict) -> list[tuple[int, int]]:
-    """Parsed tariff_peak_windows (same format as the cheap windows)."""
-    return _parse_windows(opts.get("tariff_peak_windows", ""))
-
-
-def _parse_windows(raw) -> list[tuple[int, int]]:
     windows = []
-    for chunk in str(raw or "").split(","):
+    for chunk in str(opts.get("tariff_cheap_windows", "")).split(","):
         chunk = chunk.strip()
         if not chunk or "-" not in chunk:
             continue
@@ -62,30 +53,20 @@ def _is_cheap_minute(minute: int, windows: list[tuple[int, int]]) -> bool:
 
 
 def tariff_prices(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[float]:
-    """Per-hour import price: cheap, peak or normal.
+    """Per-hour import price: cheap inside tariff_cheap_windows, normal else.
 
-    tariff_cheap_windows / tariff_peak_windows are comma-separated lists of
-    local "HH:MM-HH:MM" windows; a window may wrap midnight ("23:00-07:00").
-    Cheap wins where windows overlap. Peak windows are optional (a two-rate
-    tariff leaves them empty). When the tariff is disabled the price is
-    flat, which still lets the optimizer arbitrage PV.
+    tariff_cheap_windows is a comma-separated list of local "HH:MM-HH:MM"
+    windows; a window may wrap midnight ("23:00-07:00"). When the tariff is
+    disabled the price is flat, which still lets the optimizer arbitrage PV.
     """
     normal = float(opts.get("tariff_normal_price", 1.0))
     cheap = float(opts.get("tariff_cheap_price", 1.0))
-    peak = float(opts.get("tariff_peak_price", normal))
-    enabled = opts.get("tariff_enabled", False)
-    windows = _cheap_windows(opts) if enabled else []
-    peaks = _peak_windows(opts) if enabled else []
+    windows = _cheap_windows(opts) if opts.get("tariff_enabled", False) else []
     prices = []
     for stamp in starts:
         local = stamp.tz_convert(tz)
         minute = local.hour * 60 + local.minute
-        if _is_cheap_minute(minute, windows):
-            prices.append(cheap)
-        elif _is_cheap_minute(minute, peaks):
-            prices.append(peak)
-        else:
-            prices.append(normal)
+        prices.append(cheap if _is_cheap_minute(minute, windows) else normal)
     return prices
 
 
