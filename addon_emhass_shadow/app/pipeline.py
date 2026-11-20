@@ -24,6 +24,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import certifi
+import learning
 import numpy as np
 import optimize
 import pandas as pd
@@ -848,6 +849,27 @@ def _retrain_note() -> str | None:
     )
 
 
+def _self_learning_note(calibrations: dict, drift: dict) -> str | None:
+    """One notification line on the active forecast self-correction."""
+    parts = []
+    load = calibrations.get("load")
+    if load is not None and load.active:
+        day_shift = sum(load.hourly)
+        parts.append(
+            f"нагрузка {day_shift:+.1f} кВт·ч/сутки, коридор ×{load.scale_lo:.2f}/×{load.scale_hi:.2f}"
+        )
+    pv = calibrations.get("pv")
+    if pv is not None and pv.active:
+        daylight = [f for f in pv.hourly if abs(f - 1.0) > 1e-9] or [1.0]
+        parts.append(f"солнце ×{float(np.mean(daylight)):.2f}")
+    if not parts and not (drift or {}).get("drift"):
+        return None
+    line = "• Самокоррекция прогноза: " + ("; ".join(parts) if parts else "ещё копит данные")
+    if (drift or {}).get("drift"):
+        line += " — дрейф (" + ", ".join(drift["reasons"]) + "), переобучение раньше срока"
+    return line
+
+
 def _plan_vs_fact_note() -> str | None:
     """One notification line comparing yesterday's promised vs metered import."""
     if not METRICS.exists():
@@ -1148,11 +1170,13 @@ def run() -> dict:
         weather, weather_name, weather_stale = archive_weather(site)
     except OSError:
         weather, weather_name, weather_stale = None, None, True
+    load_method = "model"
     try:
         load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
         load_prediction = forecast_load(load_bundle, audit, starts_plan, issue, weather)
     except (OSError, ValueError, KeyError):
         models_learning = True
+        load_method = "fallback"
         load_prediction = _fallback_load_prediction(audit, starts_plan, tz)
 
     pv_bundle = None
@@ -1167,8 +1191,6 @@ def run() -> dict:
         pv_p10 = [0.0] * PLAN_HOURS
         pv_p50 = [0.0] * PLAN_HOURS
         pv_p90 = [0.0] * PLAN_HOURS
-        pv_day = None
-        pv_day2 = None
     elif pv_bundle is not None:
         poa = plane_power_kw(
             pv_bundle.geometry,
@@ -1189,27 +1211,45 @@ def run() -> dict:
         pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(PLAN_HOURS)]
-        pv_day = {
-            "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
-            "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
-            "p90": round(float(np.sum(pv_p90[:HORIZON_HOURS])), 2),
-        }
-        pv_day2 = {
-            "p10": round(float(np.sum(pv_p10[HORIZON_HOURS:])), 2),
-            "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
-            "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
-        }
     else:
         pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
+    pv_method = "model" if weather is not None and pv_bundle is not None else "fallback"
+
+    # Self-correction between retrains: the RAW forecasts are logged (below,
+    # once the reserve is known) and the last two weeks of issued-vs-actual
+    # pairs shift P50 per hour and rescale the P10/P90 band. Never let it
+    # break the daily plan.
+    raw_load = tuple(
+        load_prediction[f"load_{q}_kw"].to_numpy(dtype=float).tolist() for q in ("p10", "p50", "p90")
+    )
+    raw_pv = (list(pv_p10), list(pv_p50), list(pv_p90))
+    calibrations: dict = {}
+    drift: dict = {}
+    try:
+        calibrations, drift = learning.self_correct(
+            learning.read_forecast_log(DATA / "forecast_log.jsonl"), audit, tz, issue
+        )
+        (DATA / "drift_state.json").write_text(json.dumps(drift, ensure_ascii=False), encoding="utf-8")
+        if load_method == "model":
+            c10, c50, c90 = calibrations["load"].apply(*raw_load, starts_plan, tz)
+            load_prediction = pd.DataFrame(
+                {"load_p10_kw": c10, "load_p50_kw": c50, "load_p90_kw": c90}, index=starts_plan
+            )
+        if pv_method == "model":
+            c10, c50, c90 = calibrations["pv"].apply(*raw_pv, starts_plan, tz)
+            pv_p10, pv_p50, pv_p90 = c10.tolist(), c50.tolist(), c90.tolist()
+    except Exception:
+        calibrations, drift = {}, {}
+
+    pv_day = pv_day2 = None
+    if weather is not None:
         pv_day = {
-            "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
-            "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
-            "p90": round(float(np.sum(pv_p90[:HORIZON_HOURS])), 2),
+            q: round(float(np.sum(values[:HORIZON_HOURS])), 2)
+            for q, values in (("p10", pv_p10), ("p50", pv_p50), ("p90", pv_p90))
         }
         pv_day2 = {
-            "p10": round(float(np.sum(pv_p10[HORIZON_HOURS:])), 2),
-            "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
-            "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
+            q: round(float(np.sum(values[HORIZON_HOURS:])), 2)
+            for q, values in (("p10", pv_p10), ("p50", pv_p50), ("p90", pv_p90))
         }
 
     # State of health: entity id or a plain number ("99"); missing or
@@ -1297,6 +1337,15 @@ def run() -> dict:
     # Outage reserve alone, as device SOC per hour: the hard lower bound of
     # every TOU zone (see optimize.zone_targets / recommend_zone_socs).
     reserve_floors_plan = [settings.floor_for_energy(kwh)[0] for kwh in reserve_by_hour]
+    try:
+        learning.append_forecast_log(
+            DATA / "forecast_log.jsonl",
+            learning.log_entry(
+                issue, starts_plan, raw_load, load_method, raw_pv, pv_method, reserve_by_hour
+            ),
+        )
+    except OSError:
+        pass
 
     floor_entity = ent["floor_input"]
     floor_warning: str | None = None
@@ -1574,6 +1623,9 @@ def run() -> dict:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
         )
+    learning_note = _self_learning_note(calibrations, drift)
+    if learning_note is not None:
+        lines.append(learning_note)
     retrain_note = _retrain_note()
     if retrain_note is not None:
         lines.append(retrain_note)
@@ -1597,6 +1649,11 @@ def run() -> dict:
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
+            "self_learning": {
+                "load": calibrations["load"].to_dict() if "load" in calibrations else None,
+                "pv": calibrations["pv"].to_dict() if "pv" in calibrations else None,
+                "drift": drift or None,
+            },
         },
         "hourly": {
             "starts_utc": [s.isoformat() for s in starts],

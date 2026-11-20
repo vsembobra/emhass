@@ -98,6 +98,16 @@ def _enabled() -> bool:
         return True
 
 
+DRIFT_MIN_RETRAIN_GAP = timedelta(hours=24)
+
+
+def _drift_detected() -> bool:
+    try:
+        return bool(json.loads((DATA / "drift_state.json").read_text(encoding="utf-8")).get("drift"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
 def _audit_frame() -> pd.DataFrame:
     audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
     audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
@@ -296,7 +306,12 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     interval = _interval_days()
     last = state.get("last_retrain_utc")
     if not force and last:
-        due = datetime.now(UTC) - datetime.fromisoformat(last) >= timedelta(days=interval)
+        age = datetime.now(UTC) - datetime.fromisoformat(last)
+        due = age >= timedelta(days=interval)
+        # Drift (persistent bias or a collapsed P10-P90 band on the last week
+        # of issued forecasts) retrains early, at most once a day.
+        if not due and _drift_detected() and age >= DRIFT_MIN_RETRAIN_GAP:
+            due = True
         if not due:
             return retrain_status()
     if site is None:
