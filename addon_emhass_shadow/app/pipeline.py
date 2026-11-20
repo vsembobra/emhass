@@ -71,6 +71,19 @@ def options() -> dict:
     return json.loads((DATA / "options.json").read_text())
 
 
+def _plain_number(value) -> float | None:
+    """A manual constant where an entity id was expected, else None.
+
+    Options like the outdoor temperature accept "20" as a fixed value
+    instead of a sensor; entity ids never parse as finite floats.
+    """
+    try:
+        number = float(str(value or "").strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def resolve_entities(opts: dict) -> dict:
     """Entity map: every HA entity id comes from the add-on options.
 
@@ -335,10 +348,14 @@ def pv_sink_limited_mask(audit: pd.DataFrame, max_charge_kw=None) -> pd.Series:
 
 
 def build_audit_rows(history, hours, latitude, longitude, ent, max_charge_kw=None):
-    means = {
-        field: numeric_samples(history.get(entity, []), scale)
-        for field, (entity, scale) in ent["mean_sensors"].items()
-    }
+    means = {}
+    constants = {}
+    for field, (entity, scale) in ent["mean_sensors"].items():
+        manual = _plain_number(entity)
+        if manual is not None:
+            constants[field] = manual * scale
+        else:
+            means[field] = numeric_samples(history.get(entity, []), scale)
     soc = numeric_samples(history.get(ent["soc"], []), 0.01)
     voltages = {
         field: numeric_samples(history.get(entity, []), 1.0)
@@ -352,6 +369,7 @@ def build_audit_rows(history, hours, latitude, longitude, ent, max_charge_kw=Non
         row = {"start_utc": hour.isoformat().replace("+00:00", ".000Z")}
         for field, samples in means.items():
             row[field] = hourly_mean(samples, hour)
+        row.update(constants)
         soc_hour = [v for at, v in soc if hour <= at < hour + timedelta(hours=1)]
         carried_soc = _carried(soc, hour)
         row["soc_mean"] = float(np.mean(soc_hour)) if soc_hour else carried_soc
@@ -436,8 +454,9 @@ BACKFILL_CHUNK_DAYS = 3  # recorder fetches are chunked; one long range can time
 
 
 def _audit_entities(ent) -> list[str]:
-    # Empty option values ("") must never reach the history query:
-    # an empty filter_entity_id entry makes HA answer 400 Bad Request.
+    # Empty option values ("") and manual constants ("20") must never reach
+    # the history query: a non-entity filter_entity_id entry makes HA answer
+    # 400 Bad Request.
     return [
         e
         for e in (
@@ -445,7 +464,7 @@ def _audit_entities(ent) -> list[str]:
             + list(ent["voltages"].values())
             + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
         )
-        if str(e or "").strip()
+        if str(e or "").strip() and _plain_number(e) is None
     ]
 
 
@@ -633,6 +652,10 @@ def statistics_rows(
     for current, elevation in zip(hours, elevations, strict=True):
         row = {"start_utc": current.isoformat().replace("+00:00", ".000Z")}
         for field, (entity, scale) in ent["mean_sensors"].items():
+            manual = _plain_number(entity)
+            if manual is not None:
+                row[field] = manual * scale
+                continue
             value = stat(entity, "mean")
             row[field] = None if value is None else value * scale
         soc_mean, soc_max = stat(ent["soc"], "mean"), stat(ent["soc"], "max")
@@ -1551,14 +1574,11 @@ def validate_entities() -> list[dict]:
             row["status"] = "skipped"
             results.append(row)
             continue
-        if kind == "soh":
-            try:
-                float(entity)  # manual number, not an entity id
-                row.update(state=entity, status="ok_number")
-                results.append(row)
-                continue
-            except ValueError:
-                pass
+        if kind in ("number", "soh") and _plain_number(entity) is not None:
+            # Manual constant, not an entity id (e.g. outdoor temperature "20").
+            row.update(state=entity, status="ok_number")
+            results.append(row)
+            continue
         try:
             state = str(ha_get(f"/api/states/{entity}", timeout=10)["state"])
         except Exception:
