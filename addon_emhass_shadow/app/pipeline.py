@@ -24,6 +24,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import adapter
+import calibration
 import certifi
 import deferrable
 import hardware
@@ -1931,6 +1932,27 @@ def run(notify: str = "always") -> dict:
 
     battery_now = ha_get(f"/api/states/{ent['soc']}")["state"]
 
+    # BMS calibration: not full for calibration_interval_days -> charge to
+    # 100 % in the next night window (the optimizer plans it as a floor at
+    # the window's end; the zones covering it get 100 % and grid charge).
+    calib = calibration.status(audit, float(battery_now) / 100.0, issue, opts)
+    calib_window = calibration.night_window(starts, tz, opts) if calib["due"] else []
+    calib_zones = (
+        calibration.zones_in_window(programs, starts, tz, calib_window) if calib_window else set()
+    )
+    full_soc = _soc_bounds(opts)[1]
+    if calib_window:
+        calib["window_local"] = (
+            f"{starts[calib_window[0]].tz_convert(tz):%H:%M}–"
+            f"{(starts[calib_window[-1]] + pd.Timedelta(hours=1)).tz_convert(tz):%H:%M}"
+        )
+        calib["zones"] = sorted(calib_zones)
+        floors_plan = list(floors_plan)
+        floors_plan[calib_window[-1]] = max(floors_plan[calib_window[-1]], full_soc)
+        for program in programs:
+            if program["n"] in calib_zones:
+                program["recommended_soc_pct"] = round(full_soc * 100)
+
     # MILP layer: optimize the 48 h horizon against the tariff and the
     # floating floor; only the first day is applied or reported. Battery
     # energy capacity is scaled by the measured SoH so kWh accounting inside
@@ -1950,6 +1972,10 @@ def run(notify: str = "always") -> dict:
             )
         except Exception:
             optimizer_plan = None
+    if optimizer_plan is not None and calib_zones:
+        for target in optimizer_plan["zone_targets"]:
+            if target["n"] in calib_zones:
+                target["optimal_soc_pct"] = round(full_soc * 100)
 
     # Flexible loads: the best start inside each load's window, on the sun
     # the plan expects to curtail first, then on plain surplus.
@@ -1992,6 +2018,8 @@ def run(notify: str = "always") -> dict:
             float(battery_now) / 100.0,
         )
         for item in grid_charge:
+            if item["n"] in calib_zones:
+                item["desired"], item["reason"] = True, "калибровка BMS: заряд до 100%"
             entity = ent["tou_grid_charge"][item["n"] - 1]
             item["entity"] = entity
             try:
@@ -2242,6 +2270,13 @@ def run(notify: str = "always") -> dict:
     hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
     if hardware_note is not None:
         lines.append(hardware_note)
+    if calib.get("window_local"):
+        since = calib["days_since_full"]
+        lines.append(
+            "• Калибровка BMS: "
+            + (f"до 100% батарея не заряжалась {since:.0f} дн." if since is not None else "полного заряда в истории нет")
+            + f" — заряд до 100% в {calib['window_local']}"
+        )
     if autonomy_hours is not None:
         lines.append(
             f"• Автономия сейчас: ~{autonomy_hours:.1f} ч критической нагрузки "
@@ -2275,6 +2310,7 @@ def run(notify: str = "always") -> dict:
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
             "whole_house_backup": learning.whole_house_on_backup(audit),
+            "calibration": calib,
             "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
             "reserve_margin_hours": margin_hours,
             "tuning": tuning,

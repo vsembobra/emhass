@@ -8,7 +8,7 @@ description: >-
   только если новая не хуже, определяет ёмкость батареи и ориентацию
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
-version: "0.12.0"
+version: "0.13.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -80,6 +80,8 @@ options:
   replan_minutes: 60
   tou_grid_charge_on_option: ""
   tou_grid_charge_off_option: ""
+  calibration_charge_enabled: true
+  calibration_interval_days: 14
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -139,6 +141,8 @@ schema:
   replan_minutes: int(15,240)
   tou_grid_charge_on_option: str?
   tou_grid_charge_off_option: str?
+  calibration_charge_enabled: bool
+  calibration_interval_days: int(3,60)
 translations:
   ru:
     configuration:
@@ -304,6 +308,12 @@ translations:
       tou_grid_charge_off_option:
         name: Вариант select «заряд из сети выключен»
         description: "Только для select-флагов. Пусто = аддон сам выберет Disabled / Off (или Gen, если в зоне включён генератор). Укажите точное название, если варианты называются иначе."
+      calibration_charge_enabled:
+        name: Калибровочный заряд BMS
+        description: "BMS считает SOC через шунт и уточняет его только при полном заряде; без полного заряда ошибка растёт. Если батарея не была заряжена до 100% дольше интервала ниже, аддон в ближайшее ночное окно (дешёвые часы тарифа, без тарифа 00:00–07:00) зарядит её до 100%. Полный заряд от солнца или вашей автоматизации сбрасывает отсчёт. Выключено = аддон никогда не заряжает до 100% сам."
+      calibration_interval_days:
+        name: Интервал калибровки, дней
+        description: "Через сколько дней без полного заряда устраивать калибровочный заряд до 100% (3–60, по умолчанию 14)."
   en:
     configuration:
       latitude:
@@ -468,3 +478,9 @@ translations:
       tou_grid_charge_off_option:
         name: Select option for grid charge off
         description: "Only for select flags. Empty = the add-on picks Disabled / Off (or Gen when the zone charges from a generator). Set the exact name if your options are named differently."
+      calibration_charge_enabled:
+        name: BMS calibration charge
+        description: "A BMS counts SOC through a shunt and only re-anchors it at a full charge; without one the error grows. When the battery has not been at 100% for longer than the interval below, the add-on charges it to 100% in the next night window (cheap tariff hours, 00:00-07:00 without a tariff). A full charge from the sun or your automation resets the count. Off = the add-on never charges to 100% on its own."
+      calibration_interval_days:
+        name: Calibration interval, days
+        description: "Days without a full charge before a calibration charge to 100% (3-60, default 14)."

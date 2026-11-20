@@ -28,6 +28,9 @@ def default_options() -> dict:
 def fake_site(monkeypatch, tmp_path):
     """Run the pipeline in tmp_path with canned HA states and weather."""
     opts = default_options()
+    # An empty fake history never saw a full charge, so the BMS calibration
+    # would fire on every run; its own tests switch it on explicitly.
+    opts["calibration_charge_enabled"] = False
     services = []
 
     def setup(**overrides):
@@ -323,3 +326,40 @@ def test_routine_replans_stay_quiet_unless_they_write(fake_site):
     fake_site["setup"](apply_mode=True)
     pipeline.run(notify="changes")
     assert [s for s in fake_site["services"] if s[0] == "persistent_notification"]
+
+
+def test_bms_calibration_charges_the_night_zone_to_full(fake_site):
+    for n in range(1, 7):
+        entity = f"select.inverter_program_{n}_charging"
+        fake_site["states"][entity] = "Disabled"
+        fake_site["attributes"][entity] = {"options": ["Disabled", "Grid", "Generator", "Both"]}
+    fake_site["setup"](
+        apply_mode=True,
+        calibration_charge_enabled=True,
+        tou_grid_charge_entity_template="select.inverter_program_{n}_charging",
+    )
+    report = pipeline.run()
+    calib = report["data"]["calibration"]
+    assert calib["due"] and calib["days_since_full"] is None  # no full charge in history
+    assert 1 in calib["zones"]  # 00:00-06:00 covers the default night window
+    zone1 = next(t for t in report["advisory"]["optimizer"]["zone_targets"] if t["n"] == 1)
+    assert zone1["optimal_soc_pct"] == 100
+    plan = {item["n"]: item for item in report["advisory"]["grid_charge"]}
+    assert plan[1]["desired"] and plan[1]["reason"].startswith("калибровка BMS")
+    assert fake_site["states"]["select.inverter_program_1_charging"] == "Grid"
+    assert fake_site["states"]["number.inverter_program_1_soc"] == "100"
+    assert "Калибровка BMS" in report["notification"]
+
+
+def test_a_full_battery_resets_the_calibration(fake_site):
+    fake_site["states"]["sensor.inverter_battery"] = "100"
+    fake_site["setup"](calibration_charge_enabled=True)
+    report = pipeline.run()
+    calib = report["data"]["calibration"]
+    assert not calib["due"] and calib["days_since_full"] == 0.0
+    assert "Калибровка BMS" not in report["notification"]
+
+
+def test_calibration_switched_off(fake_site):
+    report = pipeline.run()
+    assert not report["data"]["calibration"]["due"]

@@ -408,6 +408,14 @@ function esc(v) {
 function marginLabel(m) { return "+" + Math.round(Number(m)) + " ч"; }
 const PRIORITY_LABEL = {resilience: "надёжность", balanced: "баланс", economy: "экономия"};
 
+function calibrationNote(c) {
+  if (!c || !c.enabled) return "";
+  if (c.window_local) return " · калибровка BMS: заряд до 100% в " + c.window_local;
+  if (c.days_since_full == null) return "";
+  const left = Math.max(0, c.interval_days - c.days_since_full);
+  return " · калибровка BMS: полный заряд " + c.days_since_full.toFixed(0) + " дн. назад, следующая через " + left.toFixed(0) + " дн.";
+}
+
 function share(v) { return v == null ? "—" : Math.round(v * 100) + "%"; }
 
 function renderLearning(r) {
@@ -453,7 +461,8 @@ function renderLearning(r) {
     "Приоритет: " + (PRIORITY_LABEL[d.priority_mode] || d.priority_mode || "—") +
     " · отключения: " + (regime.active ? "серия идёт, запас сверх резерва " + marginLabel(d.reserve_margin_hours || 0) : "тишина, резерв не держим") +
     (a.autonomy_hours != null ? " · автономия сейчас ~" + a.autonomy_hours.toFixed(1) + " ч" : "") +
-    " · автонастройка: " + (auto ? (applied.length ? "применено — " + applied.join(", ") : "включена") : "выключена (только совет)");
+    " · автонастройка: " + (auto ? (applied.length ? "применено — " + applied.join(", ") : "включена") : "выключена (только совет)") +
+    calibrationNote(d.calibration);
   document.getElementById("learn").innerHTML = rows.map(([w, v, s]) =>
     "<tr><td>" + w + "</td><td>" + v + "</td><td>" + s + "</td></tr>").join("");
   document.getElementById("learncard").style.display = rows.length || a.autonomy_hours != null ? "block" : "none";
