@@ -530,9 +530,10 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     try:
         audit = _audit_frame()
     except (OSError, ValueError) as error:
+        # No audit yet (fresh install before its first history pull): do not
+        # stamp the attempt, or the next try would wait a whole interval.
         result["models"]["load"] = {"status": "failed", "error": f"audit: {error}"}
         result["models"]["pv"] = {"status": "failed", "error": f"audit: {error}"}
-        state["last_retrain_utc"] = result["started_utc"]
         state["models"] = result["models"]
         _save_state(state)
         return retrain_status()
@@ -555,7 +556,10 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             hardware.save(DATA, hardware.identify(audit, opts))
     except Exception:
         pass  # hardware learning is advisory; never fail the retrain on it
-    state["last_retrain_utc"] = result["started_utc"]
+    # Stamp only once a model is live: until then every run retries, so a
+    # site whose history is still too short trains the day it is not.
+    if any((MODELS / name / "bundle.json").exists() for name in ("load_quantiles_v1", "pv_quantiles_v1")):
+        state["last_retrain_utc"] = result["started_utc"]
     state["models"] = result["models"]
     _save_state(state)
     return retrain_status()

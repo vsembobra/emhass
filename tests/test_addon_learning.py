@@ -167,15 +167,15 @@ def _retrain_env(monkeypatch, tmp_path, drift):
 
 
 def test_drift_triggers_early_retrain(monkeypatch, tmp_path):
-    last = _retrain_env(monkeypatch, tmp_path, drift=True)
+    _retrain_env(monkeypatch, tmp_path, drift=True)
     status = retrain.retrain_if_due()
-    assert status["last_retrain_utc"] != last
+    assert status["models"]["load"]["status"] == "failed"  # it ran (and hit the missing audit)
 
 
 def test_no_drift_waits_for_interval(monkeypatch, tmp_path):
     last = _retrain_env(monkeypatch, tmp_path, drift=False)
     status = retrain.retrain_if_due()
-    assert status["last_retrain_utc"] == last
+    assert status["last_retrain_utc"] == last and status["models"] == {}
 
 
 def test_correction_follows_the_live_model_version():

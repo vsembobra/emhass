@@ -190,9 +190,13 @@ function renderStatus(s) {
   if (s.running) parts.push("⏳ идёт расчёт…");
   if (s.next_run) parts.push("следующий расчёт: " + new Date(s.next_run).toLocaleString("ru-RU"));
   if (s.audit_rows) parts.push("строк аудита: " + s.audit_rows);
-  if (s.last_backfill)
-    parts.push("история загружена: +" + s.last_backfill.added_rows + " ч (" +
-      new Date(s.last_backfill.at).toLocaleString("ru-RU") + ")");
+  if (s.last_backfill) {
+    const b = s.last_backfill;
+    const got = (b.recorder_rows ?? b.added_rows ?? 0) + " ч подробной истории" +
+      (b.statistics_rows ? " + " + b.statistics_rows + " ч долгосрочной статистики" : "");
+    parts.push("история загружена: " + got + " (" + new Date(b.at).toLocaleString("ru-RU") + ")" +
+      (b.statistics_error ? " · статистика недоступна" : ""));
+  }
   if (s.retrain) {
     const r = s.retrain;
     if (r.enabled === false) parts.push("переобучение: выключено в настройках");

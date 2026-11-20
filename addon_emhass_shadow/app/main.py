@@ -28,6 +28,15 @@ def run_pipeline(retrain_first: bool = True) -> None:
         STATE["running"] = True
         STATE["last_error"] = None
     try:
+        if not (DATA / "hourly_audit.jsonl").exists():
+            # Fresh install: learn from what Home Assistant already holds
+            # (recorder detail + months of long-term statistics + outages),
+            # train on it, and only then plan.
+            try:
+                STATE["last_backfill"] = pipeline.bootstrap(pipeline.options())
+                retrain.retrain_if_due(force=True)
+            except Exception:
+                STATE["last_error"] = traceback.format_exc(limit=5)
         if retrain_first:
             try:
                 retrain.retrain_if_due()
@@ -74,11 +83,21 @@ def run_backfill() -> None:
         ent = pipeline.resolve_entities(opts)
         days = float(opts.get("history_backfill_days", 14))
         added = pipeline.backfill_audit(site, ent, days)
-        STATE["last_backfill"] = {
-            "added_rows": added,
-            "at": datetime.now(UTC).isoformat(),
-        }
-        if added:
+        info = {"at": datetime.now(UTC).isoformat(), "recorder_rows": added}
+        try:
+            info["outage_transitions"] = pipeline.update_outage_log(ent, hours=max(48.0, days * 24))
+        except Exception as error:
+            info["outage_error"] = str(error)[:200]
+        try:
+            info["statistics_rows"] = pipeline.backfill_statistics(
+                site, ent, float(opts.get("history_statistics_days", 365))
+            )
+        except Exception as error:
+            info["statistics_rows"] = 0
+            info["statistics_error"] = str(error)[:200]
+        info["added_rows"] = added + info["statistics_rows"]
+        STATE["last_backfill"] = info
+        if info["added_rows"]:
             retrain.retrain_if_due(force=True)
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)

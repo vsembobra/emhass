@@ -391,39 +391,44 @@ def build_audit_rows(history, hours, latitude, longitude, ent, max_charge_kw=Non
             row["raw_grid_status"] = "outside_history"
             row["grid_quality"] = "low_grid_voltage" if low_voltage else "voltage_not_flagged"
 
-        bad_grid = row["grid_quality"] in ("recorded_outage", "low_grid_voltage", "unknown")
-        if row["load_kw"] is None or row["critical_load_kw"] is None:
-            row["load_filter"] = "invalid_target"
-        elif bad_grid:
-            row["load_filter"] = "grid_quality"
-        else:
-            row["load_filter"] = "keep"
-
-        if elevation <= 10.0:
-            row["pv_filter"] = "outside_daylight"
-            row["possible_pv_curtailment"] = False
-        else:
-            curtailment = pv_sink_limited(
-                row["soc_mean"],
-                row["export_kwh"],
-                row.get("battery_power_kw_raw_sign"),
-                row.get("grid_power_kw_raw_sign"),
-                max_charge_kw,
-            )
-            row["possible_pv_curtailment"] = bool(curtailment)
-            if row["pv_measured_kw"] is None:
-                row["pv_filter"] = "invalid_target"
-            elif row["export_kwh"] is None or row["soc_mean"] is None:
-                row["pv_filter"] = "missing_or_invalid_export"
-            elif bad_grid:
-                row["pv_filter"] = "grid_quality"
-            elif curtailment:
-                row["pv_filter"] = "possible_curtailment"
-            else:
-                row["pv_filter"] = "keep"
+        apply_quality_filters(row, max_charge_kw)
         row["split"] = "live"
         rows.append(row)
     return rows
+
+
+def apply_quality_filters(row: dict, max_charge_kw=None) -> None:
+    """Training filters of one audit row (shared by recorder and statistics rows)."""
+    bad_grid = row["grid_quality"] in ("recorded_outage", "low_grid_voltage", "unknown")
+    if row.get("load_kw") is None or row.get("critical_load_kw") is None:
+        row["load_filter"] = "invalid_target"
+    elif bad_grid:
+        row["load_filter"] = "grid_quality"
+    else:
+        row["load_filter"] = "keep"
+
+    if row["solar_elevation_deg"] <= 10.0:
+        row["pv_filter"] = "outside_daylight"
+        row["possible_pv_curtailment"] = False
+        return
+    curtailment = pv_sink_limited(
+        row.get("soc_mean"),
+        row.get("export_kwh"),
+        row.get("battery_power_kw_raw_sign"),
+        row.get("grid_power_kw_raw_sign"),
+        max_charge_kw,
+    )
+    row["possible_pv_curtailment"] = bool(curtailment)
+    if row.get("pv_measured_kw") is None:
+        row["pv_filter"] = "invalid_target"
+    elif row.get("export_kwh") is None or row.get("soc_mean") is None:
+        row["pv_filter"] = "missing_or_invalid_export"
+    elif bad_grid:
+        row["pv_filter"] = "grid_quality"
+    elif curtailment:
+        row["pv_filter"] = "possible_curtailment"
+    else:
+        row["pv_filter"] = "keep"
 
 
 BACKFILL_CHUNK_DAYS = 3  # recorder fetches are chunked; one long range can time out
@@ -504,13 +509,18 @@ def backfill_audit(site, ent, days: float) -> int:
         return 0
     hours = list(pd.date_range(target, first - timedelta(hours=1), freq="h"))
     rows = _rows_for_hours(site, ent, hours)
+    return _prepend_rows(audit, rows)
+
+
+def _prepend_rows(audit: pd.DataFrame, rows: list[dict]) -> int:
+    """Merge older rows into the audit file (existing hours win)."""
     if not rows:
         return 0
     prepended = pd.DataFrame(rows)
     prepended["start_utc"] = pd.to_datetime(prepended["start_utc"], utc=True)
-    combined = pd.concat([audit, prepended.set_index("start_utc")]).sort_index()
+    combined = pd.concat([prepended.set_index("start_utc"), audit]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
-    audit_path.write_text(
+    (DATA / "hourly_audit.jsonl").write_text(
         "".join(
             json.dumps(
                 {"start_utc": at.isoformat(), **row.dropna().to_dict()},
@@ -522,6 +532,199 @@ def backfill_audit(site, ent, days: float) -> int:
         encoding="utf-8",
     )
     return len(rows)
+
+
+# -- long-term statistics: months of history beyond the recorder purge -------
+
+SUPERVISOR_WS = "ws://supervisor/core/websocket"
+STATISTICS_CHUNK_DAYS = 30
+STATISTICS_UNITS = {"power": "W", "energy": "kWh", "temperature": "°C", "voltage": "V"}
+
+
+async def _ws_statistics(start: datetime, end: datetime, ids: list[str]) -> dict:
+    """recorder/statistics_during_period over the Supervisor WebSocket proxy."""
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(SUPERVISOR_WS, max_msg_size=0, heartbeat=30) as ws:
+            await ws.receive_json(timeout=30)  # auth_required
+            await ws.send_json({"type": "auth", "access_token": _token()})
+            auth = await ws.receive_json(timeout=30)
+            if auth.get("type") != "auth_ok":
+                raise PermissionError(f"Home Assistant WebSocket auth failed: {auth.get('type')}")
+            await ws.send_json(
+                {
+                    "id": 1,
+                    "type": "recorder/statistics_during_period",
+                    "start_time": start.isoformat(),
+                    "end_time": end.isoformat(),
+                    "statistic_ids": ids,
+                    "period": "hour",
+                    "types": ["mean", "min", "max", "change"],
+                    "units": STATISTICS_UNITS,
+                }
+            )
+            while True:
+                message = await ws.receive_json(timeout=180)
+                if message.get("id") != 1 or message.get("type") != "result":
+                    continue
+                if not message.get("success"):
+                    raise RuntimeError(f"statistics query failed: {message.get('error')}")
+                return message.get("result") or {}
+
+
+def fetch_statistics(start: datetime, end: datetime, ids: list[str]) -> dict[str, list[dict]]:
+    """Hourly long-term statistics {statistic_id: [rows]}; sensors only."""
+    import asyncio
+
+    ids = [i for i in ids if str(i or "").strip() and str(i).startswith("sensor.")]
+    if not ids:
+        return {}
+    return asyncio.run(_ws_statistics(start, end, ids))
+
+
+def _stat_hour(value) -> datetime:
+    """Statistics row start: epoch milliseconds (new HA) or ISO text (old)."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000.0, UTC)
+    return datetime.fromisoformat(str(value)).astimezone(UTC)
+
+
+def statistics_rows(
+    stats: dict[str, list[dict]],
+    hours: list[datetime],
+    ent: dict,
+    latitude: float,
+    longitude: float,
+    max_charge_kw=None,
+) -> list[dict]:
+    """Audit rows for hours covered by long-term statistics only.
+
+    Power means (converted to W) feed the same kW fields as the recorder
+    rows, SOC mean/max become fractions, the export counter's hourly change
+    is export_kwh, and the grid-voltage minimum classifies the grid. Binary
+    sensors keep no statistics: without a voltage sensor the grid is assumed
+    up ("lts_assumed_up") — a few outage hours may then train the load model
+    with backup-only consumption, which the next recorder rows outweigh.
+    """
+    by_entity = {
+        entity: {_stat_hour(row["start"]): row for row in rows} for entity, rows in stats.items()
+    }
+
+    def stat(entity, key):
+        row = by_entity.get(entity, {}).get(current)
+        value = None if row is None else row.get(key)
+        return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+    import pvlib
+
+    if not hours:
+        return []
+    midpoints = pd.DatetimeIndex(hours) + pd.Timedelta(minutes=30)
+    elevations = (
+        pvlib.location.Location(latitude, longitude)
+        .get_solarposition(midpoints)["apparent_elevation"]
+        .to_numpy()
+    )
+    voltage_entity = ent["voltages"].get("grid_min_v")
+    has_voltage = bool(voltage_entity and by_entity.get(voltage_entity))
+    rows = []
+    for current, elevation in zip(hours, elevations, strict=True):
+        row = {"start_utc": current.isoformat().replace("+00:00", ".000Z")}
+        for field, (entity, scale) in ent["mean_sensors"].items():
+            value = stat(entity, "mean")
+            row[field] = None if value is None else value * scale
+        soc_mean, soc_max = stat(ent["soc"], "mean"), stat(ent["soc"], "max")
+        row["soc_mean"] = None if soc_mean is None else soc_mean / 100.0
+        row["soc_max"] = None if soc_max is None else soc_max / 100.0
+        change = stat(ent["export_counter"], "change")
+        row["export_kwh"] = None if change is None else max(0.0, change)
+        row["solar_elevation_deg"] = float(elevation)
+        if has_voltage:
+            low = stat(voltage_entity, "min")
+            row["grid_min_v"] = low
+            if low is None:
+                row["raw_grid_status"], row["grid_quality"] = "unknown", "unknown"
+            elif low <= 50.0:
+                row["raw_grid_status"], row["grid_quality"] = "outage", "low_grid_voltage"
+            else:
+                row["raw_grid_status"], row["grid_quality"] = "up", "recorded_up"
+        else:
+            row["raw_grid_status"], row["grid_quality"] = "up", "lts_assumed_up"
+        if row.get("load_kw") is None and row.get("pv_measured_kw") is None:
+            continue  # no statistics for this hour at all
+        apply_quality_filters(row, max_charge_kw)
+        row["split"] = "statistics"
+        rows.append(row)
+    return rows
+
+
+def backfill_statistics(site, ent, days: float) -> int:
+    """Prepend months of long-term statistics before the audit's first hour.
+
+    Idempotent like the recorder backfill: hours already in the audit are
+    never replaced. Returns the number of rows added.
+    """
+    audit_path = DATA / "hourly_audit.jsonl"
+    if days <= 0:
+        return 0
+    now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    target = now_hour - timedelta(days=days)
+    audit = _read_audit() if audit_path.exists() else pd.DataFrame()
+    first = audit.index[0] if len(audit) else now_hour
+    if first <= target:
+        return 0
+    ids = _audit_entities(ent)
+    rows: list[dict] = []
+    cursor = target
+    while cursor < first:
+        chunk_end = min(cursor + timedelta(days=STATISTICS_CHUNK_DAYS), first)
+        hours = list(pd.date_range(cursor, chunk_end - timedelta(hours=1), freq="h"))
+        stats = fetch_statistics(cursor, chunk_end, ids)
+        rows.extend(
+            statistics_rows(
+                stats,
+                [h.to_pydatetime() for h in hours],
+                ent,
+                site["latitude"],
+                site["longitude"],
+                site.get("max_charge_kw"),
+            )
+        )
+        cursor = chunk_end
+    return _prepend_rows(audit, rows)
+
+
+def bootstrap(opts: dict) -> dict:
+    """First start: pull everything Home Assistant already knows.
+
+    Recorder history (full detail, recorder depth) first, then the outage
+    journal over the same depth, then long-term statistics for the months
+    before. The caller retrains right after, so the very first plan already
+    runs on models of this site.
+    """
+    site = {
+        "latitude": opts["latitude"],
+        "longitude": opts["longitude"],
+        "time_zone": opts["time_zone"],
+        "max_charge_kw": opts.get("max_charge_kw"),
+    }
+    ent = resolve_entities(opts)
+    days = float(opts.get("history_backfill_days", 14))
+    result: dict = {"at": datetime.now(UTC).isoformat()}
+    _, result["recorder_rows"] = update_audit(site, ent, backfill_days=days)
+    try:
+        result["outage_transitions"] = update_outage_log(ent, hours=max(48.0, days * 24))
+    except Exception as error:
+        result["outage_error"] = str(error)[:200]
+    try:
+        result["statistics_rows"] = backfill_statistics(
+            site, ent, float(opts.get("history_statistics_days", 365))
+        )
+    except Exception as error:
+        result["statistics_rows"] = 0
+        result["statistics_error"] = str(error)[:200]
+    return result
 
 
 def update_audit(site, ent, backfill_days: float = 1.0) -> tuple[pd.DataFrame, int]:
@@ -617,16 +820,29 @@ def _grid_carry_rows(series, heartbeats, now) -> list[tuple[datetime, str]]:
     return rows
 
 
-def update_outage_log(ent) -> int:
+def update_outage_log(ent, hours: float = 48.0) -> int:
+    """Record grid transitions of the last ``hours`` into the outage journal.
+
+    The daily run looks back 48 h; a fresh install (or the backfill button)
+    passes the recorder depth so past outages count at once. Long ranges
+    are fetched in chunks and skip the chatty load sensor (sensor.time or
+    sun.sun prove the recorder was alive).
+    """
     grid_binary = str(ent.get("grid_binary") or "").strip()
     if not grid_binary:
         return 0
     now = datetime.now(UTC)
     fetch_entities = [grid_binary, "sensor.time", "sun.sun"]
     load = ent.get("mean_sensors", {}).get("load_kw")
-    if load and load[0] not in fetch_entities:
+    if hours <= 72 and load and load[0] not in fetch_entities:
         fetch_entities.append(load[0])
-    history = fetch_history(now - timedelta(hours=48), now, fetch_entities)
+    history: dict[str, list[dict]] = {}
+    cursor = now - timedelta(hours=hours)
+    while cursor < now:
+        chunk_end = min(cursor + timedelta(days=BACKFILL_CHUNK_DAYS), now)
+        for entity, states in fetch_history(cursor, chunk_end, fetch_entities).items():
+            history.setdefault(entity, []).extend(states)
+        cursor = chunk_end
     transitions = grid_status_series(history.get(grid_binary, []))
     carry = _grid_carry_rows(transitions, _heartbeat_samples(history, ent), now)
     # A transition wins over a synthesized carry row at an equal timestamp —

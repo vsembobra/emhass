@@ -8,7 +8,7 @@ description: >-
   только если новая не хуже, определяет ёмкость батареи и ориентацию
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
-version: "0.10.1"
+version: "0.11.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -76,6 +76,7 @@ options:
   tou_soc_step_pct: 5
   tou_grid_charge_entity_template: ""
   outage_memory_days: 14
+  history_statistics_days: 365
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -131,6 +132,7 @@ schema:
   tou_soc_step_pct: int(1,10)
   tou_grid_charge_entity_template: str?
   outage_memory_days: int(3,60)
+  history_statistics_days: int(0,730)
 translations:
   ru:
     configuration:
@@ -284,6 +286,9 @@ translations:
       outage_memory_days:
         name: Память серии отключений, дней
         description: "Отключения идут сериями. Пока последнее отключение было не больше этого числа дней назад, серия считается идущей: аддон держит резерв по реальной длительности её отключений и поднимает его в часы, когда отключали. Дольше тишины — серия закончилась, резерв не держится (3–60, по умолчанию 14)."
+      history_statistics_days:
+        name: Глубина долгосрочной статистики, дней
+        description: "Сколько дней почасовой статистики Home Assistant подтянуть при первом запуске и по кнопке «Загрузить историю» — сверх подробной истории recorder (0–730, по умолчанию 365). HA хранит её месяцами для сенсоров с state_class; с ней модели сразу учатся на сезонах вашего дома. 0 = не использовать."
   en:
     configuration:
       latitude:
@@ -436,3 +441,6 @@ translations:
       outage_memory_days:
         name: Outage series memory, days
         description: "Outages come in series. While the last outage is at most this many days old the series is live: the add-on holds a reserve sized on its real outage durations and raises it in the hours it hit. Longer quiet means the series is over and no reserve is held (3-60, default 14)."
+      history_statistics_days:
+        name: Long-term statistics depth, days
+        description: "How many days of Home Assistant hourly statistics to pull on first start and via 'Backfill history', beyond the detailed recorder history (0-730, default 365). HA keeps them for months for sensors with a state_class, so the models learn your home's seasons at once. 0 = off."
