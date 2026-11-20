@@ -176,3 +176,29 @@ def test_no_drift_waits_for_interval(monkeypatch, tmp_path):
     last = _retrain_env(monkeypatch, tmp_path, drift=False)
     status = retrain.retrain_if_due()
     assert status["last_retrain_utc"] == last
+
+
+def test_correction_follows_the_live_model_version():
+    """Review case: a retrained model must not inherit the old model's bias fix."""
+    log, audit = _history(days=14)  # old model: always 0.5 kW too low
+    for entry in log:
+        entry["load"]["version"] = "old"
+    calibrations, _ = learning.self_correct(log, audit, TZ, NOW, versions={"load": "new"})
+    assert not calibrations["load"].active  # nothing issued by the new model yet
+    _, p50, _ = calibrations["load"].apply([1.5], [2.0], [2.5], pd.DatetimeIndex([NOW]), TZ)
+    assert p50[0] == 2.0  # was 2.0 + inherited shift
+    same = learning.self_correct(log, audit, TZ, NOW, versions={"load": "old"})[0]["load"]
+    assert same.active and same.hourly[0] > 0.2
+
+
+def test_log_entry_records_versions_and_bundle_hash(tmp_path):
+    starts = pd.date_range(NOW, periods=1, freq="h")
+    entry = learning.log_entry(
+        NOW, starts, ([0], [0], [0]), "model", ([0], [0], [0]), "model", versions={"load": "abc"}
+    )
+    assert entry["load"]["version"] == "abc" and entry["pv"]["version"] is None
+    (tmp_path / "bundle.json").write_text('{"a": 1}')
+    first = learning.bundle_version(tmp_path)
+    (tmp_path / "bundle.json").write_text('{"a": 2}')
+    assert first and learning.bundle_version(tmp_path) != first
+    assert learning.bundle_version(tmp_path / "missing") is None

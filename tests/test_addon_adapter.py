@@ -99,3 +99,18 @@ def test_without_tariff_only_sunless_zones_charge_from_grid():
     assert plan[1] == (True, "солнца нет")
     assert plan[2] == (False, "солнце зарядит")
     assert plan[3] == (True, "солнца нет")
+
+
+def test_active_zone_grid_charge_uses_measured_soc():
+    """Review case: 01:00, zone 00:00-07:00 in effect, SOC 50 %, reserve 70 %."""
+    starts = pd.date_range("2026-11-20 01:00", periods=24, freq="h", tz="UTC")
+    programs = [{"n": 1, "from": "00:00", "soc_pct": 50}, {"n": 2, "from": "07:00", "soc_pct": 50}]
+    soc_opt = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8] + [0.7] * 17 + [0.75]
+    reserve = [0.7] * 6 + [0.2] * 18
+    opts = {"tariff_enabled": True, "tariff_cheap_windows": "02:00-05:00"}
+    (zone1, zone2) = adapter.grid_charge_plan(
+        programs, starts, UTC, opts, reserve, [0.0] * 24, soc_opt, 0.5
+    )
+    # Was off as "дорогой тариф": compared against tomorrow's planned 70 %.
+    assert zone1["desired"] and zone1["reason"].startswith("резерв 70%")
+    assert not zone2["desired"]

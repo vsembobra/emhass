@@ -160,3 +160,36 @@ def test_retrain_promotes_lead_aware_recipe(monkeypatch, tmp_path):
     bundle = LoadQuantileBundle.load(tmp_path / "load_quantiles_v1")
     assert bundle.config.lead_aware and bundle.config.forecast_temperature
     assert bundle.config.time_zone == "UTC"
+
+
+def _random_walk_grid(days=60, seed=11):
+    """Load level drifts day to day: only the lag/rolling features know it."""
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2026-01-01", periods=days * 24, freq="h", tz="UTC")
+    level = np.repeat(np.cumsum(rng.normal(0, 0.4, days)) + 3.0, 24)
+    load = np.clip(level + 0.3 * np.sin(index.hour.to_numpy() * 2 * np.pi / 24), 0.1, None)
+    load = load + rng.normal(0, 0.05, len(index))
+    return pd.DataFrame({"load_kw": load, "temp_air_observed_c": 5.0}, index=index)
+
+
+def test_calibrate_with_start_scores_only_the_slice_with_real_history():
+    grid = _random_walk_grid()
+    start = grid.index[-24 * 14]
+    bundle = LoadQuantileBundle.fit(grid.loc[: start - pd.Timedelta(hours=1)], UTC_CONFIG)
+    bundle.calibrate(grid, start=start)
+    assert bundle.calibrated_from == start.isoformat()
+    raw = bundle._raw_predict(build_features(grid, UTC_CONFIG).loc[start:])
+    y = grid.loc[start:, "load_kw"].to_numpy()
+    expected = float(np.quantile(y - raw["load_p90_kw"].to_numpy(), 0.9, method="higher"))
+    assert bundle.calibration_offsets["p90"] == pytest.approx(expected)
+
+
+def test_bare_slice_distorts_offsets_that_history_fixes():
+    grid = _random_walk_grid()
+    start = grid.index[-24 * 14]
+    bare = LoadQuantileBundle.fit(grid.loc[: start - pd.Timedelta(hours=1)], UTC_CONFIG)
+    bare.calibrate(grid.loc[start:])  # the old call: no history before the slice
+    full = LoadQuantileBundle.fit(grid.loc[: start - pd.Timedelta(hours=1)], UTC_CONFIG)
+    full.calibrate(grid, start=start)
+    width = lambda b: b.calibration_offsets["p90"] - b.calibration_offsets["p10"]  # noqa: E731
+    assert width(bare) > width(full) + 0.1, (bare.calibration_offsets, full.calibration_offsets)

@@ -14,7 +14,10 @@ pairs of the last two weeks drive a daily correction of the next forecasts:
 
 Every estimate is shrunk towards "no correction" by its sample count, so a
 handful of pairs barely moves the forecast. Corrections are always fitted on
-raw model outputs, never on already corrected ones, so they cannot compound.
+raw model outputs, never on already corrected ones, so they cannot compound,
+and only on outputs of the model version now in use: a retrained model has
+its own errors, and inheriting the old model's correction would compensate
+a bias it may no longer have (or double it).
 
 The same pairs give a drift signal: a persistent bias or a collapsed band
 over the last week marks the model as stale and lets the retrain run early.
@@ -22,6 +25,7 @@ over the last week marks the model as stale and lets the retrain run early.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -78,6 +82,15 @@ def read_forecast_log(path: Path) -> list[dict]:
     return entries
 
 
+def bundle_version(directory: Path) -> str | None:
+    """Short content hash of a saved model bundle: changes with every
+    promoted retrain, stays put when the retrain kept the live model."""
+    try:
+        return hashlib.sha1((Path(directory) / "bundle.json").read_bytes()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
 def log_entry(
     issue: datetime,
     starts: pd.DatetimeIndex,
@@ -86,13 +99,16 @@ def log_entry(
     pv: tuple[list, list, list],
     pv_method: str,
     reserve_kwh_by_hour: list[float] | None = None,
+    versions: dict[str, str | None] | None = None,
 ) -> dict:
-    """Serializable record of one run's RAW forecasts and its reserve."""
+    """Serializable record of one run's RAW forecasts, model versions and reserve."""
+    versions = versions or {}
 
-    def block(values, method):
+    def block(values, method, version):
         p10, p50, p90 = values
         return {
             "method": method,
+            "version": version,
             "p10": [round(float(v), 4) for v in p10],
             "p50": [round(float(v), 4) for v in p50],
             "p90": [round(float(v), 4) for v in p90],
@@ -101,8 +117,8 @@ def log_entry(
     entry = {
         "issue_utc": pd.Timestamp(issue).isoformat(),
         "starts_utc": [s.isoformat() for s in starts],
-        "load": block(load, load_method),
-        "pv": block(pv, pv_method),
+        "load": block(load, load_method, versions.get("load")),
+        "pv": block(pv, pv_method, versions.get("pv")),
     }
     if reserve_kwh_by_hour is not None:
         entry["reserve_kwh_by_hour"] = [round(float(v), 4) for v in reserve_kwh_by_hour]
@@ -129,13 +145,19 @@ def actual_series(audit: pd.DataFrame, target: str) -> pd.Series:
 
 
 def forecast_pairs(
-    log: list[dict], audit: pd.DataFrame, target: str, since: datetime
+    log: list[dict],
+    audit: pd.DataFrame,
+    target: str,
+    since: datetime,
+    version: str | None = None,
 ) -> pd.DataFrame:
     """Issued model forecasts joined with actuals for hours >= since.
 
     Columns: issue, start, lead (1 = issue hour), p10, p50, p90, actual.
     Fallback (non-model) forecasts are skipped: correcting the model with the
-    errors of a different method would teach it the wrong lesson.
+    errors of a different method would teach it the wrong lesson. With
+    ``version`` only forecasts of that model version count (entries logged
+    before versions were recorded belong to an unknown model and are skipped).
     """
     actual = actual_series(audit, target).dropna()
     if actual.empty:
@@ -146,6 +168,8 @@ def forecast_pairs(
     for entry in log:
         block = entry.get(target) or {}
         if block.get("method") != "model":
+            continue
+        if version is not None and block.get("version") != version:
             continue
         issue = pd.Timestamp(entry["issue_utc"]).tz_convert(UTC)
         starts = pd.DatetimeIndex(pd.to_datetime(entry["starts_utc"], utc=True))
@@ -318,10 +342,23 @@ def drift_status(pairs_by_target: dict[str, pd.DataFrame], now: datetime) -> dic
 
 
 def self_correct(
-    log: list[dict], audit: pd.DataFrame, tz: ZoneInfo, now: datetime
+    log: list[dict],
+    audit: pd.DataFrame,
+    tz: ZoneInfo,
+    now: datetime,
+    versions: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, Calibration], dict]:
-    """Calibrations for both targets plus the drift status, from one log read."""
+    """Calibrations for both targets plus the drift status, from one log read.
+
+    ``versions`` maps each target to the live model version; its pairs alone
+    are used, so a promoted retrain starts from no correction. Without it
+    every model forecast counts (callers that do not track versions).
+    """
     since = pd.Timestamp(now).tz_convert(UTC) - pd.Timedelta(days=CALIBRATION_WINDOW_DAYS)
-    pairs = {target: forecast_pairs(log, audit, target, since) for target in TARGETS}
+    versions = versions or {}
+    pairs = {
+        target: forecast_pairs(log, audit, target, since, versions.get(target))
+        for target in TARGETS
+    }
     calibrations = {target: fit_calibration(pairs[target], target, tz) for target in TARGETS}
     return calibrations, drift_status(pairs, now)

@@ -919,6 +919,25 @@ def _tuning_note(tuning: dict | None, mode: str, autotune: bool) -> str | None:
     return line + " — совет, автонастройка выключена"
 
 
+def readback_ok(entity: str, expected, step_pct: float) -> bool:
+    """Whether the entity now holds the written value.
+
+    Numbers match within half an inverter step (a device may store its own
+    rounding of the value, never a whole step off); switch states must be
+    exactly "on"/"off" as written.
+    """
+    try:
+        state = ha_get(f"/api/states/{entity}")["state"]
+    except Exception:
+        return False
+    if isinstance(expected, str):
+        return str(state) == expected
+    try:
+        return abs(float(state) - float(expected)) < step_pct / 2.0
+    except (TypeError, ValueError):
+        return False
+
+
 def autonomy(
     soc: float, min_soc: float, capacity_kwh: float, discharge_efficiency: float, critical_kw: float
 ) -> float | None:
@@ -1306,8 +1325,8 @@ def recommend_zone_socs(
     """Heuristic Batt% per TOU zone, stored as program["recommended_soc_pct"].
 
     Each zone gets the floating floor of its own start hour (next occurrence
-    in the horizon), raised to the highest outage reserve inside the zone's
-    window. The start-hour floor alone is the daily low for a zone such as
+    in the horizon; the current hour for the zone in effect right now),
+    raised to the highest outage reserve inside the zone's window. The start-hour floor alone is the daily low for a zone such as
     09:00-17:00; the inverter holds that one value all afternoon, so on a
     cloudy day the battery could drain below the reserve the evening hours
     of the same zone need.
@@ -1318,10 +1337,10 @@ def recommend_zone_socs(
         if zone is None:
             program["recommended_soc_pct"] = None
             continue
-        match, window, _ = zone
+        start = 0 if zone.current else zone.match
         program["recommended_soc_pct"] = max(
-            round(floors[match] * 100),
-            optimize.reserve_floor_pct(reserve_floors, window, step_pct),
+            round(floors[start] * 100),
+            optimize.reserve_floor_pct(reserve_floors, zone.window, step_pct),
         )
 
 
@@ -1403,6 +1422,14 @@ def run() -> dict:
     else:
         pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
     pv_method = "model" if weather is not None and pv_bundle is not None else "fallback"
+    model_versions = {
+        "load": learning.bundle_version(DATA / "models" / "load_quantiles_v1")
+        if load_method == "model"
+        else None,
+        "pv": learning.bundle_version(DATA / "models" / "pv_quantiles_v1")
+        if pv_method == "model"
+        else None,
+    }
 
     # Self-correction between retrains: the RAW forecasts are logged (below,
     # once the reserve is known) and the last two weeks of issued-vs-actual
@@ -1416,7 +1443,11 @@ def run() -> dict:
     drift: dict = {}
     try:
         calibrations, drift = learning.self_correct(
-            learning.read_forecast_log(DATA / "forecast_log.jsonl"), audit, tz, issue
+            learning.read_forecast_log(DATA / "forecast_log.jsonl"),
+            audit,
+            tz,
+            issue,
+            versions=model_versions,
         )
         (DATA / "drift_state.json").write_text(json.dumps(drift, ensure_ascii=False), encoding="utf-8")
         if load_method == "model":
@@ -1561,7 +1592,14 @@ def run() -> dict:
         learning.append_forecast_log(
             DATA / "forecast_log.jsonl",
             learning.log_entry(
-                issue, starts_plan, raw_load, load_method, raw_pv, pv_method, reserve_by_hour
+                issue,
+                starts_plan,
+                raw_load,
+                load_method,
+                raw_pv,
+                pv_method,
+                reserve_by_hour,
+                versions=model_versions,
             ),
         )
     except OSError:
@@ -1664,6 +1702,9 @@ def run() -> dict:
                 item["current"] = None
     applied: list[str] = []
     apply_errors: list[str] = []
+    # Writes waiting for read-back: (label, entity, expected, ok message);
+    # expected is a float for SOC values and "on"/"off" for switches.
+    pending: list[tuple[str, str, float | str, str]] = []
     if opts.get("apply_mode", False):
         for item in grid_charge:
             wanted = "on" if item["desired"] else "off"
@@ -1675,9 +1716,15 @@ def run() -> dict:
                 continue
             try:
                 ha_service(domain, f"turn_{wanted}", {"entity_id": item["entity"]})
-                applied.append(f"заряд из сети зона {item['n']}: {wanted} ({item['reason']})")
             except Exception:
                 apply_errors.append(f"заряд из сети, зона {item['n']}")
+                continue
+            pending.append((
+                f"заряд из сети, зона {item['n']}",
+                item["entity"],
+                wanted,
+                f"заряд из сети зона {item['n']}: {wanted} ({item['reason']})",
+            ))
         zone_pct = {}
         if optimizer_plan is not None and not optimizer_plan.get("floor_relaxed"):
             for t in optimizer_plan["zone_targets"]:
@@ -1689,7 +1736,6 @@ def run() -> dict:
                     zone_pct[p["n"]] = p["recommended_soc_pct"]
         min_pct = int(round(_soc_bounds(opts)[0] * 100))
         max_pct = int(round(_soc_bounds(opts)[1] * 100))
-        pending: list[tuple[str, str, float, str]] = []  # label, entity, target, ok message
         for p in programs:
             target = zone_pct.get(p["n"])
             if target is None:
@@ -1730,20 +1776,18 @@ def run() -> dict:
                 ))
             except Exception:
                 apply_errors.append("порог SOC")
-        # Read back after the inverter had a moment to propagate. A mismatch
-        # > 5 pp means the value did not stick (e.g. TOU/Grid Charge switches
-        # off on the inverter) — report it instead of claiming success.
+        # Read back after the inverter had a moment to propagate: HTTP 200
+        # only means HA accepted the call. A write happens only when the value
+        # moves by at least one step, so a device that ignored it is still a
+        # full step away — the tolerance must stay below half a step, or an
+        # unchanged zone would pass as applied.
         if pending:
             time.sleep(3)
-            for label, entity, target, ok_msg in pending:
-                try:
-                    confirmed = float(ha_get(f"/api/states/{entity}")["state"])
-                except Exception:
-                    confirmed = None
-                if confirmed is None or abs(confirmed - target) > caps.soc_step_pct:
-                    apply_errors.append(f"{label} (запись не подтверждена)")
-                else:
+            for label, entity, expected, ok_msg in pending:
+                if readback_ok(entity, expected, caps.soc_step_pct):
                     applied.append(ok_msg)
+                else:
+                    apply_errors.append(f"{label} (запись не подтверждена)")
 
     last_outage = max(
         (e.end for e in events if e.end is not None and e.source == "measured"), default=None

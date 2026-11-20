@@ -87,7 +87,53 @@ def test_zone_windows_wrap_around_horizon_edge():
     starts = pd.date_range("2026-11-15 01:00", periods=24, freq="h", tz="UTC")
     programs = [{"n": 1, "from": "00:00", "soc_pct": 0}, {"n": 2, "from": "07:00", "soc_pct": 0}]
     windows = optimize.zone_windows(programs, starts, TZ)
-    match, window, forward_end = windows[1]
-    assert match == 23  # tomorrow 00:00
-    assert window == [23, 0, 1, 2, 3, 4, 5]  # 00:00 tomorrow, then 01:00-07:00 today
-    assert forward_end == 24
+    zone = windows[1]
+    assert zone.match == 23  # tomorrow 00:00
+    assert zone.window == [23, 0, 1, 2, 3, 4, 5]  # 00:00 tomorrow, then 01:00-07:00 today
+    assert zone.forward_end == 24
+    # 00:00-07:00 is in effect at the 01:00 issue: its remaining hours are now.
+    assert zone.current == [0, 1, 2, 3, 4, 5]
+    assert zone.now == ([0, 1, 2, 3, 4, 5], True)
+    assert windows[2].current is None and windows[2].now == (
+        [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+        False,
+    )
+
+
+# --- the zone in effect at the issue hour (review round 2) ------------------
+
+ACTIVE_STARTS = pd.date_range("2026-11-20 01:00", periods=24, freq="h", tz="UTC")
+ACTIVE_PROGRAMS = [
+    {"n": 1, "from": "00:00", "soc_pct": 50},
+    {"n": 2, "from": "07:00", "soc_pct": 50},
+]
+# The plan charges 50 -> 80 % right now (01:00-07:00), ends the day at 75 %.
+ACTIVE_SOC = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8] + [0.7] * 17 + [0.75]
+
+
+def test_active_zone_target_follows_its_current_hours():
+    out = optimize.zone_targets(ACTIVE_SOC, 0.5, ACTIVE_PROGRAMS, ACTIVE_STARTS, TZ, 0.1, 1.0)
+    # Was 75 %: derived from tomorrow's 00:00 occurrence.
+    assert out[0]["optimal_soc_pct"] == 80
+
+
+def test_active_discharging_zone_floor_uses_current_hours():
+    # Discharging now; tomorrow's 00:00 occurrence would look like charging.
+    soc = [0.45, 0.4, 0.35, 0.3, 0.3, 0.3] + [0.5] * 17 + [0.9]
+    out = optimize.zone_targets(soc, 0.5, ACTIVE_PROGRAMS, ACTIVE_STARTS, TZ, 0.1, 1.0)
+    assert out[0]["optimal_soc_pct"] == 30  # was 90: a bogus charge target
+
+
+def test_active_zone_reserve_bound_still_covers_next_occurrence():
+    reserve = [0.2] * 23 + [0.9]  # risk at tomorrow's 00:00
+    out = optimize.zone_targets(
+        ACTIVE_SOC, 0.5, ACTIVE_PROGRAMS, ACTIVE_STARTS, TZ, 0.1, 1.0, reserve_floors=reserve
+    )
+    assert out[0]["optimal_soc_pct"] == 90
+
+
+def test_heuristic_active_zone_uses_the_current_hour_floor():
+    programs = [dict(p) for p in ACTIVE_PROGRAMS]
+    floors = [0.6] + [0.2] * 22 + [0.3]  # now 60 %, tomorrow's 00:00 only 30 %
+    pipeline.recommend_zone_socs(programs, floors, [0.1] * 24, ACTIVE_STARTS, TZ)
+    assert programs[0]["recommended_soc_pct"] == 60

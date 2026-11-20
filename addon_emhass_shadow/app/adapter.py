@@ -81,8 +81,10 @@ def grid_charge_plan(
         zone = windows[program["n"]]
         if zone is None:
             continue
-        match, window, _ = zone
-        entry_soc = soc_init if match == 0 or not soc_opt else soc_opt[match - 1]
+        # The flag acts first on the hours the zone governs now: for the zone
+        # in effect, its remaining hours entered at the MEASURED SOC.
+        window, in_effect = zone.now
+        entry_soc = soc_init if in_effect or not soc_opt else soc_opt[zone.match - 1]
         reserve_pct = optimize.reserve_floor_pct(reserve_floors, window)
         if reserve_pct > round(entry_soc * 100.0):
             desired, reason = True, f"резерв {reserve_pct}% выше плана на входе"

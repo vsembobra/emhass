@@ -11,7 +11,7 @@ Shadow mode: results are advisory only, nothing is written to the inverter.
 import logging
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -222,16 +222,43 @@ def _charge_target_kept(
     )
 
 
+class ZoneWindow(NamedTuple):
+    """Where one TOU zone sits in the horizon.
+
+    match: index of the zone's next start; window: its indices in cyclic
+    horizon order (the next occurrence plus, for the zone in effect right
+    now, the remaining hours of the current one); forward_end: end of the
+    next occurrence without that wrap; current: remaining hours of the
+    current occurrence when the zone is in effect at the horizon start
+    (it started before the issue hour), else None.
+    """
+
+    match: int
+    window: list[int]
+    forward_end: int
+    current: list[int] | None
+
+    @property
+    def now(self) -> tuple[list[int], bool]:
+        """Indices the value written now governs first, and whether it is
+        the zone in effect right now (entry SOC = measured SOC)."""
+        if self.current:
+            return self.current, True
+        return list(range(self.match, self.forward_end)), self.match == 0
+
+
 def zone_windows(
     programs: list[dict], starts: pd.DatetimeIndex, tz: ZoneInfo
-) -> dict[int, tuple[int, list[int], int] | None]:
-    """Per TOU zone: (start index, window indices, forward end) in the horizon.
+) -> dict[int, ZoneWindow | None]:
+    """Per TOU zone: its :class:`ZoneWindow`, or None when the zone's start
+    hour does not occur in the horizon.
 
     The window runs from the zone's start to the next zone start in cyclic
     horizon order; a zone crossing the horizon edge (e.g. 00:00-07:00 when
-    the horizon starts at 01:00) wraps around to the earliest one. The
-    forward end is the chronological end without that wrap. None when the
-    zone's start hour does not occur in the horizon.
+    the horizon starts at 01:00) wraps around to the earliest one. That
+    wrapping zone is the one in effect at the issue hour: its wrap part is
+    happening NOW, not tomorrow, and the decisions it drives (target, grid
+    charge) must use the measured SOC and those remaining hours.
     """
     matches = {}
     for program in programs:
@@ -241,18 +268,22 @@ def zone_windows(
             None,
         )
     starts_idx = sorted(i for i in matches.values() if i is not None)
-    windows: dict[int, tuple[int, list[int], int] | None] = {}
+    windows: dict[int, ZoneWindow | None] = {}
     for n, match in matches.items():
         if match is None:
             windows[n] = None
             continue
         later = [i for i in starts_idx if i > match]
         end = later[0] if later else (starts_idx[0] if starts_idx else len(starts))
+        current = None
         if end > match:
             window = list(range(match, end))
         else:
             window = list(range(match, len(starts))) + list(range(0, end))
-        windows[n] = (match, window or [match], later[0] if later else len(starts))
+            current = list(range(0, end)) or None
+        windows[n] = ZoneWindow(
+            match, window or [match], later[0] if later else len(starts), current
+        )
     return windows
 
 
@@ -322,24 +353,30 @@ def zone_targets(
         if zone is None:
             targets.append({**program, "optimal_soc_pct": None})
             continue
-        match, window, forward_end = zone
-        entry_soc = soc_init if match == 0 else soc_opt[match - 1]
-        # Charge detection runs on the chronological forward part only:
-        # [match, next zone start) without the cyclic wrap. The wrap part is
-        # the horizon's beginning — earlier in real time — so its end_soc
-        # would compare "today evening" against "tomorrow morning" and could
-        # fake a rising window, pinning the zone to a bogus charge target.
-        end_soc = soc_opt[forward_end - 1]
-        if end_soc > entry_soc + 0.005 and _charge_target_kept(window, strategy, cheap_windows, starts, tz):
+        # Decide on the hours the written value governs first. For the zone
+        # in effect right now those are its remaining hours, entered at the
+        # measured SOC — not tomorrow's occurrence. Otherwise it is the next
+        # occurrence without the cyclic wrap: the wrap part is the horizon's
+        # beginning, so comparing across it would set "today evening"
+        # against "tomorrow morning" and fake a rising window.
+        span, in_effect = zone.now
+        if in_effect:
+            entry_soc = soc_init
+        else:
+            entry_soc = soc_opt[zone.match - 1]
+        end_soc = soc_opt[span[-1]]
+        if end_soc > entry_soc + 0.005 and _charge_target_kept(span, strategy, cheap_windows, starts, tz):
             pct = math.ceil(clamp_pct(end_soc) / soc_step_pct - 1e-9) * soc_step_pct
         else:
-            floor_soc = min(soc_opt[i] for i in window)
+            floor_soc = min(soc_opt[i] for i in span)
             if strategy == "flat":
                 floor_soc = min(floor_soc, horizon_min)
             # Round UP: rounding down would shave up to 5 pp off the reserve.
             pct = math.ceil(clamp_pct(floor_soc) / soc_step_pct - 1e-9) * soc_step_pct
         if reserve_floors is not None:
-            reserve_pct = reserve_floor_pct(reserve_floors, window, soc_step_pct)
+            # The value persists into the zone's next occurrence until a later
+            # run rewrites it, so the reserve bound covers the whole window.
+            reserve_pct = reserve_floor_pct(reserve_floors, zone.window, soc_step_pct)
             pct = max(pct, min(reserve_pct, math.floor(max_soc * 100.0 + 1e-9)))
         targets.append({**program, "optimal_soc_pct": pct})
     return targets

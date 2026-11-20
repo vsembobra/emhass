@@ -177,12 +177,18 @@ def pv_aware_reserve(
     pv = [max(0.0, float(value)) for value in pv_p10_kw]
     adjusted = []
     for i in range(count):
-        # AC-side hourly critical load behind this battery-side reserve.
-        hourly_need = float(reserves[i]) * discharge_efficiency / window
+        # AC-side critical load power behind this battery-side reserve. The
+        # power is reserve / duration — dividing by the rounded-up window
+        # would spread a 3.1 h outage over 4 h and underprice every hour
+        # before the sun. The last, partial interval counts only its share.
+        need_kw = (
+            float(reserves[i]) * discharge_efficiency / duration_hours if duration_hours > 0 else 0.0
+        )
         deficit = 0.0
         worst = 0.0
         for k in range(window):
-            deficit = max(0.0, deficit + hourly_need - pv[(i + k) % count])
+            hours = min(1.0, duration_hours - k)
+            deficit = max(0.0, deficit + (need_kw - pv[(i + k) % count]) * hours)
             worst = max(worst, deficit)
         adjusted.append(max(baseline_kwh, worst / discharge_efficiency))
     return adjusted

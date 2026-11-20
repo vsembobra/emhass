@@ -277,16 +277,18 @@ def _retrain_load(
             return {**result, "status": "kept", "reason": "мало свежих данных для сравнения"}
         # Fresh install with a short audit: fit on everything instead of failing.
         bundle = LoadQuantileBundle.fit(grid, config=config, seasonal=seasonal, sample_weight=weights)
-        tail = grid.loc[grid.index[-24:]]
-        if tail["load_kw"].notna().sum() >= 24:
-            bundle.calibrate(tail)
+        tail_start = grid.index[-24]
+        if grid.loc[tail_start:, "load_kw"].notna().sum() >= 24:
+            bundle.calibrate(grid, start=tail_start)
     else:
         challenger = LoadQuantileBundle.fit(
             pre, config=config, seasonal=seasonal, sample_weight=weights.loc[pre.index]
         )
-        calib = pre.loc[pre.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS) + HOUR :]
-        if calib["load_kw"].notna().sum() >= 24:
-            challenger.calibrate(calib)
+        # Calibration rows are the last 14 days before the holdout, with the
+        # earlier history passed along so their lag features are real.
+        calib_start = pre.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS) + HOUR
+        if pre.loc[calib_start:, "load_kw"].notna().sum() >= 24:
+            challenger.calibrate(pre, start=calib_start)
         score_challenger, pairs = load_holdout_score(challenger, grid, start)
         score_champion = load_holdout_score(champion, grid, start)[0] if champion else None
         result["holdout_pairs"] = pairs
@@ -296,7 +298,9 @@ def _retrain_load(
         bundle = LoadQuantileBundle.fit(
             grid, config=challenger.config, seasonal=seasonal, sample_weight=weights
         )
-        challenger.calibrate(holdout)  # out-of-sample offsets for the refit
+        # Out-of-sample offsets for the refit: errors on the holdout only,
+        # features with the full history before it.
+        challenger.calibrate(grid, start=start)
         bundle.calibration_offsets = dict(challenger.calibration_offsets)
         bundle.calibrated_from = challenger.calibrated_from
         bundle.calibrated_until = challenger.calibrated_until

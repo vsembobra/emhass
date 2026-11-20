@@ -51,6 +51,8 @@ def fake_site(monkeypatch, tmp_path):
         services.append((domain, service, payload))
         if service == "set_value":
             states[payload["entity_id"]] = str(payload["value"])
+        elif service in ("turn_on", "turn_off"):
+            states[payload["entity_id"]] = service.removeprefix("turn_")
 
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     index = pd.date_range(now - timedelta(hours=48), periods=96, freq="h")
@@ -181,3 +183,32 @@ def test_shadow_mode_reports_grid_charge_advice_without_writing(fake_site):
     report = pipeline.run()
     assert len(report["advisory"]["grid_charge"]) == 6
     assert not [s for s in fake_site["services"] if s[0] == "switch"]
+
+
+def test_ignored_writes_are_not_reported_as_applied(fake_site, monkeypatch):
+    """Review case: the device keeps every value; nothing may count as applied."""
+    for n in range(1, 7):
+        fake_site["states"][f"switch.inverter_program_{n}_charging"] = "on"
+    fake_site["setup"](
+        apply_mode=True,
+        tariff_enabled=True,
+        tariff_cheap_windows="23:00-07:00",
+        tou_grid_charge_entity_template="switch.inverter_program_{n}_charging",
+    )
+    monkeypatch.setattr(pipeline, "ha_service", lambda *a: None)  # accepted, not applied
+    report = pipeline.run()
+    assert report["advisory"]["applied"] == []
+    errors = report["advisory"]["apply_errors"]
+    assert errors and all("не подтверждена" in e for e in errors)
+    assert any(e.startswith("заряд из сети") for e in errors)
+
+
+def test_readback_tolerance_is_below_half_a_step(fake_site):
+    states = fake_site["states"]
+    states["number.x"] = "30"
+    assert not pipeline.readback_ok("number.x", 35.0, 5)
+    states["number.x"] = "34"
+    assert pipeline.readback_ok("number.x", 35.0, 5)
+    states["switch.y"] = "on"
+    assert pipeline.readback_ok("switch.y", "on", 5)
+    assert not pipeline.readback_ok("switch.y", "off", 5)

@@ -399,26 +399,32 @@ class LoadQuantileBundle:
             return 0.0
         return float(np.quantile(finite, alpha, method="higher"))
 
-    def calibrate(self, grid: pd.DataFrame) -> None:
+    def calibrate(self, grid: pd.DataFrame, *, start: pd.Timestamp | None = None) -> None:
         """Split-conformal additive P10/P90 adjustment on a chronological slice.
 
-        The slice must end before the test slice; the caller owns the split.
-        Offsets target one-sided 90% coverage on the calibration rows.
+        The calibration rows are ``grid`` from ``start`` on (all rows when
+        ``start`` is None); they must end before the test slice — the caller
+        owns the split. Pass the history before ``start`` in ``grid`` too:
+        features are built on the whole grid so the 24/168 h lags and
+        rolling means of the first calibration rows are real, as they are in
+        production, instead of artificial gaps that would distort the
+        offsets. Offsets target one-sided 90% coverage on the calibration rows.
         """
         _check_hourly_grid(grid.index)
+        first = grid.index[0] if start is None else pd.Timestamp(start).tz_convert(UTC)
         features, origin = stacked_features(grid, self.config, self.seasonal)
         target = pd.to_numeric(grid["load_kw"], errors="coerce")
-        if target.notna().sum() < 24:
+        if target.loc[first:].notna().sum() < 24:
             raise ValueError("at least 24 valid calibration rows are required")
         stacked_target = _stacked(target, grid.index, origin)
-        valid = stacked_target.notna()
+        valid = stacked_target.notna() & pd.Series(origin >= first, index=stacked_target.index)
         raw = self._raw_predict(features.loc[valid])
         y = stacked_target.loc[valid].to_numpy(dtype=float)
         self.calibration_offsets = {
             "p90": self._conformal_offset(y - raw["load_p90_kw"].to_numpy(), 0.9),
             "p10": -self._conformal_offset(raw["load_p10_kw"].to_numpy() - y, 0.9),
         }
-        self.calibrated_from = grid.index[0].isoformat()
+        self.calibrated_from = grid.loc[first:].index[0].isoformat()
         self.calibrated_until = grid.index[-1].isoformat()
 
     def predict(
