@@ -496,7 +496,8 @@ def _rows_for_hours(site, ent, hours: list) -> list[dict]:
 
 def _read_audit() -> pd.DataFrame:
     audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
-    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
+    # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
+    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     return audit.set_index("start_utc").sort_index()
 
 
@@ -543,7 +544,9 @@ def _prepend_rows(audit: pd.DataFrame, rows: list[dict]) -> int:
     (DATA / "hourly_audit.jsonl").write_text(
         "".join(
             json.dumps(
-                {"start_utc": at.isoformat(), **row.dropna().to_dict()},
+                # Same spelling as build_audit_rows ("…Z"), so appends and
+                # rewrites never mix timestamp formats in one file.
+                {"start_utc": at.isoformat().replace("+00:00", ".000Z"), **row.dropna().to_dict()},
                 default=_json_default,
             )
             + "\n"

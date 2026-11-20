@@ -124,7 +124,8 @@ def _drift_detected() -> bool:
 
 def _audit_frame() -> pd.DataFrame:
     audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
-    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
+    # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
+    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     audit = audit.set_index("start_utc").sort_index()
     audit = audit[~audit.index.duplicated(keep="last")]
     full = pd.date_range(audit.index[0], audit.index[-1], freq="h", tz=UTC)
