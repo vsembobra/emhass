@@ -55,6 +55,11 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
         STATE["running"] = True
         STATE["last_error"] = None
     try:
+        try:
+            # Options saved in the add-on settings apply without a restart.
+            pipeline.sync_options()
+        except Exception:
+            pass
         if not (DATA / "hourly_audit.jsonl").exists():
             # Fresh install: learn from what Home Assistant already holds
             # (recorder detail + months of long-term statistics + outages),
@@ -358,7 +363,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/options") or path == "/api/options":
             try:
-                self._json(200, {"groups": options_meta.options_view(pipeline.options())})
+                self._json(200, {"groups": options_meta.options_view(pipeline.sync_options())})
             except Exception:
                 self._json(500, {"error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/entity_ids") or path == "/api/entity_ids":

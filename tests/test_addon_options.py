@@ -131,3 +131,61 @@ def test_options_view_covers_groups_and_values():
     item = next(i for g in groups for i in g["items"] if i["key"] == "capacity_kwh")
     assert item["value"] == 32.0
     assert item["hint"] and item["label"]
+
+
+def _supervisor_holding(monkeypatch, tmp_path, local, stored):
+    """The Supervisor holds ``stored``; the add-on's file still says ``local``."""
+    (tmp_path / "options.json").write_text(json.dumps(local))
+    monkeypatch.setattr(pipeline, "DATA", tmp_path)
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "x")
+    posted = {}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0, **kw):
+        if request.full_url.endswith("/addons/self/info"):
+            return Response({"result": "ok", "data": {"options": stored}})
+        posted["body"] = json.loads(request.data)
+        return Response({"result": "ok"})
+
+    monkeypatch.setattr(pipeline.urllib.request, "urlopen", fake_urlopen)
+    return posted
+
+
+def test_options_saved_in_the_addon_settings_apply_without_a_restart(monkeypatch, tmp_path):
+    # Owner case: 25 % saved, the running add-on's file still says 10 %.
+    _supervisor_holding(
+        monkeypatch, tmp_path, {"min_soc_pct": 10.0, "capacity_kwh": 32.0},
+        {"min_soc_pct": 25.0, "capacity_kwh": 32.0},
+    )
+    assert pipeline.sync_options()["min_soc_pct"] == 25.0
+    assert pipeline.options()["min_soc_pct"] == 25.0  # what every run reads
+
+
+def test_a_panel_save_keeps_edits_made_in_the_addon_settings(monkeypatch, tmp_path):
+    posted = _supervisor_holding(
+        monkeypatch, tmp_path, {"min_soc_pct": 10.0, "capacity_kwh": 32.0},
+        {"min_soc_pct": 25.0, "capacity_kwh": 32.0},
+    )
+    pipeline.update_options({"capacity_kwh": "30"})
+    # Merged into what the Supervisor holds, not into the stale file.
+    assert posted["body"]["options"] == {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
+    assert pipeline.options() == {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
+
+
+def test_without_the_supervisor_the_file_stays(monkeypatch, tmp_path):
+    (tmp_path / "options.json").write_text(json.dumps({"min_soc_pct": 10.0}))
+    monkeypatch.setattr(pipeline, "DATA", tmp_path)
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    assert pipeline.sync_options() == {"min_soc_pct": 10.0}

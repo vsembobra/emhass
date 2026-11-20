@@ -1592,6 +1592,51 @@ ENTITY_OPTION_KEYS = [
 SUPERVISOR_BASE = "http://supervisor"
 
 
+def supervisor_options() -> dict | None:
+    """The options the Supervisor holds right now; None when it cannot say.
+
+    The Supervisor writes /data/options.json only when the add-on starts
+    ("changes to options take effect the next time the app starts"), so a
+    value saved in the add-on settings or from the panel stayed invisible
+    to the running add-on until a restart: the panel kept showing the old
+    min SOC after a save. The Supervisor's stored options are the truth.
+    """
+    try:
+        request = urllib.request.Request(
+            SUPERVISOR_BASE + "/addons/self/info",
+            headers={"Authorization": f"Bearer {_token()}"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.load(response).get("data") or {}
+    except Exception:
+        return None
+    stored = data.get("options")
+    return dict(stored) if isinstance(stored, dict) and stored else None
+
+
+def _write_options(opts: dict) -> None:
+    tmp = DATA / "options.json.tmp"
+    tmp.write_text(json.dumps(opts, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(DATA / "options.json")
+
+
+def sync_options() -> dict:
+    """Bring /data/options.json up to the Supervisor's stored options.
+
+    Called before every run and whenever the panel reads the options, so an
+    edit applies at the next run without restarting the add-on. Without the
+    Supervisor (tests, a local run) the file stays as it is.
+    """
+    current = options()
+    stored = supervisor_options()
+    if stored is None:
+        return current
+    merged = {**current, **stored}
+    if merged != current:
+        _write_options(merged)
+    return merged
+
+
 def update_options(changes: dict) -> dict:
     """Write option edits from the panel through the Supervisor self-options API.
 
@@ -1599,8 +1644,10 @@ def update_options(changes: dict) -> dict:
     option is validated and coerced against options_meta (type, range,
     choices), so a bad edit is rejected with a readable ValueError instead of
     failing the Supervisor schema check. Unknown keys are reported in
-    "rejected" and dropped. The Supervisor rewrites /data/options.json, and
-    the next run reads it fresh — no add-on restart needed.
+    "rejected" and dropped. The edits are merged into the options the
+    Supervisor holds now — not into the local file, which lags until a
+    restart and would silently undo edits made in the add-on settings —
+    and the local file is updated at once, so the next run uses them.
     """
     filtered: dict = {}
     rejected: list[str] = []
@@ -1613,8 +1660,8 @@ def update_options(changes: dict) -> dict:
             rejected.append(key)
     if not filtered:
         return {"saved": {}, "rejected": rejected}
-    opts = options()
-    opts.update(filtered)
+    local = options()
+    opts = {**(supervisor_options() or local), **filtered}
     request = urllib.request.Request(
         SUPERVISOR_BASE + "/addons/self/options",
         data=json.dumps({"options": opts}).encode(),
@@ -1622,6 +1669,7 @@ def update_options(changes: dict) -> dict:
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         json.load(response)
+    _write_options({**local, **opts})
     return {"saved": filtered, "rejected": rejected}
 
 
