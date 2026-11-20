@@ -63,3 +63,22 @@ def test_fresh_install_update_audit_uses_backfill_days(fake_ha):
     # now-48h .. now-1h, but the "last" stub itself is not an audit row
     assert appended == 47
     assert len(audit) == 47
+
+
+def test_audit_entities_skip_empty_option_values():
+    ent = {
+        "mean_sensors": {
+            "load_kw": ("sensor.load", 0.001),
+            "temp_air_observed_c": ("", 1.0),  # cleared option must not reach the query
+        },
+        "voltages": {},
+        "soc": "sensor.soc",
+        "export_counter": "sensor.export",
+        "grid_binary": "binary_sensor.grid",
+    }
+    assert pipeline._audit_entities(ent) == [
+        "sensor.load",
+        "sensor.soc",
+        "sensor.export",
+        "binary_sensor.grid",
+    ]

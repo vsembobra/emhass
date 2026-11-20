@@ -113,6 +113,9 @@ def ha_service(domain: str, service: str, payload: dict) -> None:
 
 
 def fetch_history(start: datetime, end: datetime, entities: list[str]) -> dict[str, list[dict]]:
+    entities = [e for e in entities if str(e or "").strip()]
+    if not entities:
+        return {}
     query = urllib.parse.urlencode(
         {
             "filter_entity_id": ",".join(entities),
@@ -278,11 +281,17 @@ BACKFILL_CHUNK_DAYS = 3  # recorder fetches are chunked; one long range can time
 
 
 def _audit_entities(ent) -> list[str]:
-    return (
-        [e for e, _ in ent["mean_sensors"].values()]
-        + list(ent["voltages"].values())
-        + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
-    )
+    # Empty option values ("") must never reach the history query:
+    # an empty filter_entity_id entry makes HA answer 400 Bad Request.
+    return [
+        e
+        for e in (
+            [e for e, _ in ent["mean_sensors"].values()]
+            + list(ent["voltages"].values())
+            + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
+        )
+        if str(e or "").strip()
+    ]
 
 
 def _rows_for_hours(site, ent, hours: list) -> list[dict]:
@@ -402,9 +411,12 @@ def _last_observation() -> datetime | None:
 
 
 def update_outage_log(ent) -> int:
+    grid_binary = str(ent.get("grid_binary") or "").strip()
+    if not grid_binary:
+        return 0
     now = datetime.now(UTC)
-    history = fetch_history(now - timedelta(hours=48), now, [ent["grid_binary"]])
-    series = grid_status_series(history.get(ent["grid_binary"], []))
+    history = fetch_history(now - timedelta(hours=48), now, [grid_binary])
+    series = grid_status_series(history.get(grid_binary, []))
     cursor_at = _last_observation()
     if cursor_at is not None:
         series = [sample for sample in series if sample[0] > cursor_at]
