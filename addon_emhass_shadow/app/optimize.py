@@ -327,10 +327,17 @@ def zone_targets(
     "tomorrow morning") and pins the zone to a bogus charge target.
 
     strategy selects the floor of the discharging windows:
+    - "flat" (the add-on default): every zone outside the cheap tariff hours
+      gets the lowest allowed SOC — min SOC, lifted by the outage reserve
+      below. The inverter never discharges below a zone's Batt%, so any
+      higher value would buy grid energy at the day price while the battery
+      still holds charge; with one day price there is nothing to save
+      energy for inside the day, and carrying it into the night is worse
+      still (the night refill is cheaper). A cheap window without a charge
+      keeps its own minimum SOC: the battery holds there unless the plan
+      empties it for tomorrow's sun.
     - "ladder": the window's own minimum SOC — floors track the optimal
-      trajectory, saving energy for the evening peak and outages;
-    - "flat": the whole-horizon minimum SOC — one low floor everywhere, the
-      battery is spent whenever loads appear.
+      trajectory hour by hour.
     With either strategy a charging window keeps its rounded-up target only
     when the whole window sits inside tariff_cheap_windows (the night charge
     zone); any other rising window — PV charging, which needs no target —
@@ -350,8 +357,6 @@ def zone_targets(
 
     def clamp_pct(soc: float) -> float:
         return min(max(soc, min_soc), max_soc) * 100.0
-
-    horizon_min = min(soc_opt) if soc_opt else soc_init
 
     targets = []
     for program in programs:
@@ -374,10 +379,12 @@ def zone_targets(
         cheap_charge = _charge_target_kept(span, strategy, cheap_windows, starts, tz)
         if end_soc > entry_soc + 0.005 and cheap_charge:
             pct = math.ceil(clamp_pct(end_soc) / soc_step_pct - 1e-9) * soc_step_pct
+        elif strategy == "flat" and not (cheap_windows and cheap_charge):
+            # Expensive hours: the lowest allowed SOC; the reserve bound
+            # below lifts it while an outage series is live.
+            pct = math.ceil(min_soc * 100.0 / soc_step_pct - 1e-9) * soc_step_pct
         else:
             floor_soc = min(soc_opt[i] for i in span)
-            if strategy == "flat":
-                floor_soc = min(floor_soc, horizon_min)
             # Round UP: rounding down would shave up to 5 pp off the reserve.
             pct = math.ceil(clamp_pct(floor_soc) / soc_step_pct - 1e-9) * soc_step_pct
         if in_effect and not cheap_charge:
@@ -395,6 +402,69 @@ def zone_targets(
     return targets
 
 
+def cheap_runs(
+    starts: pd.DatetimeIndex, tz: ZoneInfo, cheap_windows: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """(first, last) horizon index of every contiguous run of cheap hours."""
+    runs: list[tuple[int, int]] = []
+    first = None
+    for i, stamp in enumerate(starts):
+        local = stamp.tz_convert(tz)
+        if _is_cheap_minute(local.hour * 60 + local.minute, cheap_windows):
+            first = i if first is None else first
+        elif first is not None:
+            runs.append((first, i - 1))
+            first = None
+    if first is not None:
+        runs.append((first, len(starts) - 1))
+    return runs
+
+
+def night_charge_margin(
+    soc_p50: list[float], soc_p10: list[float], runs: list[tuple[int, int]], max_soc: float
+) -> dict[int, float]:
+    """Extra SOC at the end of each cheap run: the night charge sized on PV P10.
+
+    Under-charging costs the day/night price gap per kWh; over-charging only
+    the round-trip loss, because the energy stays in the battery and the
+    next night buys that much less. So the night charge covers the expensive
+    hours with the pessimistic sun (the plan re-solved on PV P10) as long as
+    the extra energy cannot displace free solar: it is capped by the
+    headroom the median-sun plan leaves below max SOC until the next cheap
+    run. In summer that headroom is gone and the charge stays the median
+    plan's. A run with nothing after it in the horizon gets no margin.
+
+    The extra is what the pessimistic plan draws from the battery over the
+    expensive stretch beyond what the median plan draws — not its whole
+    end-of-night difference: both nights cost the same, so the solver may
+    just as well buy tomorrow night's energy tonight and carry it over.
+    """
+    margin: dict[int, float] = {}
+    for k, (_, last) in enumerate(runs):
+        stop = runs[k + 1][0] if k + 1 < len(runs) else len(soc_p50)
+        after = soc_p50[last + 1 : stop]
+        if not after:
+            continue
+        end = stop - 1
+        drawn = (soc_p10[last] - soc_p10[end]) - (soc_p50[last] - soc_p50[end])
+        extra = min(drawn, soc_p10[last] - soc_p50[last], max_soc - max(after))
+        if extra > 0.005:
+            margin[last] = extra
+    return margin
+
+
+def _raise_runs(
+    soc: list[float], runs: list[tuple[int, int]], margin: dict[int, float]
+) -> list[float]:
+    """The trajectory with each margin ramped in over its cheap run."""
+    out = list(soc)
+    for first, last in runs:
+        extra = margin.get(last, 0.0)
+        for step, i in enumerate(range(first, last + 1), 1):
+            out[i] = soc[i] + extra * step / (last - first + 1)
+    return out
+
+
 def run_plan(
     starts: pd.DatetimeIndex,
     pv_p50_kw: list[float],
@@ -404,6 +474,7 @@ def run_plan(
     programs: list[dict],
     opts: dict,
     reserve_floors: list[float] | None = None,
+    pv_p10_kw: list[float] | None = None,
 ) -> dict | None:
     """Optimal plan over len(starts) hours (24 or 48); None when infeasible.
 
@@ -417,6 +488,8 @@ def run_plan(
     giving the expected daily value of battery actions in tariff units.
     reserve_floors are the per-hour outage-reserve SOC fractions; every zone
     target is held at or above the highest reserve inside its window.
+    pv_p10_kw (with a tariff) sizes the night charge on the pessimistic sun
+    within the median plan's solar headroom (see night_charge_margin).
     """
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
@@ -465,6 +538,23 @@ def run_plan(
     )
     # cost_profit is revenue minus spend, so money spent is its negation.
     spent_plan = -float(result["cost_profit"].sum())
+
+    # Night charge on the pessimistic sun: re-solve with PV P10 and keep the
+    # extra end-of-night SOC that fits under the median plan's headroom. The
+    # reported trajectory and costs stay the median plan's.
+    cheap_windows = _cheap_windows(opts) if opts.get("tariff_enabled", False) else []
+    runs = cheap_runs(starts, tz, cheap_windows) if cheap_windows else []
+    margin: dict[int, float] = {}
+    if runs and pv_p10_kw is not None and not relaxed:
+        pv10_w = np.maximum(np.asarray(pv_p10_kw, dtype=float), 0.0) * 1000.0
+        pessimistic = _solve(optimizer, starts, prices, pv10_w, load_w, soc_init, floor_profile)
+        if str(optimizer.optim_status).lower() == "optimal":
+            soc_p10 = [float(v) for v in pessimistic["SOC_opt"]]
+            margin = night_charge_margin(soc_opt, soc_p10, runs, max_soc)
+    margin = {last: extra for last, extra in margin.items() if last < day1}
+    margin_kwh = sum(margin.values()) * float(opts["capacity_kwh"]) / float(
+        opts["charge_efficiency"]
+    )
 
     baseline = _build_optimization(opts, tz_name, battery_off=True, horizon_hours=horizon)
     base_result = _solve(
@@ -520,15 +610,17 @@ def run_plan(
             round(spent_baseline_day1 - spent_plan_day1, 2)
             if spent_plan_day1 is not None and spent_baseline_day1 is not None else None
         ),
-        "grid_charge_kwh_cheap": round(grid_charge_kwh, 2),
+        "grid_charge_kwh_cheap": round(grid_charge_kwh + margin_kwh, 2),
+        "night_margin_kwh": round(margin_kwh, 2),
         "tariff_enabled": bool(opts.get("tariff_enabled", False)),
-        "day_zone_strategy": str(opts.get("day_zone_strategy", "ladder")),
+        "day_zone_strategy": str(opts.get("day_zone_strategy", "flat")),
         # TOU zones live in the first day; tomorrow's half of the trajectory
         # is context for today's decisions, not an applied target.
         "zone_targets": zone_targets(
-            soc_opt[:day1], soc_init, programs, starts[:day1], tz, min_soc, max_soc,
-            strategy=str(opts.get("day_zone_strategy", "ladder")),
-            cheap_windows=_cheap_windows(opts) if opts.get("tariff_enabled", False) else [],
+            _raise_runs(soc_opt, runs, margin)[:day1], soc_init, programs, starts[:day1], tz,
+            min_soc, max_soc,
+            strategy=str(opts.get("day_zone_strategy", "flat")),
+            cheap_windows=cheap_windows,
             reserve_floors=reserve_floors[:day1] if reserve_floors is not None else None,
             soc_step_pct=max(1, int(opts.get("tou_soc_step_pct", 5))),
         ),

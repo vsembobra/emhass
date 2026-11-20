@@ -944,7 +944,7 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={site['latitude']}&longitude={site['longitude']}"
-        f"&hourly={variables}&past_hours=48&forecast_hours=48&timezone=UTC&timeformat=unixtime"
+        f"&hourly={variables}&past_hours=48&forecast_hours=49&timezone=UTC&timeformat=unixtime"
     )
     archive = DATA / "weather_archive"
     archive.mkdir(exist_ok=True)
@@ -1452,6 +1452,55 @@ def _fallback_load_prediction(audit: pd.DataFrame, starts: pd.DatetimeIndex, tz)
     )
 
 
+# Directory of the PV model. v2: inputs aligned to the measured hour
+# (pv_weather_frame); a v1 bundle learned the one-hour lag and is not reused.
+PV_MODEL = "pv_quantiles_v2"
+HALF_HOUR = pd.Timedelta(minutes=30)
+
+
+def pv_weather_frame(
+    geometry: PvGeometry, weather: pd.DataFrame, hours: pd.DatetimeIndex, suffix: str = ""
+) -> pd.DataFrame:
+    """PV model inputs for the hourly means [H, H+1), indexed at mid-hour.
+
+    Open-Meteo radiation stamped T is the mean over the PRECEDING hour
+    [T-1h, T), so the hour starting at H takes the radiation stamped H+1h;
+    cloud cover and temperature are instants, so it takes the mean of the
+    values at H and H+1h. The sun position of the transposition — and the
+    model's clear-sky denominator, through the index — sit at H+30 min.
+    Reading radiation stamped H instead (before v2) fed every hour the sun
+    of the hour before: a winter morning hour producing 2.8 kW got an almost
+    dark forecast. Callers map predictions back by position.
+    """
+    hours = pd.DatetimeIndex(hours)
+    middle = hours + HALF_HOUR
+    after = hours + pd.Timedelta(hours=1)
+
+    def at(name: str, stamps: pd.DatetimeIndex) -> pd.Series:
+        values = pd.to_numeric(weather[name + suffix], errors="coerce").reindex(stamps)
+        return pd.Series(values.to_numpy(dtype=float), index=middle)
+
+    def mean_of_ends(name: str) -> pd.Series:
+        return pd.concat([at(name, hours), at(name, after)], axis=1).mean(axis=1)
+
+    poa = plane_power_kw(
+        geometry,
+        middle,
+        at("shortwave_radiation", after),
+        at("direct_normal_irradiance", after),
+        at("diffuse_radiation", after),
+    )
+    return pd.DataFrame(
+        {
+            "pv_measured_kw": np.nan,
+            "poa_forecast_kw": poa,
+            "cloud_cover_pct": mean_of_ends("cloud_cover"),
+            "temp_air_c": mean_of_ends("temperature_2m"),
+        },
+        index=middle,
+    )
+
+
 def _site_pv_geometry(opts: dict) -> PvGeometry:
     return PvGeometry(
         float(opts["latitude"]),
@@ -1467,12 +1516,21 @@ def _fallback_pv_forecast(
 ) -> tuple[list, list, list]:
     """Clear-sky derated by cloud cover; zeros when even that is impossible."""
     try:
-        clearsky = clear_sky_power_kw(_site_pv_geometry(opts), starts).to_numpy()
+        clearsky = clear_sky_power_kw(_site_pv_geometry(opts), starts + HALF_HOUR).to_numpy()
     except Exception:
         zeros = [0.0] * len(starts)
         return zeros, zeros, zeros
     if weather is not None and "cloud_cover" in weather:
-        cloud = weather["cloud_cover"].reindex(starts).to_numpy(dtype=float)
+        cloud_at = pd.to_numeric(weather["cloud_cover"], errors="coerce")
+        cloud = np.nanmean(
+            np.vstack(
+                [
+                    cloud_at.reindex(starts).to_numpy(dtype=float),
+                    cloud_at.reindex(starts + pd.Timedelta(hours=1)).to_numpy(dtype=float),
+                ]
+            ),
+            axis=0,
+        )
         factor = np.where(np.isnan(cloud), 0.5, 1.0 - 0.75 * cloud / 100.0)
     else:
         factor = np.full(len(starts), 0.5)
@@ -1740,7 +1798,7 @@ def run(notify: str = "always") -> dict:
 
     pv_bundle = None
     try:
-        pv_bundle = PvQuantileBundle.load(DATA / "models" / "pv_quantiles_v1")
+        pv_bundle = PvQuantileBundle.load(DATA / "models" / PV_MODEL)
     except (OSError, ValueError):
         models_learning = True
     if weather is None:
@@ -1751,22 +1809,9 @@ def run(notify: str = "always") -> dict:
         pv_p50 = [0.0] * PLAN_HOURS
         pv_p90 = [0.0] * PLAN_HOURS
     elif pv_bundle is not None:
-        poa = plane_power_kw(
-            pv_bundle.geometry,
-            weather.index,
-            weather["shortwave_radiation"],
-            weather["direct_normal_irradiance"],
-            weather["diffuse_radiation"],
+        pv_prediction = pv_bundle.predict(
+            pv_weather_frame(pv_bundle.geometry, weather, starts_plan)
         )
-        pv_frame = pd.DataFrame(
-            {
-                "pv_measured_kw": np.nan,
-                "poa_forecast_kw": poa,
-                "cloud_cover_pct": weather["cloud_cover"],
-                "temp_air_c": weather["temperature_2m"],
-            }
-        ).reindex(starts_plan)
-        pv_prediction = pv_bundle.predict(pv_frame)
         pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(PLAN_HOURS)]
@@ -1777,7 +1822,7 @@ def run(notify: str = "always") -> dict:
         "load": learning.bundle_version(DATA / "models" / "load_quantiles_v1")
         if load_method == "model"
         else None,
-        "pv": learning.bundle_version(DATA / "models" / "pv_quantiles_v1")
+        "pv": learning.bundle_version(DATA / "models" / PV_MODEL)
         if pv_method == "model"
         else None,
     }
@@ -2038,7 +2083,7 @@ def run(notify: str = "always") -> dict:
             optimizer_plan = optimize.run_plan(
                 starts_plan, pv_p50, load_p50, floors_plan,
                 float(battery_now) / 100.0, programs, opt_opts,
-                reserve_floors=reserve_floors_plan,
+                reserve_floors=reserve_floors_plan, pv_p10_kw=pv_p10,
             )
         except Exception:
             optimizer_plan = None
@@ -2285,6 +2330,12 @@ def run(notify: str = "always") -> dict:
             lines.append(
                 f"• Ночная зарядка из сети по дешёвому тарифу: "
                 f"{optimizer_plan['grid_charge_kwh_cheap']:.1f} кВт·ч"
+                + (
+                    f" (из них {optimizer_plan['night_margin_kwh']:.1f} — запас "
+                    "на случай, если солнца будет меньше прогноза)"
+                    if optimizer_plan.get("night_margin_kwh", 0.0) >= 0.3
+                    else ""
+                )
             )
         if optimizer_plan["floor_relaxed"]:
             relaxed_note = (

@@ -16,8 +16,9 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pipeline
 
-from emhass.pv_quantiles import plane_power_kw, try_load
+from emhass.pv_quantiles import try_load
 
 DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
 WEATHER_HIST = DATA / "weather_previous_day1.jsonl"
@@ -39,27 +40,14 @@ def _potential_pv(bundle, hours: pd.DatetimeIndex) -> pd.Series:
     weather = pd.read_json(WEATHER_HIST, lines=True)
     weather["start_utc"] = pd.to_datetime(weather["start_utc"], utc=True)
     weather = weather.set_index("start_utc").sort_index()
-    weather = weather.reindex(weather.index.union(hours))
-    poa = plane_power_kw(
-        bundle.geometry,
-        weather.index,
-        weather["shortwave_radiation_previous_day1"],
-        weather["direct_normal_irradiance_previous_day1"],
-        weather["diffuse_radiation_previous_day1"],
-    )
-    frame = pd.DataFrame(
-        {
-            "pv_measured_kw": np.nan,
-            "poa_forecast_kw": poa,
-            "cloud_cover_pct": weather["cloud_cover_previous_day1"],
-            "temp_air_c": weather["temperature_2m_previous_day1"],
-        }
-    ).reindex(hours)
+    weather = weather[~weather.index.duplicated(keep="last")]
+    frame = pipeline.pv_weather_frame(bundle.geometry, weather, hours, "_previous_day1")
     frame = frame.dropna(subset=["poa_forecast_kw"])
     if frame.empty:
         return pd.Series(np.nan, index=hours)
-    prediction = bundle.predict(frame)
-    return prediction["pv_p50_kw"].reindex(hours)
+    prediction = bundle.predict(frame)["pv_p50_kw"]
+    prediction.index = prediction.index - pipeline.HALF_HOUR  # back to hour starts
+    return prediction.reindex(hours)
 
 
 def daily_stats(days: int = 14) -> list[dict]:
@@ -79,7 +67,7 @@ def daily_stats(days: int = 14) -> list[dict]:
     if audit.empty:
         return []
 
-    bundle = try_load(MODELS / "pv_quantiles_v1")
+    bundle = try_load(MODELS / pipeline.PV_MODEL)
     curtailed = audit[audit["pv_filter"] == "possible_curtailment"]
     potential = None
     if bundle is not None and not curtailed.empty:

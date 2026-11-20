@@ -604,7 +604,8 @@ function renderOptimizer(opt, profile) {
   if (opt.cost_baseline != null) bits.push("без батареи " + opt.cost_baseline);
   if (opt.savings != null) bits.push("экономия " + opt.savings);
   if (opt.tariff_enabled && opt.grid_charge_kwh_cheap >= 0.3)
-    bits.push("ночная зарядка из сети " + opt.grid_charge_kwh_cheap + " кВт·ч");
+    bits.push("ночная зарядка из сети " + opt.grid_charge_kwh_cheap + " кВт·ч" +
+      (opt.night_margin_kwh >= 0.3 ? " (запас на пасмурный день " + opt.night_margin_kwh + ")" : ""));
   if (opt.floor_relaxed) bits.push("⚠️ пол смягчён до минимума — прогноз не достигает резерва");
   document.getElementById("optnote").textContent = bits.join(" · ");
   const starts = profile.map(s => s.start_local);

@@ -39,7 +39,7 @@ from emhass.load_quantiles import (
     LoadQuantileBundle,
     pinball_loss,
 )
-from emhass.pv_quantiles import PvGeometry, PvQuantileBundle, plane_power_kw
+from emhass.pv_quantiles import PvGeometry, PvQuantileBundle
 
 DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
 SHARE = Path(os.environ.get("EMHASS_SHADOW_SHARE", "/share/emhass_shadow"))
@@ -415,7 +415,7 @@ def pv_holdout_score(bundle, frame: pd.DataFrame) -> tuple[float | None, int]:
 
 def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = None) -> dict:
     """Champion/challenger retrain of the PV model (see _retrain_load)."""
-    final = MODELS / "pv_quantiles_v1"
+    final = MODELS / pipeline.PV_MODEL
     champion = _try_load(PvQuantileBundle.load, final)
     if champion is not None:
         geometry = champion.geometry  # reuse confirmed site geometry
@@ -435,22 +435,16 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
         ratio_max = 1.2
         min_clearsky = 0.1
     weather = _ensure_weather_history(site, audit.index[0]) if weather is None else weather
-    poa = plane_power_kw(
-        geometry,
-        weather.index,
-        weather["shortwave_radiation_previous_day1"],
-        weather["direct_normal_irradiance_previous_day1"],
-        weather["diffuse_radiation_previous_day1"],
-    )
-    frame = pd.DataFrame(index=audit.index)
+    # Indexed at mid-hour, inputs aligned to the measured hour (see
+    # pipeline.pv_weather_frame).
+    frame = pipeline.pv_weather_frame(geometry, weather, audit.index, "_previous_day1")
     measured = pd.to_numeric(audit["pv_measured_kw"], errors="coerce")
     # Re-check censoring on every stored row: hours recorded before the
     # taper/saturation rules existed still say "keep" in pv_filter.
     censored = pipeline.pv_sink_limited_mask(audit, site.get("max_charge_kw"))
-    frame["pv_measured_kw"] = measured.where((audit["pv_filter"] == "keep") & ~censored)
-    frame["poa_forecast_kw"] = poa.reindex(audit.index)
-    frame["cloud_cover_pct"] = weather["cloud_cover_previous_day1"].reindex(audit.index)
-    frame["temp_air_c"] = weather["temperature_2m_previous_day1"].reindex(audit.index)
+    frame["pv_measured_kw"] = measured.where(
+        (audit["pv_filter"] == "keep") & ~censored
+    ).to_numpy()
     # Hours without as-of weather cannot teach the weather->power mapping.
     frame["pv_measured_kw"] = frame["pv_measured_kw"].where(frame["poa_forecast_kw"].notna())
     weights = recency_weights(frame.index)
@@ -507,7 +501,7 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
         **result,
         "status": "promoted",
         "excluded_rows": bundle.excluded_rows,
-        "trained_until": frame.index[-1].isoformat(),
+        "trained_until": audit.index[-1].isoformat(),
     }
 
 
@@ -517,12 +511,18 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     The retrain_enabled option gates only the automatic schedule; a forced run
     (panel button) is an explicit action and always goes ahead.
     """
-    if not force and not _enabled():
-        return retrain_status()
     state = _load_state()
+    # A new PV input contract (pipeline.PV_MODEL) leaves no usable PV model
+    # after an upgrade: retrain once, right away, whatever the schedule says.
+    upgrade = (
+        state.get("pv_model_tried") != pipeline.PV_MODEL
+        and not (MODELS / pipeline.PV_MODEL / "bundle.json").exists()
+    )
+    if not force and not upgrade and not _enabled():
+        return retrain_status()
     interval = _interval_days()
     last = state.get("last_retrain_utc")
-    if not force and last:
+    if not force and not upgrade and last:
         age = datetime.now(UTC) - datetime.fromisoformat(last)
         due = age >= timedelta(days=interval)
         # Drift (persistent bias or a collapsed P10-P90 band on the last week
@@ -577,8 +577,9 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         pass  # hardware learning is advisory; never fail the retrain on it
     # Stamp only once a model is live: until then every run retries, so a
     # site whose history is still too short trains the day it is not.
-    if any((MODELS / name / "bundle.json").exists() for name in ("load_quantiles_v1", "pv_quantiles_v1")):
+    if any((MODELS / name / "bundle.json").exists() for name in ("load_quantiles_v1", pipeline.PV_MODEL)):
         state["last_retrain_utc"] = result["started_utc"]
+    state["pv_model_tried"] = pipeline.PV_MODEL
     state["models"] = result["models"]
     _save_state(state)
     return retrain_status()

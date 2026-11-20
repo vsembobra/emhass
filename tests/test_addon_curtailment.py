@@ -140,7 +140,9 @@ def test_retrain_excludes_censored_rows_recorded_before_the_fix(monkeypatch, tmp
             "cloud_cover_previous_day1": 20.0,
             "temperature_2m_previous_day1": 20.0,
         },
-        index=index,
+        # Radiation stamped T is the mean of the hour before T: the last
+        # audit hour needs the stamp one hour after it.
+        index=index.append(index[-1:] + pd.Timedelta(hours=1)),
     )
     captured = {}
 

@@ -154,9 +154,9 @@ def _retrain_env(monkeypatch, tmp_path, drift):
         json.dumps({"retrain_interval_days": 7, "latitude": 1, "longitude": 2}), encoding="utf-8"
     )
     last = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    (tmp_path / "retrain_state.json").write_text(
-        json.dumps({"last_retrain_utc": last, "models": {}})
-    )
+    # An install already past the PV input upgrade (see test_addon_pv_alignment).
+    state = {"last_retrain_utc": last, "models": {}, "pv_model_tried": retrain.pipeline.PV_MODEL}
+    (tmp_path / "retrain_state.json").write_text(json.dumps(state))
     (tmp_path / "drift_state.json").write_text(json.dumps({"drift": drift}))
 
     def no_audit():
