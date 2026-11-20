@@ -63,6 +63,8 @@ options:
   tariff_normal_price: 2.0
   tariff_cheap_price: 1.0
   tariff_cheap_windows: "23:00-07:00"
+  tariff_peak_windows: ""
+  tariff_peak_price: 3.0
   reserve_cold_start_hours: 0.0
   reserve_pv_aware: true
   history_backfill_days: 14
@@ -118,6 +120,8 @@ schema:
   tariff_normal_price: float(0,1000)
   tariff_cheap_price: float(0,1000)
   tariff_cheap_windows: str
+  tariff_peak_windows: str?
+  tariff_peak_price: float(0,1000)
   reserve_cold_start_hours: float(0,20)
   reserve_pv_aware: bool
   history_backfill_days: int(0,60)
@@ -304,6 +308,12 @@ translations:
       tou_grid_charge_off_option:
         name: Вариант select «заряд из сети выключен»
         description: "Только для select-флагов. Пусто = аддон сам выберет Disabled / Off (или Gen, если в зоне включён генератор). Укажите точное название, если варианты называются иначе."
+      tariff_peak_windows:
+        name: Пиковые часы тарифа
+        description: "Для трёхзонного тарифа: окна пиковой цены через запятую, ЧЧ:ММ-ЧЧ:ММ, например 08:00-11:00,20:00-22:00. Оптимизатор бережёт энергию батареи на эти часы. Пусто = двухзонный тариф (только ночь и день)."
+      tariff_peak_price:
+        name: Цена в пиковые часы
+        description: "Цена за кВт·ч в пиковые часы, в тех же единицах, что и остальные цены. Используется, только если заданы пиковые часы."
   en:
     configuration:
       latitude:
@@ -468,3 +478,9 @@ translations:
       tou_grid_charge_off_option:
         name: Select option for grid charge off
         description: "Only for select flags. Empty = the add-on picks Disabled / Off (or Gen when the zone charges from a generator). Set the exact name if your options are named differently."
+      tariff_peak_windows:
+        name: Tariff peak windows
+        description: "For a three-rate tariff: peak-price windows, comma-separated HH:MM-HH:MM, e.g. 08:00-11:00,20:00-22:00. The optimizer saves battery energy for these hours. Empty = two-rate tariff (night and day only)."
+      tariff_peak_price:
+        name: Peak price
+        description: "Price per kWh in the peak windows, in the same units as the other prices. Used only when peak windows are set."

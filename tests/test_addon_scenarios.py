@@ -8,6 +8,7 @@ owner expects for a class of installation.
 import math
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -124,3 +125,47 @@ def test_summer_big_battery_runs_on_its_own_sun():
     # degenerate here (the pack is full on day 2 either way); a Deye zone
     # SOC does not cap solar charging, so the inverter stores it regardless.
     assert max(result["soc_opt"]) == pytest.approx(1.0, abs=0.01)
+
+
+THREE_RATE = {
+    "tariff_enabled": True,
+    "tariff_cheap_windows": "00:00-07:00",
+    "tariff_cheap_price": 0.4,
+    "tariff_normal_price": 1.0,
+    "tariff_peak_windows": "08:00-11:00,20:00-22:00",
+    "tariff_peak_price": 1.5,
+}
+
+
+def test_three_rate_prices_by_hour():
+    starts = pd.date_range("2026-11-20 00:00", periods=24, freq="h", tz="UTC")
+    prices = optimize.tariff_prices(starts, ZoneInfo("UTC"), THREE_RATE)
+    assert prices[3] == 0.4 and prices[7] == 1.0 and prices[9] == 1.5
+    assert prices[15] == 1.0 and prices[21] == 1.5 and prices[23] == 1.0
+    flat = optimize.tariff_prices(starts, ZoneInfo("UTC"), dict(THREE_RATE, tariff_enabled=False))
+    assert set(flat) == {1.0}
+
+
+def test_battery_energy_is_saved_for_the_peak_hours():
+    # 07:00 start, 6 kWh battery at 90 %, 1 kW load, no sun: not enough for
+    # the whole day, so the plan must spend it in the 1.5 hours first.
+    starts = pd.date_range("2026-11-20 07:00", periods=24, freq="h", tz="UTC")
+    opts = {
+        "time_zone": "UTC",
+        "min_soc_pct": 10,
+        "max_soc_pct": 100,
+        "capacity_kwh": 6.0,
+        "charge_efficiency": 0.95,
+        "discharge_efficiency": 0.95,
+        "max_charge_kw": 3.0,
+        "max_discharge_kw": 3.0,
+        **THREE_RATE,
+    }
+    result = optimize.run_plan(starts, [0.0] * 24, [1.0] * 24, [0.1] * 24, 0.9, ZONES, opts)
+    batt = result["p_batt_kw"]
+    peak = [i for i, t in enumerate(starts) if t.hour in (8, 9, 10, 20, 21)]
+    normal_day = [
+        i for i, t in enumerate(starts) if t.hour in (7, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22, 23)
+    ]
+    assert sum(batt[i] for i in peak) > 4.0  # the battery serves the peaks
+    assert sum(max(0.0, batt[i]) for i in normal_day) < 0.3  # not the 1.0 hours
