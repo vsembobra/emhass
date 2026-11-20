@@ -52,15 +52,17 @@
 
 <div id="status"></div>
 <div class="notice" id="notice" style="display:none"></div>
-<div class="card full" id="entscard" style="display:none;margin-bottom:14px">
-  <h3>Проверка и настройка сущностей <span class="muted" id="entssummary" style="text-transform:none"></span>
-    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="saveEntities()">Сохранить</button>
-  </h3>
+<details class="card full" id="entscard" style="display:none;margin-bottom:14px">
+  <summary style="cursor:pointer;list-style:none">
+    <h3 style="display:inline">Проверка и настройка сущностей <span class="muted" id="entssummary" style="text-transform:none"></span>
+    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()">Сохранить</button>
+    </h3>
+  </summary>
   <table>
     <thead><tr><th>Параметр</th><th>Сущность</th><th>Значение</th><th>Статус</th></tr></thead>
     <tbody id="ents"></tbody>
   </table>
-</div>
+</details>
 <div id="content" style="display:none">
 
   <div class="grid">
@@ -258,6 +260,13 @@ function renderEntities(checks) {
   const card = document.getElementById("entscard");
   if (!checks.length) { card.style.display = "none"; return; }
   card.style.display = "block";
+  const bad = checks.filter(c => ["missing", "not_numeric", "unexpected"].includes(c.status)).length;
+  document.getElementById("entssummary").textContent = bad
+    ? "— проблем: " + bad : "— все на месте";
+  // Collapsed by default: opened automatically only while something is broken.
+  if (bad) card.open = true;
+  // Don't clobber unsaved edits with the periodic refresh.
+  if (document.querySelector(".entinput.changed")) return;
   const label = {
     ok: ["OK", "var(--good)"], ok_number: ["число вручную", "var(--good)"],
     skipped: ["не задано", "var(--muted)"], missing: ["не найдена", "var(--bad)"],
@@ -265,9 +274,6 @@ function renderEntities(checks) {
   };
   const order = {missing: 0, not_numeric: 1, unexpected: 2, ok: 3, ok_number: 3, skipped: 4};
   const rows = checks.slice().sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3));
-  const bad = checks.filter(c => ["missing", "not_numeric", "unexpected"].includes(c.status)).length;
-  document.getElementById("entssummary").textContent = bad
-    ? "— проблем: " + bad : "— все на месте";
   document.getElementById("ents").innerHTML = rows.map(c => {
     const [text, color] = label[c.status] || [c.status, "var(--muted)"];
     const entityCell = c.key
