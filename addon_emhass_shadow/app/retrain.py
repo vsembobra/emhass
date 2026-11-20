@@ -339,14 +339,30 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
     existing = None
     if WEATHER_HIST.exists():
         existing = pd.read_json(WEATHER_HIST, lines=True)
-        existing["start_utc"] = pd.to_datetime(existing["start_utc"], utc=True)
+        existing["start_utc"] = pd.to_datetime(
+            existing["start_utc"], utc=True, format="mixed"
+        )
         existing = existing.set_index("start_utc").sort_index()
     # The previous-runs archive publishes with a delay; stay a day behind.
     fetch_end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(days=1)
+    frames = [] if existing is None else [existing]
+    # Missing range BEFORE the stored file: happens when the audit grew
+    # backwards (recorder backfill) after the weather file was first
+    # written — the forward-only cursor would never fill those days.
+    if existing is not None and len(existing) and needed_start < existing.index[0]:
+        cursor = needed_start
+        limit = existing.index[0] - pd.Timedelta(hours=1)
+        while cursor <= limit:
+            chunk_end = min(
+                cursor + pd.Timedelta(days=FETCH_CHUNK_DAYS) - pd.Timedelta(hours=1), limit
+            )
+            frames.append(_fetch_weather_chunk(site, cursor, chunk_end))
+            cursor = chunk_end + pd.Timedelta(hours=1)
+            time.sleep(1)
+    # Missing range after the stored file (the usual daily extension).
     cursor = needed_start
     if existing is not None and len(existing):
         cursor = max(needed_start, existing.index[-1] + pd.Timedelta(hours=1))
-    frames = [] if existing is None else [existing]
     while cursor <= fetch_end:
         chunk_end = min(cursor + pd.Timedelta(days=FETCH_CHUNK_DAYS) - pd.Timedelta(hours=1), fetch_end)
         frames.append(_fetch_weather_chunk(site, cursor, chunk_end))

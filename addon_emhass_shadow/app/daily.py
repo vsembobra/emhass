@@ -69,7 +69,8 @@ def daily_stats(days: int = 14) -> list[dict]:
     opts = json.loads((DATA / "options.json").read_text())
     tz = ZoneInfo(opts.get("time_zone", "UTC"))
     audit = pd.read_json(audit_path, lines=True)
-    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
+    # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
+    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     audit = audit.set_index("start_utc").sort_index()
 
     today = pd.Timestamp.now(tz).normalize()
