@@ -158,14 +158,15 @@ def pv_aware_reserve(
 ) -> list[float]:
     """Lower the per-hour outage reserve where pessimistic PV covers it.
 
-    For an outage starting in hour ``i`` and lasting ``duration_hours``, the
-    battery must cover the critical load only where the sun does not: the P10
-    PV energy inside the outage window is subtracted from that hour's
-    reserve. The window wraps over the sequence (the sequences are
-    day-periodic), so evening hours borrow tomorrow morning's sun. The result
-    never drops below the cold-start ``baseline_kwh`` and never exceeds the
-    input value: solar awareness only relaxes the reserve, it never raises
-    it.
+    For an outage starting in hour ``i`` and lasting ``duration_hours`` the
+    binding constraint is not the window's total sun but the **worst
+    cumulative deficit inside it**: the battery must bridge every prefix of
+    the window where the load outruns the P10 solar. Summing PV over the
+    whole window would underprice an outage whose sun arrives only in the
+    last hour. The window wraps over the sequence (day-periodic), so evening
+    hours borrow tomorrow morning's sun. The result never drops below the
+    cold-start ``baseline_kwh`` and never exceeds the input value: solar
+    awareness only relaxes the reserve, it never raises it.
     """
     count = len(reserves)
     if len(pv_p10_kw) != count or count == 0:
@@ -176,10 +177,14 @@ def pv_aware_reserve(
     pv = [max(0.0, float(value)) for value in pv_p10_kw]
     adjusted = []
     for i in range(count):
-        pv_energy = sum(pv[(i + k) % count] for k in range(window))
-        adjusted.append(
-            max(baseline_kwh, float(reserves[i]) - pv_energy / discharge_efficiency)
-        )
+        # AC-side hourly critical load behind this battery-side reserve.
+        hourly_need = float(reserves[i]) * discharge_efficiency / window
+        deficit = 0.0
+        worst = 0.0
+        for k in range(window):
+            deficit = max(0.0, deficit + hourly_need - pv[(i + k) % count])
+            worst = max(worst, deficit)
+        adjusted.append(max(baseline_kwh, worst / discharge_efficiency))
     return adjusted
 
 

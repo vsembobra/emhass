@@ -108,6 +108,22 @@ def test_predictions_bounded_ordered_and_zero_at_night():
 
 
 @needs_lightgbm
+def test_night_mask_survives_positive_calibration_offsets():
+    """Conformal P10/P90 offsets must not fabricate night generation."""
+    frame = synthetic_frame(60, noise=0.1)
+    train, calibration = frame.iloc[: 40 * 24], frame.iloc[40 * 24 :]
+    bundle = PvQuantileBundle.fit(train, GEOMETRY, params=FAST_PARAMS)
+    shifted = calibration.copy()
+    shifted["pv_measured_kw"] = shifted["pv_measured_kw"] * 1.3
+    bundle.calibrate(shifted)
+    assert bundle.calibration_offsets["p90"] > 0
+    prediction = bundle.predict(frame)
+    night = clear_sky_power_kw(GEOMETRY, frame.index) < bundle.min_clearsky_kw
+    assert night.any()
+    assert (prediction.loc[night] == 0).all().all()
+
+
+@needs_lightgbm
 def test_excluded_rows_count_censoring():
     frame = synthetic_frame(40)
     frame.iloc[::7, frame.columns.get_loc("pv_measured_kw")] = np.nan

@@ -96,9 +96,13 @@ def daily_stats(days: int = 14) -> list[dict]:
         cur_hours = chunk.index[chunk["pv_filter"] == "possible_curtailment"]
         lost = None
         if potential is not None and len(cur_hours):
+            # Loss is the part of the potential ABOVE what was actually
+            # produced; summing the raw potential would count production too.
             values = potential.loc[cur_hours]
-            if values.notna().any():
-                lost = float(values.sum())
+            measured = pd.to_numeric(chunk.loc[cur_hours, "pv_measured_kw"], errors="coerce")
+            diff = (values - measured).clip(lower=0)
+            if diff.notna().any():
+                lost = float(diff.sum(min_count=1))
         rows.append(
             {
                 "date": day.date().isoformat(),

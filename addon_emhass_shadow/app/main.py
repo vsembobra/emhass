@@ -99,6 +99,70 @@ def latest_report() -> dict | None:
     return json.loads(files[0].read_text(encoding="utf-8"))
 
 
+TRIGGER_MIN_INTERVAL = timedelta(minutes=20)  # rate limit for event-driven runs
+TRIGGER_STALE_AFTER = timedelta(hours=4)  # replan when the last run is older
+TRIGGER_SOC_DEVIATION_PP = 10.0  # replan when SOC leaves the plan by this much
+TICK_SECONDS = 600
+
+
+def _trigger_reason(opts) -> str | None:
+    """Why an unscheduled recalculation is due; None when the plan stands.
+
+    Triggers: the grid binary changed state (outage or restore), no
+    successful run for over 4 h, or the battery SOC deviates from the
+    current hour's optimizer plan by more than 10 pp. Triggered runs are
+    rate-limited to one per 20 minutes so a flapping sensor cannot spin
+    the pipeline.
+    """
+    last_trigger = STATE.get("last_trigger")
+    if last_trigger is not None:
+        elapsed = datetime.now(UTC) - datetime.fromisoformat(last_trigger["at"])
+        if elapsed < TRIGGER_MIN_INTERVAL:
+            return None
+    try:
+        ent = pipeline.resolve_entities(opts)
+        grid_binary = str(ent.get("grid_binary") or "").strip()
+        if grid_binary:
+            state = str(pipeline.ha_get(f"/api/states/{grid_binary}")["state"])
+            previous = STATE.get("grid_state")
+            STATE["grid_state"] = state
+            if previous in ("on", "off") and state in ("on", "off") and state != previous:
+                return f"сеть {previous} -> {state}"
+    except Exception:
+        pass
+    last_run = STATE.get("last_run")
+    if last_run is None:
+        return "ещё ни одного успешного расчёта"
+    if datetime.now(UTC) - datetime.fromisoformat(last_run) > TRIGGER_STALE_AFTER:
+        return "план устарел (>4 ч)"
+    report = latest_report()
+    optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
+    soc_opt = optimizer.get("soc_opt")
+    starts = ((report or {}).get("hourly") or {}).get("starts_utc") or []
+    if soc_opt and starts:
+        try:
+            now_utc = datetime.now(UTC)
+            index = next(
+                (
+                    i
+                    for i, start in enumerate(starts)
+                    if datetime.fromisoformat(start)
+                    <= now_utc
+                    < datetime.fromisoformat(start) + timedelta(hours=1)
+                ),
+                None,
+            )
+            if index is not None and index < len(soc_opt):
+                ent = pipeline.resolve_entities(opts)
+                actual = float(pipeline.ha_get(f"/api/states/{ent['soc']}")["state"])
+                planned = float(soc_opt[index]) * 100.0
+                if abs(actual - planned) > TRIGGER_SOC_DEVIATION_PP:
+                    return f"SOC {actual:.0f}% вне плана {planned:.0f}%"
+        except Exception:
+            pass
+    return None
+
+
 def scheduler() -> None:
     time.sleep(60)  # let Home Assistant settle after add-on start
     while True:
@@ -118,8 +182,20 @@ def scheduler() -> None:
                 due = False
             if due and not STATE["running"]:
                 threading.Thread(target=run_pipeline, daemon=True).start()
+            # Event-driven recalculations between the scheduled daily runs.
             while datetime.now(tz) < target:
-                time.sleep(30)
+                remaining = (target - datetime.now(tz)).total_seconds()
+                time.sleep(max(5, min(TICK_SECONDS, remaining)))
+                if datetime.now(tz) >= target:
+                    break
+                if not STATE["running"]:
+                    reason = _trigger_reason(opts)
+                    if reason:
+                        STATE["last_trigger"] = {
+                            "reason": reason,
+                            "at": datetime.now(UTC).isoformat(),
+                        }
+                        threading.Thread(target=run_pipeline, daemon=True).start()
             threading.Thread(target=run_pipeline, daemon=True).start()
         except Exception:
             STATE["last_error"] = traceback.format_exc(limit=5)
@@ -226,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                     "audit_rows": audit_rows,
                     "retrain": retrain.retrain_status(),
                     "last_backfill": STATE.get("last_backfill"),
+                    "last_trigger": STATE.get("last_trigger"),
+                    "grid_state": STATE.get("grid_state"),
                 },
             )
         else:

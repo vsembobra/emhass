@@ -268,6 +268,9 @@ class PvQuantileBundle:
         out["pv_p10_kw"] += self.calibration_offsets["p10"]
         out["pv_p90_kw"] += self.calibration_offsets["p90"]
         clipped = out.clip(lower=0.0, upper=self.geometry.kwp)
+        # Re-apply the night mask AFTER the conformal offsets: a positive
+        # additive correction must not fabricate generation at night.
+        clipped.loc[clearsky < self.min_clearsky_kw, :] = 0.0
         ordered = np.sort(clipped.to_numpy(dtype=float), axis=1)
         return pd.DataFrame(ordered, index=frame.index, columns=clipped.columns)
 

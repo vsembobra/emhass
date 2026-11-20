@@ -224,12 +224,20 @@ def zone_targets(
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
 
-    Asymmetric rounding to the inverter's 5 % step:
+    Rounding to the inverter's 5 % step is always UP:
     - charging window (SOC rises across it, e.g. cheap night hours) → the
-      end-of-window SOC rounded UP — this is the charge target;
-    - discharging/holding window → rounded DOWN, so the floor never sits
-      above the real SOC: it can neither block planned discharge nor trigger
-      grid charging at expensive prices.
+      end-of-window SOC rounded up — this is the charge target;
+    - discharging/holding window → the window's minimum SOC rounded up too.
+      Rounding down would shave up to 5 pp off the outage reserve (≈1.6 kWh
+      on a 32 kWh battery); the small risk of a grid top-up to hold a floor
+      that sits 1-4 pp above the plan is the accepted price of never
+      under-reserving.
+
+    Charge detection uses only the chronological forward part of the window
+    (from the zone start to the next zone start, no cyclic wrap): the wrap
+    part belongs to the horizon's beginning, i.e. EARLIER in real time, and
+    comparing SOC across it fakes a rising window ("today evening" vs
+    "tomorrow morning") and pins the zone to a bogus charge target.
 
     strategy selects the floor of the discharging windows:
     - "ladder": the window's own minimum SOC — floors track the optimal
@@ -273,20 +281,23 @@ def zone_targets(
         else:
             window = list(range(match, len(soc_opt))) + list(range(0, end))
         entry_soc = soc_init if match == 0 else soc_opt[match - 1]
-        # end == 0: the window wraps past the horizon end to the zone starting
-        # at the horizon's first step. Its true end is the last step's SOC —
-        # soc_init here would fake a rising window (today's battery level used
-        # as tomorrow's window end) and pin the zone to a bogus charge target.
-        end_soc = soc_opt[-1] if end == 0 else soc_opt[end - 1]
+        # Charge detection runs on the chronological forward part only:
+        # [match, next zone start) without the cyclic wrap. The wrap part is
+        # the horizon's beginning — earlier in real time — so its end_soc
+        # would compare "today evening" against "tomorrow morning" and could
+        # fake a rising window, pinning the zone to a bogus charge target.
+        forward_end = later[0] if later else len(soc_opt)
+        end_soc = soc_opt[forward_end - 1]
         if not window:
             window = [match]
         if end_soc > entry_soc + 0.005 and _charge_target_kept(window, strategy, cheap_windows, starts, tz):
-            pct = math.ceil(clamp_pct(end_soc) / 5.0) * 5
+            pct = math.ceil(clamp_pct(end_soc) / 5.0 - 1e-9) * 5
         else:
             floor_soc = min(soc_opt[i] for i in window)
             if strategy == "flat":
                 floor_soc = min(floor_soc, horizon_min)
-            pct = math.floor(clamp_pct(floor_soc) / 5.0) * 5
+            # Round UP: rounding down would shave up to 5 pp off the reserve.
+            pct = math.ceil(clamp_pct(floor_soc) / 5.0 - 1e-9) * 5
         targets.append({**program, "optimal_soc_pct": pct})
     return targets
 

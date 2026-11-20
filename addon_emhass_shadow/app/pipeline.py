@@ -10,10 +10,13 @@ Nothing is written to the inverter: every Home Assistant call is a read,
 except the persistent notification service call.
 """
 
+import bisect
 import csv
 import json
+import math
 import os
 import ssl
+import time
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -151,17 +154,46 @@ def numeric_samples(states: list[dict], scale: float) -> list[tuple[datetime, fl
         except (TypeError, ValueError):
             continue
         samples.append((_state_at(state), number * scale))
+    samples.sort()
     return samples
 
 
-def _carried(samples: list[tuple[datetime, float]], hour: datetime) -> float | None:
+def _carried(samples: list[tuple], hour: datetime):
+    """Last sample value before the hour, as stored (numeric or status str)."""
     before = [value for at, value in samples if at < hour]
-    return float(before[-1]) if before else None
+    return before[-1] if before else None
 
 
 def hourly_mean(samples, hour):
-    values = [v for at, v in samples if hour <= at < hour + timedelta(hours=1)]
-    return float(np.mean(values)) if values else _carried(samples, hour)
+    """Time-weighted mean over the hour, carrying the last pre-hour value.
+
+    HA records state changes, so a plain mean of the samples inside the hour
+    is wrong whenever the value changes mid-hour: 1 kW held for 59 minutes
+    plus 5 kW for 1 minute would average to 3 kW instead of ≈1.07 kW. Each
+    value is weighted by the time it was in effect inside the hour; the mean
+    is normalized by the covered duration. No samples at all -> carried
+    value, or None when nothing precedes the hour either.
+    """
+    end = hour + timedelta(hours=1)
+    points = [(at, value) for at, value in samples if at < end]
+    segments: list[tuple[datetime, datetime, float]] = []
+    seg_start: datetime | None = None
+    seg_value: float | None = None
+    for at, value in points:
+        if at <= hour:
+            # Value in effect at the hour start (carried in).
+            seg_start, seg_value = hour, value
+        else:
+            if seg_value is not None and seg_start is not None:
+                segments.append((seg_start, at, seg_value))
+            seg_start, seg_value = at, value
+    if seg_value is not None and seg_start is not None:
+        segments.append((seg_start, end, seg_value))
+    if not segments:
+        return None
+    weighted = sum((b - a).total_seconds() * v for a, b, v in segments)
+    covered = sum((b - a).total_seconds() for a, b, v in segments)
+    return float(weighted / covered) if covered > 0 else None
 
 
 def hourly_min(samples, hour):
@@ -187,13 +219,33 @@ def solar_elevation(latitude, longitude, hour):
 
 
 def grid_status_series(states):
-    series = []
+    """(timestamp, status) transitions from HA history.
+
+    "unknown"/"unavailable" states are kept as "unknown": dropping them would
+    silently stretch the previous known state over recorder/sensor outages.
+    An unknown blip shorter than 15 minutes that is immediately followed by a
+    known state is swallowed — it is a reconnect artifact, not a grid event.
+    Consecutive duplicate statuses collapse into one transition.
+    """
+    raw = []
     for state in states:
-        value = {"on": "up", "off": "down"}.get(_state_value(state))
-        if value is None:
+        status = {"on": "up", "off": "down"}.get(_state_value(state), "unknown")
+        raw.append((_state_at(state), status))
+    raw.sort()
+    series = []
+    for index, (at, status) in enumerate(raw):
+        if status == "unknown":
+            following = raw[index + 1] if index + 1 < len(raw) else None
+            if (
+                following is not None
+                and following[1] != "unknown"
+                and following[0] - at < timedelta(minutes=15)
+            ):
+                continue
+        if series and series[-1][1] == status:
             continue
-        series.append((_state_at(state), value))
-    return sorted(series)
+        series.append((at, status))
+    return series
 
 
 def build_audit_rows(history, hours, latitude, longitude, ent):
@@ -225,17 +277,28 @@ def build_audit_rows(history, hours, latitude, longitude, ent):
         row["solar_elevation_deg"] = elevation
 
         in_hour = [s for at, s in grid_series if hour <= at < hour + timedelta(hours=1)]
+        carried = _carried(grid_series, hour)
         mins = [row[f] for f in ent["voltages"] if row[f] is not None]
         low_voltage = bool(mins) and min(mins) <= 50.0
         if history_start is not None and hour >= history_start.replace(
             minute=0, second=0, microsecond=0
         ):
-            row["raw_grid_status"] = "outage" if "down" in in_hour else "up"
-            row["grid_quality"] = (
-                "low_grid_voltage"
-                if low_voltage
-                else ("recorded_outage" if "down" in in_hour else "recorded_up")
-            )
+            # The carried state matters: a long outage (or a long sensor
+            # unavailability) has no new transitions inside the hour, but the
+            # grid is still down (or still unobserved) — never mark it "up".
+            if "down" in in_hour or carried == "down":
+                row["raw_grid_status"] = "outage"
+                row["grid_quality"] = (
+                    "low_grid_voltage" if low_voltage else "recorded_outage"
+                )
+            elif "unknown" in in_hour or carried == "unknown":
+                row["raw_grid_status"] = "unknown"
+                row["grid_quality"] = "low_grid_voltage" if low_voltage else "unknown"
+            else:
+                row["raw_grid_status"] = "up"
+                row["grid_quality"] = (
+                    "low_grid_voltage" if low_voltage else "recorded_up"
+                )
         elif not grid_series:
             row["raw_grid_status"] = "unknown"
             row["grid_quality"] = "unknown"
@@ -410,26 +473,89 @@ def _last_observation() -> datetime | None:
     return datetime.fromisoformat(row[0]) if row and row[0] else None
 
 
+def _heartbeat_samples(history, ent) -> list[datetime]:
+    """Timestamps proving the recorder was alive.
+
+    sensor.time changes every minute; the load power sensor changes in
+    practice every few seconds; sun.sun is the last-resort fallback. The
+    first candidate with any history wins.
+    """
+    candidates = ["sensor.time"]
+    load = ent.get("mean_sensors", {}).get("load_kw")
+    if load:
+        candidates.append(load[0])
+    candidates.append("sun.sun")
+    for candidate in candidates:
+        states = history.get(candidate, [])
+        if states:
+            return sorted(_state_at(state) for state in states)
+    return []
+
+
+def _grid_carry_rows(series, heartbeats, now) -> list[tuple[datetime, str]]:
+    """Hourly carried grid status between transitions.
+
+    Without periodic rows a quiet grid (or one long outage) produces gaps
+    larger than max_gap; record_observation_csv then resets to "unknown" and
+    the next real outage is recorded interrupted — invisible to the reserve
+    statistics. Synthesize one carry row per hour while a known status
+    persists, but only where the heartbeat proves the recorder was alive: a
+    heartbeat gap > 2 h is real observation loss, and inventing rows there
+    would fake knowledge we never had.
+    """
+    if not series or not heartbeats:
+        return []
+    beats = sorted(heartbeats)
+
+    def observed(at: datetime) -> bool:
+        index = bisect.bisect_right(beats, at)
+        return index > 0 and at - beats[index - 1] <= timedelta(hours=2)
+
+    rows = []
+    for index, (at, status) in enumerate(series):
+        if status == "unknown":
+            continue
+        end = series[index + 1][0] if index + 1 < len(series) else now
+        hour = (at + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        while hour < end and hour <= now:
+            if observed(hour):
+                rows.append((hour, status))
+            hour += timedelta(hours=1)
+    return rows
+
+
 def update_outage_log(ent) -> int:
     grid_binary = str(ent.get("grid_binary") or "").strip()
     if not grid_binary:
         return 0
     now = datetime.now(UTC)
-    history = fetch_history(now - timedelta(hours=48), now, [grid_binary])
-    series = grid_status_series(history.get(grid_binary, []))
+    fetch_entities = [grid_binary, "sensor.time", "sun.sun"]
+    load = ent.get("mean_sensors", {}).get("load_kw")
+    if load and load[0] not in fetch_entities:
+        fetch_entities.append(load[0])
+    history = fetch_history(now - timedelta(hours=48), now, fetch_entities)
+    transitions = grid_status_series(history.get(grid_binary, []))
+    carry = _grid_carry_rows(transitions, _heartbeat_samples(history, ent), now)
+    # A transition wins over a synthesized carry row at an equal timestamp —
+    # it is the actual change. Dict keys keep timestamps unique.
+    merged = sorted({**dict(carry), **dict(transitions)}.items())
     cursor_at = _last_observation()
     if cursor_at is not None:
-        series = [sample for sample in series if sample[0] > cursor_at]
-    if series:
+        merged = [sample for sample in merged if sample[0] > cursor_at]
+    if merged:
         csv_path = DATA / "grid_observations_tmp.csv"
         with csv_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
             writer.writerow(["timestamp", "status"])
-            for at, status in series:
+            for at, status in merged:
                 writer.writerow([at.isoformat(), status])
-        record_observation_csv(DATA / "outages.sqlite", SITE_ID, csv_path, max_gap=timedelta(hours=6))
+        # max_gap is small on purpose: carry rows keep observed periods dense,
+        # so a gap > 2 h means the recorder was really blind.
+        record_observation_csv(
+            DATA / "outages.sqlite", SITE_ID, csv_path, max_gap=timedelta(hours=2)
+        )
         csv_path.unlink()
-    return len(series)
+    return len(merged)
 
 
 def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
@@ -1021,7 +1147,9 @@ def run() -> dict:
         )
 
     profile = floor_profile(steps, reserve_by_hour, settings)
-    floors_plan = [round(step.floor_soc / 0.05) * 0.05 for step in profile.steps]
+    # Round floors UP to the inverter's 5 % step: rounding down (or to the
+    # nearest step) would shave up to 5 pp off the outage reserve.
+    floors_plan = [math.ceil(step.floor_soc / 0.05 - 1e-9) * 0.05 for step in profile.steps]
     floors = floors_plan[:HORIZON_HOURS]  # advisory/report day; plan horizon is longer
     recommended_floor = floors[0]  # binding constraint is the current hour
 
@@ -1088,13 +1216,19 @@ def run() -> dict:
 
     # Apply mode (off by default): write the plan into the inverter through
     # Home Assistant services. Optimizer zone targets win when available,
-    # otherwise the heuristic per-zone floors. Writes happen only when the
-    # change is at least 5 percentage points — no churn on rounding noise.
+    # otherwise the heuristic per-zone floors. Exception: when the optimizer
+    # relaxed the requested floor profile (floor_relaxed), its zone targets
+    # were computed against the flat min-SOC band — writing them would
+    # silently drop the outage reserve (e.g. requested 80 %, written 20 %),
+    # so the heuristic floors are applied instead. Writes happen only when
+    # the change is at least 5 percentage points — no churn on rounding
+    # noise. Every write is read back: HTTP 200 only means HA accepted the
+    # service call, not that the inverter applied the value.
     applied: list[str] = []
     apply_errors: list[str] = []
     if opts.get("apply_mode", False):
         zone_pct = {}
-        if optimizer_plan is not None:
+        if optimizer_plan is not None and not optimizer_plan.get("floor_relaxed"):
             for t in optimizer_plan["zone_targets"]:
                 if t.get("optimal_soc_pct") is not None:
                     zone_pct[t["n"]] = t["optimal_soc_pct"]
@@ -1104,6 +1238,7 @@ def run() -> dict:
                     zone_pct[p["n"]] = p["recommended_soc_pct"]
         min_pct = int(round(_soc_bounds(opts)[0] * 100))
         max_pct = int(round(_soc_bounds(opts)[1] * 100))
+        pending: list[tuple[str, str, float, str]] = []  # label, entity, target, ok message
         for p in programs:
             target = zone_pct.get(p["n"])
             if target is None:
@@ -1117,9 +1252,15 @@ def run() -> dict:
                     "set_value",
                     {"entity_id": ent["tou_soc"][p["n"] - 1], "value": target},
                 )
-                applied.append(f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%")
             except Exception:
                 apply_errors.append(f"зона {p['n']}")
+                continue
+            pending.append((
+                f"зона {p['n']}",
+                ent["tou_soc"][p["n"] - 1],
+                float(target),
+                f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%",
+            ))
         floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
         if abs(floor_target - round(current_floor * 100)) >= 5:
             try:
@@ -1130,9 +1271,28 @@ def run() -> dict:
                     "set_value",
                     {"entity_id": ent["floor_input"], "value": floor_target},
                 )
-                applied.append(f"порог SOC {round(current_floor * 100)}→{floor_target}%")
+                pending.append((
+                    "порог SOC",
+                    ent["floor_input"],
+                    float(floor_target),
+                    f"порог SOC {round(current_floor * 100)}→{floor_target}%",
+                ))
             except Exception:
                 apply_errors.append("порог SOC")
+        # Read back after the inverter had a moment to propagate. A mismatch
+        # > 5 pp means the value did not stick (e.g. TOU/Grid Charge switches
+        # off on the inverter) — report it instead of claiming success.
+        if pending:
+            time.sleep(3)
+            for label, entity, target, ok_msg in pending:
+                try:
+                    confirmed = float(ha_get(f"/api/states/{entity}")["state"])
+                except Exception:
+                    confirmed = None
+                if confirmed is None or abs(confirmed - target) > 5:
+                    apply_errors.append(f"{label} (запись не подтверждена)")
+                else:
+                    applied.append(ok_msg)
 
     last_outage = max(
         (e.end for e in events if e.end is not None and e.source == "measured"), default=None
@@ -1237,17 +1397,22 @@ def run() -> dict:
                 f"{optimizer_plan['grid_charge_kwh_cheap']:.1f} кВт·ч"
             )
         if optimizer_plan["floor_relaxed"]:
-            lines.append(
+            relaxed_note = (
                 "• Оптимизатор: плавающий пол недостижим по прогнозу — "
                 "план посчитан с плоским минимумом SOC"
             )
+            if apply_mode:
+                relaxed_note += "; цели оптимизатора НЕ применяются, записаны эвристические полы"
+            lines.append(relaxed_note)
         zone_changes = [
             t
             for t in optimizer_plan["zone_targets"]
             if t.get("optimal_soc_pct") is not None
             and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= 5
         ]
-        if zone_changes:
+        # When the relaxed targets are not applied (reserve protection), do
+        # not present them as the plan's zone targets.
+        if zone_changes and not (apply_mode and optimizer_plan["floor_relaxed"]):
             zones = ", ".join(
                 f"зона {t['n']} ({t['from'][:5]}) {t['soc_pct']:.0f}→{t['optimal_soc_pct']:.0f}%"
                 for t in zone_changes
@@ -1340,7 +1505,7 @@ def run() -> dict:
                 }
                 for i in range(HORIZON_HOURS)
             ],
-            "max_floor_soc": round(profile.max_floor_soc / 0.05) * 0.05,
+            "max_floor_soc": math.ceil(profile.max_floor_soc / 0.05 - 1e-9) * 0.05,
             "energy_to_crossover_kwh": round(profile.steps[0].stored_kwh, 3),
             "crossover_utc": (
                 profile.steps[0].crossover.isoformat() if profile.steps[0].crossover else None
