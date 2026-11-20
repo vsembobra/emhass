@@ -24,6 +24,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import certifi
+import hardware
 import learning
 import numpy as np
 import optimize
@@ -854,6 +855,36 @@ def _retrain_note() -> str | None:
     )
 
 
+def _hardware_note(configured: dict, learned: dict | None, applied: list[str]) -> str | None:
+    """One notification line: what the data says about the hardware."""
+    if not learned:
+        return None
+    facts = []
+    battery = learned.get("battery") or {}
+    if battery.get("status") == "ok":
+        facts.append(
+            f"ёмкость {battery['capacity_kwh']:.1f} кВт·ч (в настройках {configured['capacity_kwh']}),"
+            f" КПД цикла {battery['round_trip_efficiency']:.0%}"
+        )
+    geometry = learned.get("pv_geometry")
+    if geometry:
+        facts.append(
+            f"панели {geometry['kwp']:.1f} кВтп, наклон {geometry['tilt_deg']:.0f}°, "
+            f"азимут {geometry['azimuth_deg']:.0f}°"
+        )
+    limits = learned.get("limits") or {}
+    if limits.get("max_charge_kw"):
+        facts.append(f"заряд до {limits['max_charge_kw']:.1f} кВт")
+    if not facts:
+        return None
+    line = "• Железо по данным: " + "; ".join(facts)
+    if configured.get("autotune"):
+        line += " — применено: " + (", ".join(applied) if applied else "нечего менять")
+    else:
+        line += " (только совет, автонастройка выключена)"
+    return line
+
+
 def _self_learning_note(calibrations: dict, drift: dict) -> str | None:
     """One notification line on the active forecast self-correction."""
     parts = []
@@ -1146,7 +1177,11 @@ def recommend_zone_socs(
 
 
 def run() -> dict:
-    opts = options()
+    configured = options()
+    learned_hardware = hardware.load(DATA)
+    # autotune: learned capacity/efficiency/limits/geometry replace the
+    # configured ones (in this run's copy only); otherwise opts == configured.
+    opts, autotune_notes = hardware.effective_options(configured, learned_hardware)
     ent = resolve_entities(opts)
     entity_checks = validate_entities()
     site = {
@@ -1260,6 +1295,8 @@ def run() -> dict:
     # State of health: entity id or a plain number ("99"); missing or
     # unreadable values keep the nominal 100 % and are flagged in the report.
     soh, soh_source = _battery_soh(opts)
+    if opts.get("_soh_identified"):
+        soh, soh_source = 1.0, "identified"
 
     critical = audit["critical_load_kw"].dropna()
     settings = ReserveSettings(
@@ -1299,6 +1336,16 @@ def run() -> dict:
     # local hours instead of relying only on the post-outage reactive hold.
     risk = outage_risk_profile(events, issue, site["time_zone"])
     reserve_by_hour = [plan.reserve_kwh] * PLAN_HOURS
+    if opts.get("autotune") and learned_hardware:
+        reserve_by_hour = hardware.reshape_reserve(
+            reserve_by_hour,
+            starts_plan,
+            tz,
+            learned_hardware.get("critical_profile_kw"),
+            plan.duration_hours,
+            settings.cold_start_hours,
+            settings.discharge_efficiency,
+        )
     risk_windows: list[str] = []
     if risk is not None and any(risk.risk_hours):
         risk_energy = (
@@ -1628,6 +1675,9 @@ def run() -> dict:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
         )
+    hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
+    if hardware_note is not None:
+        lines.append(hardware_note)
     learning_note = _self_learning_note(calibrations, drift)
     if learning_note is not None:
         lines.append(learning_note)
@@ -1654,6 +1704,11 @@ def run() -> dict:
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
+            "hardware": {
+                "learned": learned_hardware,
+                "autotune": bool(opts.get("autotune", False)),
+                "applied": autotune_notes,
+            },
             "self_learning": {
                 "load": calibrations["load"].to_dict() if "load" in calibrations else None,
                 "pv": calibrations["pv"].to_dict() if "pv" in calibrations else None,

@@ -26,6 +26,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import hardware
 import numpy as np
 import pandas as pd
 import pipeline
@@ -508,7 +509,9 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         if not due:
             return retrain_status()
     if site is None:
-        opts = json.loads((DATA / "options.json").read_text())
+        opts, _ = hardware.effective_options(
+            json.loads((DATA / "options.json").read_text()), hardware.load(DATA)
+        )
         site = {
             "latitude": opts["latitude"],
             "longitude": opts["longitude"],
@@ -542,6 +545,12 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         result["models"]["pv"] = _retrain_pv(audit, site, weather)
     except Exception as error:
         result["models"]["pv"] = {"status": "failed", "error": str(error)[:300]}
+    try:
+        if force or hardware.due(DATA):
+            opts = json.loads((DATA / "options.json").read_text())
+            hardware.save(DATA, hardware.identify(audit, opts))
+    except Exception:
+        pass  # hardware learning is advisory; never fail the retrain on it
     state["last_retrain_utc"] = result["started_utc"]
     state["models"] = result["models"]
     _save_state(state)

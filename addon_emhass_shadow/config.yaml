@@ -66,6 +66,7 @@ options:
   history_backfill_days: 14
   entity_battery_soh: ""
   load_holidays: ""
+  autotune: false
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -109,6 +110,7 @@ schema:
   history_backfill_days: int(0,60)
   entity_battery_soh: str?
   load_holidays: str?
+  autotune: bool
 translations:
   ru:
     configuration:
@@ -238,6 +240,9 @@ translations:
       load_holidays:
         name: Праздничные дни
         description: "Ежегодные даты, когда потребление похоже на выходной, через запятую в формате ММ-ДД, например 01-01,01-07,03-08,05-09. Модель нагрузки учтёт их со следующего переобучения. Пусто = без праздников."
+      autotune:
+        name: Автонастройка по данным
+        description: "Применять то, что аддон выучил сам: реальную ёмкость и КПД батареи, ориентацию панелей, профиль критической нагрузки по часам и подобранные на вашей истории настройки плана. Лимиты мощности только повышаются, если данные доказывают, что инвертор может больше. Выключено = выученное показывается в панели как совет."
   en:
     configuration:
       latitude:
@@ -366,3 +371,6 @@ translations:
       load_holidays:
         name: Holidays
         description: "Recurring dates with weekend-like consumption, comma-separated MM-DD, e.g. 01-01,12-25. The load model uses them from the next retrain. Empty = no holidays."
+      autotune:
+        name: Autotune from data
+        description: "Apply what the add-on learned by itself: real battery capacity and efficiency, panel orientation, hourly critical-load profile and plan settings tuned on your history. Power limits are only raised when the data proves the inverter can do more. Off = learned values are shown in the panel as advice."

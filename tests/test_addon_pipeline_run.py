@@ -96,3 +96,34 @@ def test_apply_mode_writes_zone_targets(fake_site):
     writes = [s for s in fake_site["services"] if s[1] == "set_value"]
     assert writes, report["notification"]
     assert not report["advisory"]["apply_errors"]
+
+
+LEARNED = {
+    "identified_utc": "2026-11-20T00:00:00+00:00",
+    "battery": {
+        "status": "ok",
+        "capacity_kwh": 28.0,
+        "round_trip_efficiency": 0.9,
+        "eta_one_way": 0.95,
+    },
+    "limits": {"max_charge_kw": 4.0, "max_discharge_kw": 4.0},
+    "pv_geometry": None,
+    "critical_profile_kw": [0.3] * 18 + [1.5] * 6,
+}
+
+
+def test_autotune_applies_learned_hardware(fake_site):
+    (fake_site["data"] / "hardware.json").write_text(json.dumps(LEARNED), encoding="utf-8")
+    fake_site["setup"](autotune=True)
+    report = pipeline.run()
+    assert report["data"]["battery_soh_source"] == "identified"
+    assert any("ёмкость" in note for note in report["data"]["hardware"]["applied"])
+    assert "Железо по данным" in report["notification"]
+
+
+def test_learned_hardware_is_advice_only_without_autotune(fake_site):
+    (fake_site["data"] / "hardware.json").write_text(json.dumps(LEARNED), encoding="utf-8")
+    report = pipeline.run()
+    assert report["data"]["battery_soh_source"] == "default"
+    assert report["data"]["hardware"]["applied"] == []
+    assert "только совет" in report["notification"]
