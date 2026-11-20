@@ -709,9 +709,11 @@ def forecast_load(
     )
     grid = grid.reindex(grid.index.union(starts_plan))
     if weather is not None and "temperature_2m" in weather:
-        grid["temp_air_observed_c"] = grid["temp_air_observed_c"].fillna(
-            pd.to_numeric(weather["temperature_2m"], errors="coerce").reindex(grid.index)
-        )
+        forecast_temp = pd.to_numeric(weather["temperature_2m"], errors="coerce").reindex(grid.index)
+        grid["temp_air_observed_c"] = grid["temp_air_observed_c"].fillna(forecast_temp)
+        # As-of forecast for the target hour (used by lead-aware bundles that
+        # opted into forecast_temperature; ignored by older ones).
+        grid["temp_forecast_c"] = forecast_temp
     day1 = bundle.predict(grid.loc[: day1_index[-1]], issue_time=issue).loc[day1_index]
     if not len(day2_index):
         return day1

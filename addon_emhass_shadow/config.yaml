@@ -65,6 +65,7 @@ options:
   reserve_pv_aware: true
   history_backfill_days: 14
   entity_battery_soh: ""
+  load_holidays: ""
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -107,6 +108,7 @@ schema:
   reserve_pv_aware: bool
   history_backfill_days: int(0,60)
   entity_battery_soh: str?
+  load_holidays: str?
 translations:
   ru:
     configuration:
@@ -233,6 +235,9 @@ translations:
       history_backfill_days:
         name: Глубина загрузки истории, дней
         description: "Сколько дней прошлого аддон забирает из истории Home Assistant при первом запуске и по кнопке «Загрузить историю» (0–60, по умолчанию 14). Реальная глубина ограничена сроком хранения рекордера HA (обычно 10 дней). Эти данные сразу идут в обучение моделей прогноза."
+      load_holidays:
+        name: Праздничные дни
+        description: "Ежегодные даты, когда потребление похоже на выходной, через запятую в формате ММ-ДД, например 01-01,01-07,03-08,05-09. Модель нагрузки учтёт их со следующего переобучения. Пусто = без праздников."
   en:
     configuration:
       latitude:
@@ -358,3 +363,6 @@ translations:
       history_backfill_days:
         name: History backfill depth, days
         description: "How many past days the add-on pulls from Home Assistant history on first run and via the 'Backfill history' button (0-60, default 14). Actual depth is limited by the HA recorder retention (usually 10 days). This data feeds the forecast model training immediately."
+      load_holidays:
+        name: Holidays
+        description: "Recurring dates with weekend-like consumption, comma-separated MM-DD, e.g. 01-01,12-25. The load model uses them from the next retrain. Empty = no holidays."

@@ -22,6 +22,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,7 +30,13 @@ import numpy as np
 import pandas as pd
 import pipeline
 
-from emhass.load_quantiles import QUANTILE_LABELS, QUANTILES, LoadQuantileBundle, pinball_loss
+from emhass.load_quantiles import (
+    QUANTILE_LABELS,
+    QUANTILES,
+    LoadFeatureConfig,
+    LoadQuantileBundle,
+    pinball_loss,
+)
 from emhass.pv_quantiles import PvGeometry, PvQuantileBundle, plane_power_kw
 
 DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
@@ -205,7 +212,37 @@ def _decide(result: dict, score_challenger, score_champion, champion) -> str | N
     return None
 
 
-def _retrain_load(audit: pd.DataFrame) -> dict:
+def parse_holidays(raw) -> frozenset[str]:
+    """Comma-separated recurring "MM-DD" dates; invalid chunks are skipped."""
+    days = set()
+    for chunk in str(raw or "").split(","):
+        chunk = chunk.strip()
+        try:
+            month, day = (int(part) for part in chunk.split("-"))
+        except ValueError:
+            continue
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            days.add(f"{month:02d}-{day:02d}")
+    return frozenset(days)
+
+
+def challenger_config(champion, site: dict | None) -> LoadFeatureConfig | None:
+    """The current load recipe: site time zone, holidays, forecast temperature
+    and lead-aware training. Champion/challenger decides whether it wins."""
+    site = site or {}
+    base = champion.config if champion else LoadFeatureConfig()
+    return replace(
+        base,
+        time_zone=str(site.get("time_zone") or base.time_zone),
+        holidays=parse_holidays(site["load_holidays"]) if "load_holidays" in site else base.holidays,
+        forecast_temperature=True,
+        lead_aware=True,
+    )
+
+
+def _retrain_load(
+    audit: pd.DataFrame, site: dict | None = None, weather: pd.DataFrame | None = None
+) -> dict:
     """Champion/challenger retrain of the load model.
 
     The challenger is fitted with the current recipe on data before the
@@ -215,10 +252,14 @@ def _retrain_load(audit: pd.DataFrame) -> dict:
     """
     final = MODELS / "load_quantiles_v1"
     champion = _try_load(LoadQuantileBundle.load, final)
-    config = champion.config if champion else None
+    config = challenger_config(champion, site)
     seasonal = champion.seasonal if champion else None
     grid = pd.DataFrame(index=audit.index)
     grid["temp_air_observed_c"] = pd.to_numeric(audit["temp_air_observed_c"], errors="coerce")
+    if weather is not None and "temperature_2m_previous_day1" in weather:
+        # Day-ahead forecast as it was issued: the as-of twin of the live
+        # forecast the daily plan feeds in.
+        grid["temp_forecast_c"] = weather["temperature_2m_previous_day1"].reindex(grid.index)
     load = pd.to_numeric(audit["load_kw"], errors="coerce")
     # Only rows the audit marked clean are training targets; outage and
     # invalid hours would teach the model the wrong consumption pattern.
@@ -475,6 +516,8 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             "panel_tilt_deg": opts.get("panel_tilt_deg", 26.0),
             "panel_azimuth_deg": opts.get("panel_azimuth_deg", 195.0),
             "max_charge_kw": opts.get("max_charge_kw"),
+            "time_zone": opts.get("time_zone"),
+            "load_holidays": opts.get("load_holidays", ""),
         }
     result = {"started_utc": datetime.now(UTC).isoformat(), "models": {}}
     try:
@@ -492,7 +535,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         weather = None  # load model can still fit without temperature
     audit = _fill_audit_temperature(audit, weather)
     try:
-        result["models"]["load"] = _retrain_load(audit)
+        result["models"]["load"] = _retrain_load(audit, site, weather)
     except Exception as error:  # keep the live bundle on any failure
         result["models"]["load"] = {"status": "failed", "error": str(error)[:300]}
     try:

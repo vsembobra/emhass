@@ -21,6 +21,14 @@ Feature and leakage contract:
   is intentionally unsupported until an as-of weather archive exists.
 * Day-of-year sine/cosine features are only fitted when the training fold
   spans at least ``seasonal_min_days`` (12 months by default).
+* Opt-in ``forecast_temperature`` adds ``temp_forecast_c``: the weather
+  forecast for the target hour as it was known at issue time (a day-ahead
+  previous-runs archive in training, the live forecast at inference).
+* Opt-in ``lead_aware`` adds ``lead_hours`` (1 = the issue hour) and trains
+  on rows stacked for every lead in ``training_leads``, each with its rolling
+  means frozen ``lead`` hours earlier. Inference freezes them at the issue
+  time, so a 24 h horizon now sees the same feature semantics it was
+  trained on at every lead, instead of one-step-ahead rows only.
 * Missing lag or temperature values stay missing (NaN); LightGBM handles NaN
   natively. A row with all-missing history still gets a calendar-only
   prediction (documented cold-start behaviour).
@@ -101,6 +109,9 @@ class LoadFeatureConfig:
     # opt-in rather than guessed.
     holidays: frozenset[str] = frozenset()
     seasonal_min_days: int = 365
+    forecast_temperature: bool = False
+    lead_aware: bool = False
+    training_leads: tuple[int, ...] = (1, 3, 6, 12, 18, 24)
 
     def __post_init__(self) -> None:
         if not self.lag_hours or any(lag <= 0 for lag in self.lag_hours):
@@ -113,6 +124,9 @@ class LoadFeatureConfig:
             raise ValueError("temperature_lag_hours must be positive")
         if self.seasonal_min_days <= 0:
             raise ValueError("seasonal_min_days must be positive")
+        causal = min(*self.lag_hours, self.temperature_lag_hours)
+        if not self.training_leads or any(not 1 <= lead <= causal for lead in self.training_leads):
+            raise ValueError(f"training_leads must lie in 1..{causal} (smallest lag)")
         for holiday in self.holidays:
             month, day = holiday.split("-")
             if not (1 <= int(month) <= 12 and 1 <= int(day) <= 31):
@@ -149,13 +163,15 @@ def build_features(
     *,
     seasonal: bool = False,
     issue_time: pd.Timestamp | None = None,
+    lead: int = 1,
 ) -> pd.DataFrame:
     """Build the model feature frame on a complete hourly UTC grid.
 
     ``grid`` must contain ``load_kw`` and may contain ``temp_air_observed_c``;
     both keep missing values as NaN. With ``issue_time`` the trailing rolling
     features are frozen at the issue instant (causal 24 h-ahead inference);
-    without it each row emulates a one-step-ahead issue at its own timestamp.
+    without it each row emulates an issue ``lead`` hours before its own
+    timestamp (lead 1 = issued at the row's own hour).
     """
     config = config or LoadFeatureConfig()
     index = _check_hourly_grid(grid.index)
@@ -187,7 +203,7 @@ def build_features(
     for window in config.rolling_hours:
         column = f"load_roll_mean_{window}"
         if issue_time is None:
-            features[column] = load.shift(1).rolling(
+            features[column] = load.shift(lead).rolling(
                 window, min_periods=config.rolling_min_periods
             ).mean()
         else:
@@ -203,7 +219,39 @@ def build_features(
             # Temperature at t - lag is an actual for every step of a horizon
             # up to `lag` hours, so per-step lagged values stay causal.
             features[f"temp_lag_{lag}"] = temp.shift(lag)
+    if config.forecast_temperature:
+        features["temp_forecast_c"] = (
+            pd.to_numeric(grid["temp_forecast_c"], errors="coerce")
+            if "temp_forecast_c" in grid.columns
+            else np.nan
+        )
+    if config.lead_aware:
+        if issue_time is None:
+            features["lead_hours"] = float(lead)
+        else:
+            features["lead_hours"] = (index - issue_time) / pd.Timedelta(hours=1) + 1.0
     return features
+
+
+def stacked_features(
+    grid: pd.DataFrame, config: LoadFeatureConfig, seasonal: bool
+) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
+    """Training rows for every configured lead, plus each row's grid timestamp.
+
+    Without ``lead_aware`` this is the plain one-step frame. The returned
+    index maps every stacked row back to its grid hour (for targets and
+    sample weights); the frame itself carries a RangeIndex.
+    """
+    leads = config.training_leads if config.lead_aware else (1,)
+    frames = [build_features(grid, config, seasonal=seasonal, lead=lead) for lead in leads]
+    stacked = pd.concat(frames, ignore_index=True)
+    origin = grid.index.append([grid.index] * (len(leads) - 1)) if len(leads) > 1 else grid.index
+    return stacked, origin
+
+
+def _stacked(series: pd.Series, grid_index: pd.DatetimeIndex, origin: pd.DatetimeIndex) -> pd.Series:
+    """A grid-indexed series repeated onto the stacked rows (RangeIndex)."""
+    return pd.Series(series).reindex(grid_index).reindex(origin).reset_index(drop=True)
 
 
 def feature_names(config: LoadFeatureConfig, seasonal: bool) -> list[str]:
@@ -211,6 +259,10 @@ def feature_names(config: LoadFeatureConfig, seasonal: bool) -> list[str]:
     if seasonal:
         names[4:4] = list(SEASONAL_FEATURES)
     names.append(f"temp_lag_{config.temperature_lag_hours}")
+    if config.forecast_temperature:
+        names.append("temp_forecast_c")
+    if config.lead_aware:
+        names.append("lead_hours")
     return names
 
 
@@ -292,16 +344,22 @@ class LoadQuantileBundle:
         if seasonal is None:
             span_days = (grid.index[-1] - grid.index[0]).total_seconds() / 86400
             seasonal = span_days >= config.seasonal_min_days
-        features = build_features(grid, config, seasonal=seasonal)
+        _check_hourly_grid(grid.index)
+        features, origin = stacked_features(grid, config, seasonal)
         names = feature_names(config, seasonal)
         _require_columns(features, names)
         target = pd.to_numeric(grid["load_kw"], errors="coerce")
-        valid = target.notna()
+        stacked_target = _stacked(target, grid.index, origin)
+        valid = stacked_target.notna()
         x_train = features.loc[valid, names]
-        y_train = target.loc[valid].to_numpy(dtype=float)
-        if len(y_train) < 24:
+        y_train = stacked_target.loc[valid].to_numpy(dtype=float)
+        if int(target.notna().sum()) < 24:
             raise ValueError("at least 24 valid training rows are required")
-        weights = _row_weights(sample_weight, grid.index, valid)
+        weights = None
+        if sample_weight is not None:
+            weights = _row_weights(
+                _stacked(sample_weight, grid.index, origin), features.index, valid
+            )
         merged = {**DEFAULT_LGB_PARAMS, **(params or {})}
         boosters = {}
         for alpha in QUANTILES:
@@ -347,13 +405,15 @@ class LoadQuantileBundle:
         The slice must end before the test slice; the caller owns the split.
         Offsets target one-sided 90% coverage on the calibration rows.
         """
-        features = build_features(grid, self.config, seasonal=self.seasonal)
+        _check_hourly_grid(grid.index)
+        features, origin = stacked_features(grid, self.config, self.seasonal)
         target = pd.to_numeric(grid["load_kw"], errors="coerce")
-        valid = target.notna()
-        if valid.sum() < 24:
+        if target.notna().sum() < 24:
             raise ValueError("at least 24 valid calibration rows are required")
+        stacked_target = _stacked(target, grid.index, origin)
+        valid = stacked_target.notna()
         raw = self._raw_predict(features.loc[valid])
-        y = target.loc[valid].to_numpy(dtype=float)
+        y = stacked_target.loc[valid].to_numpy(dtype=float)
         self.calibration_offsets = {
             "p90": self._conformal_offset(y - raw["load_p90_kw"].to_numpy(), 0.9),
             "p10": -self._conformal_offset(raw["load_p10_kw"].to_numpy() - y, 0.9),
@@ -404,6 +464,7 @@ class LoadQuantileBundle:
                 "holidays": sorted(self.config.holidays),
                 "lag_hours": list(self.config.lag_hours),
                 "rolling_hours": list(self.config.rolling_hours),
+                "training_leads": list(self.config.training_leads),
             },
             "seasonal": self.seasonal,
             "feature_names": self.columns,
@@ -435,6 +496,10 @@ class LoadQuantileBundle:
             temperature_lag_hours=config_data["temperature_lag_hours"],
             holidays=frozenset(config_data["holidays"]),
             seasonal_min_days=config_data["seasonal_min_days"],
+            # Bundles saved before these options existed use the old recipe.
+            forecast_temperature=bool(config_data.get("forecast_temperature", False)),
+            lead_aware=bool(config_data.get("lead_aware", False)),
+            training_leads=tuple(config_data.get("training_leads", (1, 3, 6, 12, 18, 24))),
         )
         boosters = {}
         for alpha in QUANTILES:
