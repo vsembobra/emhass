@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.8.7"
+version: "0.8.8"
 slug: emhass_shadow
 init: false
 arch:
@@ -44,7 +44,7 @@ options:
   entity_battery_power: sensor.inverter_battery_power
   entity_grid_power: sensor.inverter_grid_power
   entity_battery_soc: sensor.inverter_battery
-  entity_outdoor_temperature: sensor.home_temperature
+  entity_outdoor_temperature: ""
   entity_grid_status: binary_sensor.inverter_grid
   entity_grid_voltage: sensor.inverter_grid_l1_voltage
   entity_export_counter: sensor.inverter_total_energy_export
@@ -86,7 +86,7 @@ schema:
   entity_battery_power: str
   entity_grid_power: str
   entity_battery_soc: str
-  entity_outdoor_temperature: str
+  entity_outdoor_temperature: str?
   entity_grid_status: str
   entity_grid_voltage: str?
   entity_export_counter: str
@@ -172,7 +172,7 @@ translations:
         description: "Что: текущий уровень заряда АКБ. Единицы: проценты (0–100). Пример: sensor.inverter_battery."
       entity_outdoor_temperature:
         name: Сущность — уличная температура
-        description: "Что: температура на улице. Единицы: °C. Подойдёт любой уличный датчик. Пример: sensor.home_temperature. Улучшает прогноз нагрузки."
+        description: "Что: температура на улице. Единицы: °C. Подойдёт любой уличный датчик. Пример: sensor.home_temperature. Улучшает прогноз нагрузки. Пусто = аддон сам подставляет температуру из Open-Meteo."
       entity_grid_status:
         name: Сущность — статус сети
         description: "Что: наличие сети. Тип: binary_sensor (on = сеть есть, off = отключение). Пример: binary_sensor.inverter_grid. По нему ведётся журнал отключений."
@@ -297,7 +297,7 @@ translations:
         description: "What: current battery state of charge. Units: percent (0-100). Example: sensor.inverter_battery."
       entity_outdoor_temperature:
         name: Entity — outdoor temperature
-        description: "What: outdoor temperature. Units: °C. Any outdoor sensor works. Example: sensor.home_temperature. Improves the load forecast."
+        description: "What: outdoor temperature. Units: °C. Any outdoor sensor works. Example: sensor.home_temperature. Improves the load forecast. Empty = the add-on falls back to Open-Meteo temperature."
       entity_grid_status:
         name: Entity — grid status
         description: "What: grid availability. Type: binary_sensor (on = grid up, off = outage). Example: binary_sensor.inverter_grid. Feeds the outage log."

@@ -858,6 +858,20 @@ def run() -> dict:
     starts_plan = pd.date_range(issue, periods=PLAN_HOURS, freq="h")
 
     models_learning = False
+    # Weather comes first: its temperature backstops the load-model features
+    # on sites without an outdoor sensor, then feeds the PV forecast itself.
+    # Observed sensor values win where present; Open-Meteo only fills gaps.
+    try:
+        weather, weather_name, weather_stale = archive_weather(site)
+    except OSError:
+        weather, weather_name, weather_stale = None, None, True
+    if weather is not None and "temp_air_observed_c" in audit:
+        audit = audit.assign(
+            temp_air_observed_c=audit["temp_air_observed_c"].fillna(
+                weather["temperature_2m"].reindex(audit.index)
+            )
+        )
+
     try:
         load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
         grid = audit[["temp_air_observed_c", "load_kw"]].copy()
@@ -878,30 +892,35 @@ def run() -> dict:
         pv_bundle = PvQuantileBundle.load(DATA / "models" / "pv_quantiles_v1")
     except (OSError, ValueError):
         models_learning = True
-    try:
-        weather, weather_name, weather_stale = archive_weather(site)
-        if pv_bundle is not None:
-            poa = plane_power_kw(
-                pv_bundle.geometry,
-                weather.index,
-                weather["shortwave_radiation"],
-                weather["direct_normal_irradiance"],
-                weather["diffuse_radiation"],
-            )
-            pv_frame = pd.DataFrame(
-                {
-                    "pv_measured_kw": np.nan,
-                    "poa_forecast_kw": poa,
-                    "cloud_cover_pct": weather["cloud_cover"],
-                    "temp_air_c": weather["temperature_2m"],
-                }
-            ).reindex(starts_plan)
-            pv_prediction = pv_bundle.predict(pv_frame)
-            pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(PLAN_HOURS)]
-            pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)]
-            pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(PLAN_HOURS)]
-        else:
-            pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
+    if weather is None:
+        # No internet and no archived vintage at all: assume zero solar, the
+        # conservative direction for battery planning, and say so in the report.
+        weather_stale = True
+        pv_p10 = [0.0] * PLAN_HOURS
+        pv_p50 = [0.0] * PLAN_HOURS
+        pv_p90 = [0.0] * PLAN_HOURS
+        pv_day = None
+        pv_day2 = None
+    elif pv_bundle is not None:
+        poa = plane_power_kw(
+            pv_bundle.geometry,
+            weather.index,
+            weather["shortwave_radiation"],
+            weather["direct_normal_irradiance"],
+            weather["diffuse_radiation"],
+        )
+        pv_frame = pd.DataFrame(
+            {
+                "pv_measured_kw": np.nan,
+                "poa_forecast_kw": poa,
+                "cloud_cover_pct": weather["cloud_cover"],
+                "temp_air_c": weather["temperature_2m"],
+            }
+        ).reindex(starts_plan)
+        pv_prediction = pv_bundle.predict(pv_frame)
+        pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(PLAN_HOURS)]
+        pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)]
+        pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_day = {
             "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
             "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
@@ -912,15 +931,18 @@ def run() -> dict:
             "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
             "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
         }
-    except OSError:
-        # No internet and no archived vintage at all: assume zero solar, the
-        # conservative direction for battery planning, and say so in the report.
-        weather_name, weather_stale = None, True
-        pv_p10 = [0.0] * PLAN_HOURS
-        pv_p50 = [0.0] * PLAN_HOURS
-        pv_p90 = [0.0] * PLAN_HOURS
-        pv_day = None
-        pv_day2 = None
+    else:
+        pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
+        pv_day = {
+            "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
+            "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
+            "p90": round(float(np.sum(pv_p90[:HORIZON_HOURS])), 2),
+        }
+        pv_day2 = {
+            "p10": round(float(np.sum(pv_p10[HORIZON_HOURS:])), 2),
+            "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
+            "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
+        }
 
     # State of health: entity id or a plain number ("99"); missing or
     # unreadable values keep the nominal 100 % and are flagged in the report.

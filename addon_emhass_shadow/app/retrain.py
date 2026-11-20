@@ -195,7 +195,24 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
     return weather
 
 
-def _retrain_pv(audit: pd.DataFrame, site: dict) -> dict:
+def _fill_audit_temperature(audit: pd.DataFrame, weather: pd.DataFrame | None) -> pd.DataFrame:
+    """Backstop missing outdoor-temperature audit values from Open-Meteo.
+
+    Sites without an outdoor sensor have an all-NaN temp column; the archived
+    day-ahead temperature is close to the actual and keeps the temp_lag
+    feature of the load model alive. Observed values always win.
+    """
+    if weather is None or "temperature_2m_previous_day1" not in weather:
+        return audit
+    if "temp_air_observed_c" not in audit:
+        return audit
+    filled = audit["temp_air_observed_c"].fillna(
+        weather["temperature_2m_previous_day1"].reindex(audit.index)
+    )
+    return audit.assign(temp_air_observed_c=filled)
+
+
+def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = None) -> dict:
     final = MODELS / "pv_quantiles_v1"
     if (final / "bundle.json").exists():
         current = PvQuantileBundle.load(final)  # reuse confirmed site geometry
@@ -215,7 +232,7 @@ def _retrain_pv(audit: pd.DataFrame, site: dict) -> dict:
         )
         ratio_max = 1.2
         min_clearsky = 0.1
-    weather = _ensure_weather_history(site, audit.index[0])
+    weather = _ensure_weather_history(site, audit.index[0]) if weather is None else weather
     poa = plane_power_kw(
         geometry,
         weather.index,
@@ -294,11 +311,16 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         _save_state(state)
         return retrain_status()
     try:
+        weather = _ensure_weather_history(site, audit.index[0])
+    except Exception:
+        weather = None  # load model can still fit without temperature
+    audit = _fill_audit_temperature(audit, weather)
+    try:
         result["models"]["load"] = _retrain_load(audit)
     except Exception as error:  # keep the live bundle on any failure
         result["models"]["load"] = {"status": "failed", "error": str(error)[:300]}
     try:
-        result["models"]["pv"] = _retrain_pv(audit, site)
+        result["models"]["pv"] = _retrain_pv(audit, site, weather)
     except Exception as error:
         result["models"]["pv"] = {"status": "failed", "error": str(error)[:300]}
     state["last_retrain_utc"] = result["started_utc"]
