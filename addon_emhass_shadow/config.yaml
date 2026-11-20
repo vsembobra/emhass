@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.8.4"
+version: "0.8.5"
 slug: emhass_shadow
 init: false
 arch:
@@ -63,6 +63,7 @@ options:
   tariff_cheap_windows: "23:00-07:00"
   reserve_cold_start_hours: 2.0
   reserve_pv_aware: true
+  history_backfill_days: 14
   entity_battery_soh: ""
 schema:
   latitude: float(-90,90)
@@ -104,6 +105,7 @@ schema:
   tariff_cheap_windows: str
   reserve_cold_start_hours: float(1,20)
   reserve_pv_aware: bool
+  history_backfill_days: int(0,60)
   entity_battery_soh: str?
 translations:
   ru:
@@ -228,6 +230,9 @@ translations:
       entity_battery_soh:
         name: Сущность — износ батареи (SoH)
         description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh, или просто число (99 = 99%). Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = считать батарею новой (100%)."
+      history_backfill_days:
+        name: Глубина загрузки истории, дней
+        description: "Сколько дней прошлого аддон забирает из истории Home Assistant при первом запуске и по кнопке «Загрузить историю» (0–60, по умолчанию 14). Реальная глубина ограничена сроком хранения рекордера HA (обычно 10 дней). Эти данные сразу идут в обучение моделей прогноза."
   en:
     configuration:
       latitude:
@@ -350,3 +355,6 @@ translations:
       entity_battery_soh:
         name: Entity — battery SoH
         description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh, or a plain number (99 = 99%). Used for reserve sizing and optimizer energy accounting. Empty = assume a new battery (100%)."
+      history_backfill_days:
+        name: History backfill depth, days
+        description: "How many past days the add-on pulls from Home Assistant history on first run and via the 'Backfill history' button (0-60, default 14). Actual depth is limited by the HA recorder retention (usually 10 days). This data feeds the forecast model training immediately."

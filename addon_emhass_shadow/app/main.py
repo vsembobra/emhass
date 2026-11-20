@@ -56,6 +56,35 @@ def run_retrain() -> None:
         STATE["running"] = False
 
 
+def run_backfill() -> None:
+    """Pull recorder history into the audit, then retrain on it at once."""
+    with LOCK:
+        if STATE["running"]:
+            return
+        STATE["running"] = True
+        STATE["last_error"] = None
+    try:
+        opts = pipeline.options()
+        site = {
+            "latitude": opts["latitude"],
+            "longitude": opts["longitude"],
+            "time_zone": opts["time_zone"],
+        }
+        ent = pipeline.resolve_entities(opts)
+        days = float(opts.get("history_backfill_days", 14))
+        added = pipeline.backfill_audit(site, ent, days)
+        STATE["last_backfill"] = {
+            "added_rows": added,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        if added:
+            retrain.retrain_if_due(force=True)
+    except Exception:
+        STATE["last_error"] = traceback.format_exc(limit=5)
+    finally:
+        STATE["running"] = False
+
+
 def reports() -> list[Path]:
     directory = DATA / "shadow_reports"
     if not directory.exists():
@@ -189,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
                     "next_run": STATE["next_run"],
                     "audit_rows": audit_rows,
                     "retrain": retrain.retrain_status(),
+                    "last_backfill": STATE.get("last_backfill"),
                 },
             )
         else:
@@ -207,6 +237,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(409, {"started": False, "reason": "already running"})
             else:
                 threading.Thread(target=run_retrain, daemon=True).start()
+                self._json(202, {"started": True})
+        elif path.endswith("/api/backfill"):
+            if STATE["running"]:
+                self._json(409, {"started": False, "reason": "already running"})
+            else:
+                threading.Thread(target=run_backfill, daemon=True).start()
                 self._json(202, {"started": True})
         else:
             self._json(404, {"error": "not found"})

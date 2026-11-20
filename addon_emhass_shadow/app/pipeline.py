@@ -274,19 +274,102 @@ def build_audit_rows(history, hours, latitude, longitude, ent):
     return rows
 
 
-def update_audit(site, ent) -> tuple[pd.DataFrame, int]:
+BACKFILL_CHUNK_DAYS = 3  # recorder fetches are chunked; one long range can time out
+
+
+def _audit_entities(ent) -> list[str]:
+    return (
+        [e for e, _ in ent["mean_sensors"].values()]
+        + list(ent["voltages"].values())
+        + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
+    )
+
+
+def _rows_for_hours(site, ent, hours: list) -> list[dict]:
+    """Audit rows for the given hours; HA history fetched in safe chunks."""
+    if not hours:
+        return []
+    entities = _audit_entities(ent)
+    rows = []
+    cursor = hours[0]
+    end = hours[-1] + timedelta(hours=1)
+    while cursor < end:
+        chunk_end = min(cursor + timedelta(days=BACKFILL_CHUNK_DAYS), end)
+        chunk_hours = [h for h in hours if cursor <= h < chunk_end]
+        history = fetch_history(cursor, chunk_end, entities)
+        rows.extend(
+            build_audit_rows(history, chunk_hours, site["latitude"], site["longitude"], ent)
+        )
+        cursor = chunk_end
+    return rows
+
+
+def _read_audit() -> pd.DataFrame:
+    audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
+    audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
+    return audit.set_index("start_utc").sort_index()
+
+
+def _json_default(v):
+    if isinstance(v, (np.floating, np.integer)):
+        return float(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    return str(v)
+
+
+def backfill_audit(site, ent, days: float) -> int:
+    """Extend the audit backwards up to `days` ago, recorder depth permitting.
+
+    A long-lived Home Assistant already holds weeks of load/PV/SOC history;
+    pulling it into the audit lets the quantile models train on day one
+    instead of after weeks of passive collection. Idempotent: hours already
+    in the audit are never re-fetched. Returns the number of rows added.
+    """
+    audit_path = DATA / "hourly_audit.jsonl"
+    now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    target = now_hour - timedelta(days=days)
+    if audit_path.exists():
+        audit = _read_audit()
+        first = audit.index[0]
+    else:
+        audit = pd.DataFrame()
+        first = now_hour
+    if first <= target:
+        return 0
+    hours = list(pd.date_range(target, first - timedelta(hours=1), freq="h"))
+    rows = _rows_for_hours(site, ent, hours)
+    if not rows:
+        return 0
+    prepended = pd.DataFrame(rows)
+    prepended["start_utc"] = pd.to_datetime(prepended["start_utc"], utc=True)
+    combined = pd.concat([audit, prepended.set_index("start_utc")]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    audit_path.write_text(
+        "".join(
+            json.dumps(
+                {"start_utc": at.isoformat(), **row.dropna().to_dict()},
+                default=_json_default,
+            )
+            + "\n"
+            for at, row in combined.iterrows()
+        ),
+        encoding="utf-8",
+    )
+    return len(rows)
+
+
+def update_audit(site, ent, backfill_days: float = 1.0) -> tuple[pd.DataFrame, int]:
     audit_path = DATA / "hourly_audit.jsonl"
     now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     if audit_path.exists():
-        audit = pd.read_json(audit_path, lines=True)
-        audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True)
-        audit = audit.set_index("start_utc").sort_index()
+        audit = _read_audit()
         last = audit.index[-1]
     else:
-        # Fresh install: no audit yet, backfill the last 24 h so the very
-        # first run already produces a plan.
+        # Fresh install: backfill the recorder history so the very first run
+        # already trains on real data instead of a 24 h stub.
         audit = pd.DataFrame()
-        last = now_hour - timedelta(hours=24)
+        last = now_hour - timedelta(days=max(1.0, backfill_days))
     if last >= now_hour - timedelta(hours=1):
         return audit, 0
     hours = []
@@ -294,13 +377,7 @@ def update_audit(site, ent) -> tuple[pd.DataFrame, int]:
     while cursor < now_hour:
         hours.append(cursor)
         cursor += timedelta(hours=1)
-    entities = (
-        [e for e, _ in ent["mean_sensors"].values()]
-        + list(ent["voltages"].values())
-        + [ent["soc"], ent["export_counter"], ent["grid_binary"]]
-    )
-    history = fetch_history(last, now_hour + timedelta(hours=1), entities)
-    rows = build_audit_rows(history, hours, site["latitude"], site["longitude"], ent)
+    rows = _rows_for_hours(site, ent, hours)
     with audit_path.open("a", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row) + "\n")
@@ -717,7 +794,9 @@ def run() -> dict:
     }
     tz = ZoneInfo(site["time_zone"])
 
-    audit, appended = update_audit(site, ent)
+    audit, appended = update_audit(
+        site, ent, backfill_days=float(opts.get("history_backfill_days", 14))
+    )
     new_transitions = update_outage_log(ent)
 
     issue = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)

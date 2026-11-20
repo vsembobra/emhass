@@ -42,6 +42,7 @@
 <header>
   <h1>🔋 Теневой план батареи</h1>
   <span class="badge" id="modebadge">только советует · в инвертор не пишет</span>
+  <button id="backfill" class="secondary" onclick="backfillNow()">Загрузить историю</button>
   <button id="retrain" class="secondary" onclick="retrainNow()">Переобучить модели</button>
   <button id="refresh" onclick="recalc()">Пересчитать сейчас</button>
 </header>
@@ -157,6 +158,9 @@ function renderStatus(s) {
   if (s.running) parts.push("⏳ идёт расчёт…");
   if (s.next_run) parts.push("следующий расчёт: " + new Date(s.next_run).toLocaleString("ru-RU"));
   if (s.audit_rows) parts.push("строк аудита: " + s.audit_rows);
+  if (s.last_backfill)
+    parts.push("история загружена: +" + s.last_backfill.added_rows + " ч (" +
+      new Date(s.last_backfill.at).toLocaleString("ru-RU") + ")");
   if (s.retrain) {
     const r = s.retrain;
     if (r.enabled === false) parts.push("переобучение: выключено в настройках");
@@ -227,6 +231,22 @@ function renderEntities(checks) {
     return "<tr><td>" + c.label + "</td><td class='muted'>" + (c.entity || "—") + "</td><td>" +
       (c.state == null ? "—" : c.state) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
   }).join("");
+}
+
+async function backfillNow() {
+  const b = document.getElementById("backfill");
+  b.disabled = true; b.textContent = "Загружаю историю…";
+  try { await fetch("api/backfill", {method: "POST"}); } catch (e) {}
+  let tries = 0;
+  const timer = setInterval(async () => {
+    const s = await fetch("api/status").then(r => r.json());
+    tries++;
+    if (!s.running || tries > 200) {
+      clearInterval(timer);
+      b.disabled = false; b.textContent = "Загрузить историю";
+      load();
+    }
+  }, 3000);
 }
 
 async function retrainNow() {
