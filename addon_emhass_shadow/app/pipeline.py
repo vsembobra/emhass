@@ -31,6 +31,7 @@ import hardware
 import learning
 import numpy as np
 import optimize
+import options_meta
 import pandas as pd
 import policy
 import tuner
@@ -1507,14 +1508,24 @@ SUPERVISOR_BASE = "http://supervisor"
 def update_options(changes: dict) -> dict:
     """Write option edits from the panel through the Supervisor self-options API.
 
-    Only entity-binding keys are accepted; everything else is dropped, so the
-    panel cannot accidentally clobber numeric/site settings. The Supervisor
-    rewrites /data/options.json, and the next run reads it fresh — no add-on
-    restart needed.
+    Entity-binding keys are stored as stripped strings; every other editable
+    option is validated and coerced against options_meta (type, range,
+    choices), so a bad edit is rejected with a readable ValueError instead of
+    failing the Supervisor schema check. Unknown keys are reported in
+    "rejected" and dropped. The Supervisor rewrites /data/options.json, and
+    the next run reads it fresh — no add-on restart needed.
     """
-    filtered = {k: str(v).strip() for k, v in changes.items() if k in ENTITY_OPTION_KEYS}
+    filtered: dict = {}
+    rejected: list[str] = []
+    for key, value in changes.items():
+        if key in ENTITY_OPTION_KEYS:
+            filtered[key] = str(value).strip()
+        elif key in options_meta.OPTION_META and not options_meta.OPTION_META[key].get("entity"):
+            filtered[key] = options_meta.coerce_option(key, value)
+        else:
+            rejected.append(key)
     if not filtered:
-        return {"saved": {}}
+        return {"saved": {}, "rejected": rejected}
     opts = options()
     opts.update(filtered)
     request = urllib.request.Request(
@@ -1524,7 +1535,7 @@ def update_options(changes: dict) -> dict:
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         json.load(response)
-    return {"saved": filtered}
+    return {"saved": filtered, "rejected": rejected}
 
 
 ENTITY_CHECK_LABELS = {
@@ -1572,7 +1583,14 @@ def validate_entities() -> list[dict]:
     results = []
     for label, entity, kind, key in specs:
         entity = entity.strip()
-        row = {"label": label, "entity": entity, "state": None, "status": "ok", "key": key}
+        row = {
+            "label": label,
+            "entity": entity,
+            "state": None,
+            "status": "ok",
+            "key": key,
+            "hint": options_meta.entity_hint(key) if key else None,
+        }
         if not entity:
             row["status"] = "skipped"
             results.append(row)

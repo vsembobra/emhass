@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import daily
+import options_meta
 import pipeline
 import retrain
 
@@ -315,6 +316,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"checks": pipeline.validate_entities()})
             except Exception:
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
+        elif path.endswith("/api/options") or path == "/api/options":
+            try:
+                self._json(200, {"groups": options_meta.options_view(pipeline.options())})
+            except Exception:
+                self._json(500, {"error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/entity_ids") or path == "/api/entity_ids":
             try:
                 states = pipeline.ha_get("/api/states", timeout=30)
@@ -370,6 +376,8 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
                 self._json(200, pipeline.update_options(body.get("options") or {}))
+            except ValueError as error:
+                self._json(400, {"error": str(error)})
             except Exception:
                 self._json(500, {"error": traceback.format_exc(limit=3)})
         else:
