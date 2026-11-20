@@ -240,6 +240,18 @@ def coverage(actual: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
     return float(np.mean((actual >= lower) & (actual <= upper)))
 
 
+def _row_weights(
+    sample_weight: pd.Series | None, index: pd.DatetimeIndex, rows: pd.Series
+) -> np.ndarray | None:
+    """Finite, non-negative weights for the selected training rows, or None."""
+    if sample_weight is None:
+        return None
+    weights = pd.Series(sample_weight).reindex(index)[rows.to_numpy()].to_numpy(dtype=float)
+    if not np.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
+        raise ValueError("sample_weight must be finite, non-negative and cover the rows")
+    return weights
+
+
 @dataclass
 class LoadQuantileBundle:
     """Fitted P10/P50/P90 boosters plus the metadata needed to reproduce them."""
@@ -268,8 +280,13 @@ class LoadQuantileBundle:
         *,
         seasonal: bool | None = None,
         params: dict | None = None,
+        sample_weight: pd.Series | None = None,
     ) -> LoadQuantileBundle:
-        """Fit one CPU quantile booster per quantile on rows with a valid target."""
+        """Fit one CPU quantile booster per quantile on rows with a valid target.
+
+        ``sample_weight`` (indexed like ``grid``) weights the training rows,
+        e.g. to let recent history dominate after the site changed.
+        """
         lgb = _lightgbm()
         config = config or LoadFeatureConfig()
         if seasonal is None:
@@ -284,11 +301,12 @@ class LoadQuantileBundle:
         y_train = target.loc[valid].to_numpy(dtype=float)
         if len(y_train) < 24:
             raise ValueError("at least 24 valid training rows are required")
+        weights = _row_weights(sample_weight, grid.index, valid)
         merged = {**DEFAULT_LGB_PARAMS, **(params or {})}
         boosters = {}
         for alpha in QUANTILES:
             booster = lgb.LGBMRegressor(alpha=alpha, **merged)
-            booster.fit(x_train, y_train)
+            booster.fit(x_train, y_train, sample_weight=weights)
             boosters[alpha] = booster
         return cls(
             config=config,

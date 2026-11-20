@@ -5,11 +5,16 @@ actuals plus quality filters) and the Open-Meteo previous-runs history
 (day-ahead weather as it was predicted, matching the inference contract and
 avoiding reanalysis leakage).
 
-Every retrain fits on all history except the last CALIBRATION_DAYS days,
-calibrates conformal offsets on that trailing slice, smoke-tests the saved
-bundle, and only then atomically replaces the live model (previous version
-kept as <name>.prev). Failures never touch the running models: the daily plan
-keeps using the last good bundle and the status records what happened.
+Champion/challenger: the challenger is fitted on everything before a fresh
+holdout (the last 14 days, or the hours since the live model was trained)
+and scored against the live model on that holdout. It is promoted only when
+it scores no worse; the promoted model is then refitted on ALL history with
+recency weights (60-day half-life) and keeps the challenger's out-of-sample
+calibration offsets. The saved bundle is smoke-tested and swapped in
+atomically (previous version kept as <name>.prev). Failures never touch the
+running models: the daily plan keeps using the last good bundle and the
+status records what happened. A drift flag from the daily self-correction
+lets the retrain run before its interval.
 """
 
 import json
@@ -24,7 +29,7 @@ import numpy as np
 import pandas as pd
 import pipeline
 
-from emhass.load_quantiles import LoadQuantileBundle
+from emhass.load_quantiles import QUANTILE_LABELS, QUANTILES, LoadQuantileBundle, pinball_loss
 from emhass.pv_quantiles import PvGeometry, PvQuantileBundle, plane_power_kw
 
 DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
@@ -128,38 +133,137 @@ def _swap_in(tmp: Path, final: Path) -> None:
     tmp.rename(final)
 
 
+RECENCY_HALF_LIFE_DAYS = 60.0  # a row this old weighs half as much as today's
+MIN_HOLDOUT_ROWS = 72
+EVAL_ISSUE_STEP = pd.Timedelta(hours=12)
+HOUR = pd.Timedelta(hours=1)
+
+
+def recency_weights(index: pd.DatetimeIndex) -> pd.Series:
+    """Exponential recency weights, so the models follow a changing site."""
+    age_days = np.asarray((index[-1] - index) / pd.Timedelta(days=1), dtype=float)
+    return pd.Series(np.power(0.5, age_days / RECENCY_HALF_LIFE_DAYS), index=index)
+
+
+def _pinball_mean(actual: np.ndarray, predictions: dict) -> float:
+    return float(np.mean([pinball_loss(actual, predictions[q], q) for q in QUANTILES]))
+
+
+def _holdout_start(index: pd.DatetimeIndex, champion_until: str | None) -> pd.Timestamp:
+    """First hour neither model was trained on: the last 14 days, or less.
+
+    A champion refit on everything has seen data up to its training time;
+    scoring it there would favour it, so the holdout starts after it.
+    """
+    start = index[-1] - pd.Timedelta(days=CALIBRATION_DAYS) + HOUR
+    if champion_until:
+        start = max(start, pd.Timestamp(champion_until).tz_convert(UTC) + HOUR)
+    return start
+
+
+def load_holdout_score(bundle, grid: pd.DataFrame, start) -> tuple[float | None, int]:
+    """Mean P10/P50/P90 pinball loss on the production path.
+
+    Causal 24 h forecasts issued every 12 h from ``start`` — exactly what the
+    daily plan sees, so champion and challenger are compared on the
+    question that matters, whatever features each of them uses.
+    """
+    actuals, predictions = [], {q: [] for q in QUANTILES}
+    issue = pd.Timestamp(start)
+    while issue + 23 * HOUR <= grid.index[-1]:
+        end = issue + 23 * HOUR
+        prediction = bundle.predict(grid.loc[:end], issue_time=issue).loc[issue:end]
+        actual = grid["load_kw"].reindex(prediction.index)
+        mask = actual.notna().to_numpy()
+        actuals.append(actual.to_numpy(dtype=float)[mask])
+        for q, label in QUANTILE_LABELS.items():
+            predictions[q].append(prediction[f"load_{label}_kw"].to_numpy()[mask])
+        issue += EVAL_ISSUE_STEP
+    y = np.concatenate(actuals) if actuals else np.array([])
+    if not y.size:
+        return None, 0
+    return _pinball_mean(y, {q: np.concatenate(v) for q, v in predictions.items()}), int(y.size)
+
+
+def _try_load(loader, final: Path):
+    if not (final / "bundle.json").exists():
+        return None
+    try:
+        return loader(final)
+    except Exception:
+        return None  # an unreadable champion is replaced, never trusted
+
+
+def _decide(result: dict, score_challenger, score_champion, champion) -> str | None:
+    """Reason to keep the champion, or None to promote the challenger."""
+    result["challenger_score"] = None if score_challenger is None else round(score_challenger, 4)
+    result["champion_score"] = None if score_champion is None else round(score_champion, 4)
+    if champion is None or score_champion is None:
+        return None
+    if score_challenger is None or score_challenger > score_champion:
+        return "новая модель не лучше текущей на свежих данных"
+    return None
+
+
 def _retrain_load(audit: pd.DataFrame) -> dict:
+    """Champion/challenger retrain of the load model.
+
+    The challenger is fitted with the current recipe on data before the
+    holdout and must score no worse than the live model on it. Only then is
+    the model refitted on ALL history (the freshest weeks included) and
+    swapped in, carrying the challenger's out-of-sample calibration offsets.
+    """
     final = MODELS / "load_quantiles_v1"
-    if (final / "bundle.json").exists():
-        current = LoadQuantileBundle.load(final)
-        config, seasonal = current.config, current.seasonal
-    else:
-        # Fresh install: fit from scratch on whatever history has accrued.
-        config, seasonal = None, None
+    champion = _try_load(LoadQuantileBundle.load, final)
+    config = champion.config if champion else None
+    seasonal = champion.seasonal if champion else None
     grid = pd.DataFrame(index=audit.index)
     grid["temp_air_observed_c"] = pd.to_numeric(audit["temp_air_observed_c"], errors="coerce")
     load = pd.to_numeric(audit["load_kw"], errors="coerce")
     # Only rows the audit marked clean are training targets; outage and
     # invalid hours would teach the model the wrong consumption pattern.
     grid["load_kw"] = load.where(audit["load_filter"] == "keep")
-    split = grid.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS)
-    train, calib = grid.loc[:split], grid.loc[split + pd.Timedelta(hours=1) :]
-    if train["load_kw"].notna().sum() < 48:
-        train, calib = grid, grid.loc[grid.index[-24:]]
-    bundle = LoadQuantileBundle.fit(train, config=config, seasonal=seasonal)
-    if calib["load_kw"].notna().sum() >= 24:
-        bundle.calibrate(calib)
+    weights = recency_weights(grid.index)
+    start = _holdout_start(grid.index, champion.trained_until if champion else None)
+    pre, holdout = grid.loc[: start - HOUR], grid.loc[start:]
+    result = {"train_rows": int(grid["load_kw"].notna().sum()), "holdout_from": start.isoformat()}
+    comparable = (
+        pre["load_kw"].notna().sum() >= 48 and holdout["load_kw"].notna().sum() >= MIN_HOLDOUT_ROWS
+    )
+    if not comparable:
+        if champion is not None:
+            return {**result, "status": "kept", "reason": "мало свежих данных для сравнения"}
+        # Fresh install with a short audit: fit on everything instead of failing.
+        bundle = LoadQuantileBundle.fit(grid, config=config, seasonal=seasonal, sample_weight=weights)
+        tail = grid.loc[grid.index[-24:]]
+        if tail["load_kw"].notna().sum() >= 24:
+            bundle.calibrate(tail)
+    else:
+        challenger = LoadQuantileBundle.fit(
+            pre, config=config, seasonal=seasonal, sample_weight=weights.loc[pre.index]
+        )
+        calib = pre.loc[pre.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS) + HOUR :]
+        if calib["load_kw"].notna().sum() >= 24:
+            challenger.calibrate(calib)
+        score_challenger, pairs = load_holdout_score(challenger, grid, start)
+        score_champion = load_holdout_score(champion, grid, start)[0] if champion else None
+        result["holdout_pairs"] = pairs
+        reason = _decide(result, score_challenger, score_champion, champion)
+        if reason:
+            return {**result, "status": "kept", "reason": reason}
+        bundle = LoadQuantileBundle.fit(
+            grid, config=challenger.config, seasonal=seasonal, sample_weight=weights
+        )
+        challenger.calibrate(holdout)  # out-of-sample offsets for the refit
+        bundle.calibration_offsets = dict(challenger.calibration_offsets)
+        bundle.calibrated_from = challenger.calibrated_from
+        bundle.calibrated_until = challenger.calibrated_until
     tmp = final.with_name(final.name + ".new")
     bundle.save(tmp)
     smoke = LoadQuantileBundle.load(tmp)
     smoke.predict(grid.loc[grid.index[-24:]])
     _swap_in(tmp, final)
-    return {
-        "status": "ok",
-        "train_rows": int(train["load_kw"].notna().sum()),
-        "trained_until": train.index[-1].isoformat(),
-        "calibrated_until": calib.index[-1].isoformat(),
-    }
+    return {**result, "status": "promoted", "trained_until": grid.index[-1].isoformat()}
 
 
 def _fetch_weather_chunk(site: dict, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
@@ -227,13 +331,31 @@ def _fill_audit_temperature(audit: pd.DataFrame, weather: pd.DataFrame | None) -
     return audit.assign(temp_air_observed_c=observed)
 
 
+def pv_holdout_score(bundle, frame: pd.DataFrame) -> tuple[float | None, int]:
+    """Mean pinball loss on daylight holdout rows with a measured target.
+
+    Rows are chosen from the frame alone (measured value and a positive
+    plane-of-array forecast), so both models are scored on the same hours.
+    """
+    actual = pd.to_numeric(frame["pv_measured_kw"], errors="coerce")
+    mask = (actual.notna() & (frame["poa_forecast_kw"] > 0)).to_numpy()
+    if not mask.any():
+        return None, 0
+    prediction = bundle.predict(frame)
+    predictions = {
+        q: prediction[f"pv_{label}_kw"].to_numpy()[mask] for q, label in QUANTILE_LABELS.items()
+    }
+    return _pinball_mean(actual.to_numpy(dtype=float)[mask], predictions), int(mask.sum())
+
+
 def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = None) -> dict:
+    """Champion/challenger retrain of the PV model (see _retrain_load)."""
     final = MODELS / "pv_quantiles_v1"
-    if (final / "bundle.json").exists():
-        current = PvQuantileBundle.load(final)  # reuse confirmed site geometry
-        geometry = current.geometry
-        ratio_max = current.ratio_max
-        min_clearsky = current.min_clearsky_kw
+    champion = _try_load(PvQuantileBundle.load, final)
+    if champion is not None:
+        geometry = champion.geometry  # reuse confirmed site geometry
+        ratio_max = champion.ratio_max
+        min_clearsky = champion.min_clearsky_kw
     else:
         # Fresh install: start from the panel parameters in the add-on
         # options; weekly retraining refines the ratio model on real data.
@@ -266,31 +388,61 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
     frame["temp_air_c"] = weather["temperature_2m_previous_day1"].reindex(audit.index)
     # Hours without as-of weather cannot teach the weather->power mapping.
     frame["pv_measured_kw"] = frame["pv_measured_kw"].where(frame["poa_forecast_kw"].notna())
-    split = frame.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS)
-    train, calib = frame.loc[:split], frame.loc[split + pd.Timedelta(hours=1) :]
-    # Fresh install with a short audit: fit on everything instead of failing.
-    if train["pv_measured_kw"].notna().sum() < 48:
-        train, calib = frame, frame.loc[frame.index[-24:]]
-    bundle = PvQuantileBundle.fit(
-        train,
-        geometry,
-        ratio_max=ratio_max,
-        min_clearsky_kw=min_clearsky,
+    weights = recency_weights(frame.index)
+    start = _holdout_start(frame.index, champion.trained_until if champion else None)
+    pre, holdout = frame.loc[: start - HOUR], frame.loc[start:]
+    result = {
+        "train_rows": int(frame["pv_measured_kw"].notna().sum()),
+        "holdout_from": start.isoformat(),
+    }
+    comparable = (
+        pre["pv_measured_kw"].notna().sum() >= 48
+        and holdout["pv_measured_kw"].notna().sum() >= MIN_HOLDOUT_ROWS // 2
     )
-    try:
-        bundle.calibrate(calib)
-    except ValueError:
-        pass  # too few usable calibration rows: keep zero offsets
+    fit = {"ratio_max": ratio_max, "min_clearsky_kw": min_clearsky}
+    if not comparable:
+        if champion is not None:
+            return {**result, "status": "kept", "reason": "мало свежих данных для сравнения"}
+        # Fresh install with a short audit: fit on everything instead of failing.
+        bundle = PvQuantileBundle.fit(frame, geometry, **fit, sample_weight=weights)
+        try:
+            bundle.calibrate(frame.loc[frame.index[-24:]])
+        except ValueError:
+            pass  # too few usable calibration rows: keep zero offsets
+    else:
+        challenger = PvQuantileBundle.fit(
+            pre, geometry, **fit, sample_weight=weights.loc[pre.index]
+        )
+        try:
+            challenger.calibrate(
+                pre.loc[pre.index[-1] - pd.Timedelta(days=CALIBRATION_DAYS) + HOUR :]
+            )
+        except ValueError:
+            pass
+        score_challenger, rows = pv_holdout_score(challenger, holdout)
+        score_champion = pv_holdout_score(champion, holdout)[0] if champion else None
+        result["holdout_rows"] = rows
+        reason = _decide(result, score_challenger, score_champion, champion)
+        if reason:
+            return {**result, "status": "kept", "reason": reason}
+        bundle = PvQuantileBundle.fit(frame, geometry, **fit, sample_weight=weights)
+        try:
+            challenger.calibrate(holdout)  # out-of-sample offsets for the refit
+            bundle.calibration_offsets = dict(challenger.calibration_offsets)
+            bundle.calibrated_from = challenger.calibrated_from
+            bundle.calibrated_until = challenger.calibrated_until
+        except ValueError:
+            pass
     tmp = final.with_name(final.name + ".new")
     bundle.save(tmp)
     smoke = PvQuantileBundle.load(tmp)
     smoke.predict(frame.loc[frame.index[-24:]])
     _swap_in(tmp, final)
     return {
-        "status": "ok",
-        "train_rows": int((train["pv_measured_kw"].notna()).sum()),
+        **result,
+        "status": "promoted",
         "excluded_rows": bundle.excluded_rows,
-        "trained_until": train.index[-1].isoformat(),
+        "trained_until": frame.index[-1].isoformat(),
     }
 
 

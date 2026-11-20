@@ -838,8 +838,11 @@ def _retrain_note() -> str | None:
         return None
 
     def fmt(info: dict) -> str:
-        if info.get("status") == "ok":
-            return f"ok ({info.get('train_rows', '?')} строк)"
+        status = info.get("status")
+        if status in ("ok", "promoted"):
+            return f"обновлена ({info.get('train_rows', '?')} строк)"
+        if status == "kept":
+            return f"оставлена текущая — {info.get('reason', '')}"
         return f"ошибка: {info.get('error', '?')[:80]}"
 
     models = state.get("models", {})
