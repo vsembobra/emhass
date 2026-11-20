@@ -709,6 +709,47 @@ def _battery_soh(opts: dict) -> tuple[float, str]:
         return 1.0, "unavailable"
 
 
+ENTITY_OPTION_KEYS = [
+    "entity_load_power",
+    "entity_critical_load_power",
+    "entity_pv_power",
+    "entity_battery_power",
+    "entity_grid_power",
+    "entity_outdoor_temperature",
+    "entity_battery_soc",
+    "entity_export_counter",
+    "entity_grid_status",
+    "entity_grid_voltage",
+    "floor_input_entity",
+    "entity_battery_soh",
+]
+
+SUPERVISOR_BASE = "http://supervisor"
+
+
+def update_options(changes: dict) -> dict:
+    """Write option edits from the panel through the Supervisor self-options API.
+
+    Only entity-binding keys are accepted; everything else is dropped, so the
+    panel cannot accidentally clobber numeric/site settings. The Supervisor
+    rewrites /data/options.json, and the next run reads it fresh — no add-on
+    restart needed.
+    """
+    filtered = {k: str(v).strip() for k, v in changes.items() if k in ENTITY_OPTION_KEYS}
+    if not filtered:
+        return {"saved": {}}
+    opts = options()
+    opts.update(filtered)
+    request = urllib.request.Request(
+        SUPERVISOR_BASE + "/addons/self/options",
+        data=json.dumps({"options": opts}).encode(),
+        headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        json.load(response)
+    return {"saved": filtered}
+
+
 ENTITY_CHECK_LABELS = {
     "load_kw": "Мощность нагрузки",
     "critical_load_kw": "Критическая нагрузка",
@@ -728,29 +769,30 @@ def validate_entities() -> list[dict]:
     """
     opts = options()
     ent = resolve_entities(opts)
-    specs: list[tuple[str, str, str]] = [
-        (ENTITY_CHECK_LABELS[field], str(entity or ""), "number")
+    # (label, entity value, kind, option key or None when not directly editable)
+    specs: list[tuple[str, str, str, str | None]] = [
+        (ENTITY_CHECK_LABELS[field], str(entity or ""), "number", MEAN_SENSOR_FIELDS[field][0])
         for field, (entity, _scale) in ent["mean_sensors"].items()
     ]
     specs += [
-        ("SOC батареи", str(ent["soc"] or ""), "number"),
-        ("Счётчик экспорта", str(ent["export_counter"] or ""), "number"),
-        ("Статус сети", str(ent["grid_binary"] or ""), "binary"),
+        ("SOC батареи", str(ent["soc"] or ""), "number", "entity_battery_soc"),
+        ("Счётчик экспорта", str(ent["export_counter"] or ""), "number", "entity_export_counter"),
+        ("Статус сети", str(ent["grid_binary"] or ""), "binary", "entity_grid_status"),
     ]
     specs += [
-        ("Напряжение сети", str(entity or ""), "number")
+        ("Напряжение сети", str(entity or ""), "number", "entity_grid_voltage")
         for entity in ent["voltages"].values()
     ]
     for n in range(TOU_ZONES):
-        specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number"))
-        specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time"))
-    specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number"))
-    specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh"))
+        specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
+        specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
+    specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
+    specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
     results = []
-    for label, entity, kind in specs:
+    for label, entity, kind, key in specs:
         entity = entity.strip()
-        row = {"label": label, "entity": entity, "state": None, "status": "ok"}
+        row = {"label": label, "entity": entity, "state": None, "status": "ok", "key": key}
         if not entity:
             row["status"] = "skipped"
             results.append(row)

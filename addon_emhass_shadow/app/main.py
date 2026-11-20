@@ -203,6 +203,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"checks": pipeline.validate_entities()})
             except Exception:
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
+        elif path.endswith("/api/entity_ids") or path == "/api/entity_ids":
+            try:
+                states = pipeline.ha_get("/api/states", timeout=30)
+                ids = sorted(s["entity_id"] for s in states if "entity_id" in s)
+                self._json(200, {"entity_ids": ids})
+            except Exception:
+                self._json(200, {"entity_ids": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/status") or path == "/api/status":
             audit_rows = None
             audit_path = DATA / "hourly_audit.jsonl"
@@ -244,6 +251,13 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 threading.Thread(target=run_backfill, daemon=True).start()
                 self._json(202, {"started": True})
+        elif path.endswith("/api/config"):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                self._json(200, pipeline.update_options(body.get("options") or {}))
+            except Exception:
+                self._json(500, {"error": traceback.format_exc(limit=3)})
         else:
             self._json(404, {"error": "not found"})
 

@@ -36,9 +36,12 @@
   .error { background: rgba(239,83,80,.1); border-color: var(--bad); color: var(--bad); }
   #refresh { margin-left: auto; }
   .arrow { color: var(--good); font-weight: 600; }
+  .entinput { width: 100%; background: #141821; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+  .entinput.changed { border-color: var(--warn); }
 </style>
 </head>
 <body>
+<datalist id="entity-ids"></datalist>
 <header>
   <h1>🔋 Теневой план батареи</h1>
   <span class="badge" id="modebadge">только советует · в инвертор не пишет</span>
@@ -50,7 +53,9 @@
 <div id="status"></div>
 <div class="notice" id="notice" style="display:none"></div>
 <div class="card full" id="entscard" style="display:none;margin-bottom:14px">
-  <h3>Проверка сущностей <span class="muted" id="entssummary" style="text-transform:none"></span></h3>
+  <h3>Проверка и настройка сущностей <span class="muted" id="entssummary" style="text-transform:none"></span>
+    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="saveEntities()">Сохранить</button>
+  </h3>
   <table>
     <thead><tr><th>Параметр</th><th>Сущность</th><th>Значение</th><th>Статус</th></tr></thead>
     <tbody id="ents"></tbody>
@@ -133,18 +138,20 @@ const pp = v => (v > 0 ? "+" + v : v) + " п.п.";
 
 async function load() {
   try {
-    const [latest, history, status, metrics, dailyData, ents] = await Promise.all([
+    const [latest, history, status, metrics, dailyData, ents, ids] = await Promise.all([
       fetch("api/latest").then(r => r.ok ? r.json() : null),
       fetch("api/history").then(r => r.ok ? r.json() : []),
       fetch("api/status").then(r => r.json()),
       fetch("api/metrics").then(r => r.ok ? r.json() : {days: [], avg7: {}}),
       fetch("api/daily").then(r => r.ok ? r.json() : {days: []}),
       fetch("api/entities").then(r => r.ok ? r.json() : {checks: []}),
+      fetch("api/entity_ids").then(r => r.ok ? r.json() : {entity_ids: []}),
     ]);
     renderStatus(status);
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
     renderEntities(ents.checks || []);
+    renderEntityIds(ids.entity_ids || []);
     if (!latest) { document.getElementById("notice").style.display = "block";
       document.getElementById("notice").textContent = "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас»."; return; }
     render(latest);
@@ -212,6 +219,41 @@ function renderDaily(days) {
   }).join("");
 }
 
+function renderEntityIds(ids) {
+  document.getElementById("entity-ids").innerHTML =
+    ids.map(id => "<option value='" + id + "'>").join("");
+}
+
+function onEntityInput() {
+  let changed = false;
+  document.querySelectorAll(".entinput").forEach(el => {
+    const dirty = el.value.trim() !== el.dataset.original;
+    el.classList.toggle("changed", dirty);
+    if (dirty) changed = true;
+  });
+  document.getElementById("entsave").style.display = changed ? "inline-block" : "none";
+}
+
+async function saveEntities() {
+  const b = document.getElementById("entsave");
+  const options = {};
+  document.querySelectorAll(".entinput").forEach(el => {
+    if (el.value.trim() !== el.dataset.original) options[el.dataset.key] = el.value.trim();
+  });
+  b.disabled = true; b.textContent = "Сохраняю…";
+  try {
+    const r = await fetch("api/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({options}),
+    });
+    const resp = await r.json();
+    if (resp.error) alert("Не сохранилось: " + resp.error);
+  } catch (e) { alert("Не сохранилось: " + e); }
+  b.disabled = false; b.textContent = "Сохранить";
+  load();
+}
+
 function renderEntities(checks) {
   const card = document.getElementById("entscard");
   if (!checks.length) { card.style.display = "none"; return; }
@@ -228,7 +270,12 @@ function renderEntities(checks) {
     ? "— проблем: " + bad : "— все на месте";
   document.getElementById("ents").innerHTML = rows.map(c => {
     const [text, color] = label[c.status] || [c.status, "var(--muted)"];
-    return "<tr><td>" + c.label + "</td><td class='muted'>" + (c.entity || "—") + "</td><td>" +
+    const entityCell = c.key
+      ? "<input class='entinput' list='entity-ids' data-key='" + c.key + "' data-original='" +
+        (c.entity || "") + "' value='" + (c.entity || "") + "' oninput='onEntityInput()' " +
+        "placeholder='sensor.… или число'>"
+      : "<span class='muted'>" + (c.entity || "—") + "</span>";
+    return "<tr><td>" + c.label + "</td><td>" + entityCell + "</td><td>" +
       (c.state == null ? "—" : c.state) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
   }).join("");
 }
