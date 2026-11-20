@@ -401,7 +401,7 @@ function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
 
-const MODE_LABEL = {conservative: "осторожный", moderate: "средний", expected: "по ожиданию"};
+function marginLabel(m) { return "+" + Math.round(Number(m)) + " ч"; }
 const PRIORITY_LABEL = {resilience: "надёжность", balanced: "баланс", economy: "экономия"};
 
 function share(v) { return v == null ? "—" : Math.round(v * 100) + "%"; }
@@ -434,16 +434,19 @@ function renderLearning(r) {
   }
   const t = d.tuning;
   if (t && t.best) {
-    const cells = Object.entries(t.candidates).map(([m, v]) =>
-      (m === t.best ? "<b>" : "") + MODE_LABEL[m] + ": " + v.unserved_critical_kwh.toFixed(1) + " / " +
-      v.curtailed_kwh.toFixed(1) + " кВт·ч / " + v.net_cost.toFixed(1) + (m === t.best ? "</b>" : ""));
-    rows.push(["Подбор на истории (" + t.windows + " сут)", cells.join("<br>"), "недоданная критическая / усечение / стоимость"]);
+    const cells = Object.entries(t.candidates).map(([m, v]) => {
+      const best = Number(m) === Number(t.best);
+      return (best ? "<b>" : "") + "запас " + marginLabel(m) + ": " + v.unserved_critical_kwh.toFixed(1) + " / " +
+        v.curtailed_kwh.toFixed(1) + " кВт·ч / " + v.net_cost.toFixed(1) + (best ? "</b>" : "");
+    });
+    rows.push(["Подбор запаса на истории (" + t.windows + " сут)", cells.join("<br>"), "недоданная критическая / усечение / стоимость"]);
   } else if (t) rows.push(["Подбор на истории", "ещё нет данных", esc(t.reason || "")]);
   const applied = (d.hardware || {}).applied || [];
   const auto = (d.hardware || {}).autotune;
+  const regime = (r.reserve || {}).regime || {};
   document.getElementById("learnnote").textContent =
     "Приоритет: " + (PRIORITY_LABEL[d.priority_mode] || d.priority_mode || "—") +
-    " · запас до утра: " + (MODE_LABEL[d.deficit_mode] || d.deficit_mode || "—") +
+    " · отключения: " + (regime.active ? "серия идёт, запас сверх резерва " + marginLabel(d.reserve_margin_hours || 0) : "тишина, резерв не держим") +
     (a.autonomy_hours != null ? " · автономия сейчас ~" + a.autonomy_hours.toFixed(1) + " ч" : "") +
     " · автонастройка: " + (auto ? (applied.length ? "применено — " + applied.join(", ") : "включена") : "выключена (только совет)");
   document.getElementById("learn").innerHTML = rows.map(([w, v, s]) =>

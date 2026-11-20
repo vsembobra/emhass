@@ -94,11 +94,15 @@ def test_reserve_needs_override_the_price():
     assert plan[3][1].startswith("резерв 70%")
 
 
-def test_without_tariff_only_sunless_zones_charge_from_grid():
+def test_one_price_all_day_never_charges_from_grid_without_reserve_need():
     plan = _plan({"tariff_enabled": False})
-    assert plan[1] == (True, "солнца нет")
-    assert plan[2] == (False, "солнце зарядит")
-    assert plan[3] == (True, "солнца нет")
+    assert all(not desired for desired, _ in plan.values())
+    assert plan[1][1] == "цена одинаковая — заряд только от солнца"
+
+
+def test_one_price_still_restores_the_series_reserve():
+    plan = _plan({"tariff_enabled": False}, reserve=0.7)
+    assert all(desired for desired, _ in plan.values())
 
 
 def test_active_zone_grid_charge_uses_measured_soc():

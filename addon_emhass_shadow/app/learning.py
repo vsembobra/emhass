@@ -100,6 +100,7 @@ def log_entry(
     pv_method: str,
     reserve_kwh_by_hour: list[float] | None = None,
     versions: dict[str, str | None] | None = None,
+    extras: dict | None = None,
 ) -> dict:
     """Serializable record of one run's RAW forecasts, model versions and reserve."""
     versions = versions or {}
@@ -122,6 +123,7 @@ def log_entry(
     }
     if reserve_kwh_by_hour is not None:
         entry["reserve_kwh_by_hour"] = [round(float(v), 4) for v in reserve_kwh_by_hour]
+    entry.update(extras or {})
     return entry
 
 

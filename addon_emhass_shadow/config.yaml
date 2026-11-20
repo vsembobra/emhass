@@ -63,7 +63,7 @@ options:
   tariff_normal_price: 2.0
   tariff_cheap_price: 1.0
   tariff_cheap_windows: "23:00-07:00"
-  reserve_cold_start_hours: 2.0
+  reserve_cold_start_hours: 0.0
   reserve_pv_aware: true
   history_backfill_days: 14
   entity_battery_soh: ""
@@ -75,6 +75,7 @@ options:
   tou_zones: 6
   tou_soc_step_pct: 5
   tou_grid_charge_entity_template: ""
+  outage_memory_days: 14
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -113,7 +114,7 @@ schema:
   tariff_normal_price: float(0,1000)
   tariff_cheap_price: float(0,1000)
   tariff_cheap_windows: str
-  reserve_cold_start_hours: float(1,20)
+  reserve_cold_start_hours: float(0,20)
   reserve_pv_aware: bool
   history_backfill_days: int(0,60)
   entity_battery_soh: str?
@@ -129,6 +130,7 @@ schema:
   tou_zones: int(1,12)
   tou_soc_step_pct: int(1,10)
   tou_grid_charge_entity_template: str?
+  outage_memory_days: int(3,60)
 translations:
   ru:
     configuration:
@@ -245,7 +247,7 @@ translations:
         description: Местное время, ЧЧ:ММ-ЧЧ:ММ; несколько окон через запятую. Окно может переходить через полночь, например 23:00-07:00, 13:00-15:00.
       reserve_cold_start_hours:
         name: Минимальная автономия, часы
-        description: "Базовый резерв отключений в часах работы критической нагрузки (1–20, по умолчанию 2). Это нижняя полка: она действует всегда, даже когда отключений давно не было. Чем больше значение, тем выше минимальный SOC, который аддон не позволит проедать."
+        description: "Постоянный запас в часах работы критической нагрузки, который держится даже без отключений (0–20, по умолчанию 0). Во время серии отключений резерв считается по её реальной длительности; 0 = в спокойный период держать только min SOC и не защищаться от фантомных отключений."
       reserve_pv_aware:
         name: Резерв с учётом солнца
         description: "ВКЛ: в часы, когда пессимистичный прогноз солнца перекрывает критическую нагрузку, резерв отключений на эти часы снижается (ночной резерв не меняется). ВЫКЛ: резерв одинаковый круглые сутки."
@@ -279,6 +281,9 @@ translations:
       tou_grid_charge_entity_template:
         name: Шаблон флага «заряд из сети» зоны
         description: "Сущность switch или input_boolean, которая включает заряд из сети в зоне, с {n} вместо номера, например switch.inverter_program_{n}_charging. Если задано и включено применение плана, аддон разрешает заряд из сети только там, где он нужен для резерва, в дешёвые часы, а без тарифа — в зонах без солнца. Пусто = флаги не трогать."
+      outage_memory_days:
+        name: Память серии отключений, дней
+        description: "Отключения идут сериями. Пока последнее отключение было не больше этого числа дней назад, серия считается идущей: аддон держит резерв по реальной длительности её отключений и поднимает его в часы, когда отключали. Дольше тишины — серия закончилась, резерв не держится (3–60, по умолчанию 14)."
   en:
     configuration:
       latitude:
@@ -394,7 +399,7 @@ translations:
         description: Local time, HH:MM-HH:MM; several windows comma-separated. A window may wrap midnight, e.g. 23:00-07:00, 13:00-15:00.
       reserve_cold_start_hours:
         name: Minimum autonomy, hours
-        description: "Baseline outage reserve in hours of critical load (1-20, default 2). This is the bottom shelf: it applies always, even after long quiet periods. Higher values raise the minimum SOC the add-on will not let the battery drain below."
+        description: "Standing reserve in hours of critical load, kept even with no outages (0-20, default 0). During an outage series the reserve follows the series' real durations; 0 = in quiet periods keep only min SOC, no protection against phantom outages."
       reserve_pv_aware:
         name: PV-aware reserve
         description: "ON: during hours where the pessimistic solar forecast covers the critical load, the outage reserve for those hours is reduced (the night reserve is unchanged). OFF: the reserve is flat around the clock."
@@ -428,3 +433,6 @@ translations:
       tou_grid_charge_entity_template:
         name: Zone grid-charge flag template
         description: "switch or input_boolean entity that enables grid charging in a zone, with {n} for the zone number, e.g. switch.inverter_program_{n}_charging. When set and apply mode is on, the add-on allows grid charging only where the reserve needs it, in cheap hours, or (without a tariff) in zones with no sun. Empty = leave the flags alone."
+      outage_memory_days:
+        name: Outage series memory, days
+        description: "Outages come in series. While the last outage is at most this many days old the series is live: the add-on holds a reserve sized on its real outage durations and raises it in the hours it hit. Longer quiet means the series is over and no reserve is held (3-60, default 14)."

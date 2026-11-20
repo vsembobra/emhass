@@ -896,27 +896,50 @@ def _retrain_note() -> str | None:
     )
 
 
-DEFICIT_MODE_LABELS = {
-    "conservative": "осторожный",
-    "moderate": "средний",
-    "expected": "по ожиданию",
-}
+RISK_MIN_EVENTS = 3  # outages of the live series before its hours count as risky
+RISK_MIN_DAYS = 2.0  # ... spread over at least this many days
 
 
-def _tuning_note(tuning: dict | None, mode: str, autotune: bool) -> str | None:
+def _reserve_line(regime: dict, plan, margin_hours: float, hold_until, autonomy_h: float) -> str:
+    """Notification line: outage series or quiet, and what is held for it."""
+    if regime["active"]:
+        line = (
+            f"• Серия отключений идёт (последнее {regime['days_since_last']:.1f} дн. назад): "
+            f"резерв {plan.reserve_kwh:.1f} кВт·ч — критическая {plan.critical_load_kw:.2f} кВт × "
+            f"{plan.duration_hours:.1f} ч"
+        )
+        if margin_hours:
+            line += f" + запас {margin_hours:.0f} ч"
+        if hold_until:
+            line += f", держится до {hold_until}"
+        return line
+    since = regime.get("days_since_last")
+    quiet = (
+        f"отключений не было {since:.0f} дн." if since is not None else "отключений не было"
+    )
+    if autonomy_h > 0:
+        return (
+            f"• {quiet.capitalize()} — резерв под отключения не держим; "
+            f"минимальная автономия {autonomy_h:.0f} ч ({plan.reserve_kwh:.1f} кВт·ч)"
+        )
+    return f"• {quiet.capitalize()} — резерв под отключения не держим, только min SOC"
+
+
+def _tuning_note(tuning: dict | None, margin: float, autotune: bool, series: bool) -> str | None:
     """One notification line: what the replay on the site's history chose."""
-    if not tuning or not tuning.get("best"):
+    if not tuning or tuning.get("best") is None:
         return None
-    best = tuning["candidates"][tuning["best"]]
+    best = tuning["candidates"][str(tuning["best"])]
     line = (
-        f"• Подбор на истории ({tuning['windows']} сут): лучший запас до утра — "
-        f"{DEFICIT_MODE_LABELS.get(tuning['best'], tuning['best'])} "
+        f"• Подбор на истории ({tuning['windows']} сут): запас сверх резерва +{float(tuning['best']):.0f} ч "
         f"(недоданная критическая {best['unserved_critical_kwh']:.1f} кВт·ч, "
         f"усечение {best['curtailed_kwh']:.1f} кВт·ч, стоимость {best['net_cost']:.1f})"
     )
-    if autotune:
-        return line + f" — применён: {DEFICIT_MODE_LABELS.get(mode, mode)}"
-    return line + " — совет, автонастройка выключена"
+    if not autotune:
+        return line + " — совет, автонастройка выключена"
+    if not series:
+        return line + " — сейчас тишина, запас не нужен"
+    return line + f" — применён: +{margin:.0f} ч"
 
 
 def readback_ok(entity: str, expected, step_pct: float) -> bool:
@@ -1479,6 +1502,7 @@ def run() -> dict:
         soh, soh_source = 1.0, "identified"
 
     critical = audit["critical_load_kw"].dropna()
+    memory = policy.memory_days(opts)
     settings = ReserveSettings(
         nominal_capacity_kwh=opts["capacity_kwh"],
         soh=soh,
@@ -1486,11 +1510,12 @@ def run() -> dict:
         max_soc=_soc_bounds(opts)[1],
         discharge_efficiency=opts["discharge_efficiency"],
         cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
-        cold_start_hours=min(20.0, max(1.0, float(opts.get("reserve_cold_start_hours", 2.0)))),
-        window_days=14.0,
+        # Minimum autonomy: a reserve kept even with no outage series (0 = none).
+        cold_start_hours=min(20.0, max(0.0, float(opts.get("reserve_cold_start_hours", 0.0)))),
+        window_days=memory,
         quantile=policy.priority(opts)["reserve_quantile"],
         margin=0.0,
-        decay_days=1.0e6,  # owner rule: hold 14 days, no gradual reduction
+        decay_days=1.0e6,  # owner rule: full reserve while the series lives
         profile_mode="all_hours",
         site_timezone=site["time_zone"],
     )
@@ -1502,9 +1527,8 @@ def run() -> dict:
         and pd.notna(row["critical_load_kw"])
     ]
     plan = calculate_reserve(issue, events, observations, settings)
-    # The to-sunrise deficit is sized on the quantiles the priority (and,
-    # with autotune, the replay tuner) selects; the outage reserve below
-    # always stays on pessimistic PV.
+    # Outage series or quiet: only a live series earns an outage reserve.
+    regime = policy.outage_regime(events, issue, memory)
     tuning = tuner.load(DATA)
     if tuner.due(DATA):
         try:
@@ -1514,26 +1538,37 @@ def run() -> dict:
             tuner.save(DATA, tuning)
         except Exception:
             pass  # tuning is advisory; the plan runs on the default mode
-    deficit_mode = tuner.tuned_mode(opts, tuning)
-    deficit_load, deficit_pv = policy.deficit_inputs(
-        deficit_mode,
-        {q: load_prediction[f"load_{q}_kw"].to_numpy() for q in ("p10", "p50", "p90")},
-        {"p10": pv_p10, "p50": pv_p50, "p90": pv_p90},
-    )
+    # Extra margin on top of the series reserve, in hours of critical load:
+    # the smallest the priority allows, or the tuner's pick under autotune.
+    margin_hours = tuner.tuned_margin(opts, tuning) if regime["active"] else 0.0
+    margin_kwh = margin_hours * plan.critical_load_kw / settings.discharge_efficiency
+    # Informational only: energy to carry the whole house to the next hour
+    # where pessimistic PV covers it. It is NOT a floor any more: that
+    # deficit is economics, and the optimizer plans it with prices.
     steps = [
         ForecastStep(
             start=starts_plan[i].to_pydatetime(),
             hours=1.0,
-            pv_p10_kw=float(deficit_pv[i]),
-            load_p90_kw=float(deficit_load[i]),
+            pv_p10_kw=float(pv_p10[i]),
+            load_p90_kw=float(load_prediction["load_p90_kw"].iloc[i]),
         )
         for i in range(PLAN_HOURS)
     ]
 
-    # Probabilistic outage layer: raise the reserve during historically risky
-    # local hours instead of relying only on the post-outage reactive hold.
-    risk = outage_risk_profile(events, issue, site["time_zone"])
-    reserve_by_hour = [plan.reserve_kwh] * PLAN_HOURS
+    # Hours the live series hit get the series' outage energy. A finished
+    # series leaves no risk hours behind: no protection against phantoms.
+    risk = (
+        outage_risk_profile(
+            policy.recent_events(events, issue, memory),
+            issue,
+            site["time_zone"],
+            min_events=RISK_MIN_EVENTS,
+            min_days=RISK_MIN_DAYS,
+        )
+        if regime["active"]
+        else None
+    )
+    reserve_by_hour = [plan.reserve_kwh + margin_kwh] * PLAN_HOURS
     if opts.get("autotune") and learned_hardware:
         reserve_by_hour = hardware.reshape_reserve(
             reserve_by_hour,
@@ -1578,11 +1613,12 @@ def run() -> dict:
             baseline_kwh,
         )
 
-    profile = floor_profile(steps, reserve_by_hour, settings)
-    # Round floors UP to the inverter's 5 % step: rounding down (or to the
-    # nearest step) would shave up to 5 pp off the outage reserve.
+    profile = floor_profile(steps, reserve_by_hour, settings)  # advisory figures only
+    # The hard floor is the outage reserve alone, rounded UP to the
+    # inverter's step: rounding down would shave the reserve.
     caps = adapter.caps(opts)
-    floors_plan = [caps.ceil_soc(step.floor_soc) for step in profile.steps]
+    reserve_shortfall_kwh = max(settings.floor_for_energy(kwh)[1] for kwh in reserve_by_hour)
+    floors_plan = [caps.ceil_soc(settings.floor_for_energy(kwh)[0]) for kwh in reserve_by_hour]
     floors = floors_plan[:HORIZON_HOURS]  # advisory/report day; plan horizon is longer
     recommended_floor = floors[0]  # binding constraint is the current hour
     # Outage reserve alone, as device SOC per hour: the hard lower bound of
@@ -1600,6 +1636,11 @@ def run() -> dict:
                 pv_method,
                 reserve_by_hour,
                 versions=model_versions,
+                extras={
+                    "outage_regime": bool(regime["active"]),
+                    "critical_kw": round(float(plan.critical_load_kw), 4),
+                    "margin_hours": margin_hours,
+                },
             ),
         )
     except OSError:
@@ -1789,12 +1830,9 @@ def run() -> dict:
                 else:
                     apply_errors.append(f"{label} (запись не подтверждена)")
 
-    last_outage = max(
-        (e.end for e in events if e.end is not None and e.source == "measured"), default=None
-    )
     hold_until = (
-        (last_outage + timedelta(days=14)).astimezone(tz).date().isoformat()
-        if last_outage is not None
+        datetime.fromisoformat(regime["series_until_utc"]).astimezone(tz).date().isoformat()
+        if regime["active"] and regime["series_until_utc"]
         else None
     )
 
@@ -1827,9 +1865,7 @@ def run() -> dict:
         head,
         f"• Нагрузка 24 ч, кВт·ч: P50 {load_day['p50']} (P10 {load_day['p10']} … P90 {load_day['p90']})",
         pv_line,
-        f"• Резерв отключений: {plan.reserve_kwh:.1f} кВт·ч "
-        f"(критическая {plan.critical_load_kw:.2f} кВт × {plan.duration_hours:.1f} ч)"
-        + (f", повышен держится до {hold_until}" if hold_until else "")
+        _reserve_line(regime, plan, margin_hours, hold_until, settings.cold_start_hours)
         + ("" if soh >= 0.999 else f", SoH батареи {soh:.0%}"),
         f"• Пол SOC плавающий: сейчас {recommended_floor:.0%}, "
         f"диапазон суток {min(floors):.0%}–{max(floors):.0%} "
@@ -1915,10 +1951,10 @@ def run() -> dict:
             lines.append(f"• Целевые SOC зон от оптимизатора: {zones}")
     elif opts.get("optimizer_enabled", True):
         lines.append("• Оптимизатор: расчёт не удался, действует эвристика пола SOC")
-    if plan.shortfall_kwh > 0 or profile.max_shortfall_kwh > 0:
+    if reserve_shortfall_kwh > 0.05:
         lines.append(
-            "• Внимание: резерв не помещается, нехватка "
-            f"{max(plan.shortfall_kwh, profile.max_shortfall_kwh):.1f} кВт·ч"
+            "• Внимание: резерв на отключение не помещается в батарею, нехватка "
+            f"{reserve_shortfall_kwh:.1f} кВт·ч"
         )
     if apply_mode:
         if applied:
@@ -1939,7 +1975,7 @@ def run() -> dict:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
         )
-    tuning_note = _tuning_note(tuning, deficit_mode, bool(opts.get("autotune")))
+    tuning_note = _tuning_note(tuning, margin_hours, bool(opts.get("autotune")), regime["active"])
     if tuning_note is not None:
         lines.append(tuning_note)
     hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
@@ -1978,7 +2014,7 @@ def run() -> dict:
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
             "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
-            "deficit_mode": deficit_mode,
+            "reserve_margin_hours": margin_hours,
             "tuning": tuning,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
             "hardware": {
@@ -2011,6 +2047,9 @@ def run() -> dict:
             "critical_load_kw": round(plan.critical_load_kw, 3),
             "duration_hours": round(plan.duration_hours, 2),
             "hold_until_local": hold_until,
+            "regime": regime,
+            "margin_hours": margin_hours,
+            "shortfall_reserve_kwh": round(reserve_shortfall_kwh, 3),
             "shortfall_kwh": round(plan.shortfall_kwh, 3),
             "soh": round(soh, 4),
         },

@@ -1,31 +1,31 @@
-"""User-facing priorities mapped onto the planner's knobs.
+"""Outage regime and the owner's priority mapped onto the reserve.
 
-The owner states one thing — how much risk of an empty battery during an
-outage is acceptable — and the add-on derives the rest:
+Outages come in series: once the grid starts failing it keeps failing, and
+two quiet weeks mean the series is over. The add-on therefore protects only
+against outages of a live series:
 
-* ``resilience``: P95 outage duration, the to-sunrise deficit always sized
-  on pessimistic forecasts (load P90, PV P10);
-* ``balanced`` (default, the pre-existing behaviour): P90 duration, the
-  deficit may be sized on the midpoint quantiles when the replay tuner
-  proves it costs no outage energy;
-* ``economy``: P80 duration, the deficit may even use the expected (P50)
-  forecasts.
+* **series** — a measured outage ended (or is still open) within the last
+  ``outage_memory_days`` (14 by default): the reserve covers the critical
+  load for the series' outage duration, raised in the hours the series hit;
+* **quiet** — no outage for ``outage_memory_days``: no outage reserve at all
+  (only the owner's optional minimum autonomy above min SOC). The first
+  outage of a new series switches back immediately.
 
-The risk appetite bounds the tuner: it may only pick deficit modes the
-chosen priority allows, so it can never trade outage safety for money
-beyond what the owner accepted.
+The priority sets how cautious a live series is handled: which quantile of
+the series' outage durations the reserve covers, and which extra margin (in
+hours of critical load) the replay tuner may add on top of it.
 """
 
 from __future__ import annotations
 
-import numpy as np
+from datetime import datetime, timedelta
 
-DEFICIT_MODES = ("conservative", "moderate", "expected")
+DEFAULT_MEMORY_DAYS = 14.0
 
 PRIORITIES = {
-    "resilience": {"reserve_quantile": 0.95, "deficit_modes": ("conservative",)},
-    "balanced": {"reserve_quantile": 0.9, "deficit_modes": ("conservative", "moderate")},
-    "economy": {"reserve_quantile": 0.8, "deficit_modes": DEFICIT_MODES},
+    "resilience": {"reserve_quantile": 0.95, "margins_h": (1.0, 2.0)},
+    "balanced": {"reserve_quantile": 0.9, "margins_h": (0.0, 1.0)},
+    "economy": {"reserve_quantile": 0.8, "margins_h": (0.0,)},
 }
 DEFAULT_PRIORITY = "balanced"
 
@@ -36,23 +36,39 @@ def priority(opts: dict) -> dict:
     )
 
 
-def default_deficit_mode(opts: dict) -> str:
-    """Mode used before the tuner has evidence: the safest one allowed,
-    except economy, which starts from the midpoint."""
-    return "moderate" if opts.get("priority_mode") == "economy" else "conservative"
+def default_margin(opts: dict) -> float:
+    """Margin before the tuner has evidence: the smallest one allowed."""
+    return min(priority(opts)["margins_h"])
 
 
-def deficit_inputs(mode: str, load: dict, pv: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Load and PV series the to-sunrise deficit is sized on.
+def memory_days(opts: dict) -> float:
+    try:
+        return max(1.0, float(opts.get("outage_memory_days", DEFAULT_MEMORY_DAYS)))
+    except (TypeError, ValueError):
+        return DEFAULT_MEMORY_DAYS
 
-    ``load``/``pv`` map "p10"/"p50"/"p90" to equal-length sequences in kW.
-    """
-    l50, l90 = np.asarray(load["p50"], float), np.asarray(load["p90"], float)
-    p10, p50 = np.asarray(pv["p10"], float), np.asarray(pv["p50"], float)
-    if mode == "expected":
-        return l50, p50
-    if mode == "moderate":
-        return (l50 + l90) / 2.0, (p10 + p50) / 2.0
-    if mode == "conservative":
-        return l90, p10
-    raise ValueError(f"unknown deficit mode {mode!r}")
+
+def outage_regime(events, now: datetime, memory: float) -> dict:
+    """Is an outage series live at ``now``? Measured events only."""
+    measured = [e for e in events if getattr(e, "source", None) == "measured"]
+    open_now = any(e.end is None for e in measured)
+    ends = [e.end for e in measured if e.end is not None and e.end <= now]
+    last_end = max(ends) if ends else None
+    cutoff = now - timedelta(days=memory)
+    in_window = [e for e in measured if e.end is None or e.end >= cutoff]
+    days_since = None if last_end is None else (now - last_end).total_seconds() / 86400
+    return {
+        "active": open_now or (last_end is not None and last_end >= cutoff),
+        "open_now": open_now,
+        "last_end_utc": last_end.isoformat() if last_end else None,
+        "days_since_last": None if days_since is None else round(days_since, 2),
+        "events_in_window": len(in_window),
+        "memory_days": memory,
+        "series_until_utc": (last_end + timedelta(days=memory)).isoformat() if last_end else None,
+    }
+
+
+def recent_events(events, now: datetime, memory: float) -> list:
+    """Events of the live series (measured, ended or open within memory)."""
+    cutoff = now - timedelta(days=memory)
+    return [e for e in events if e.end is None or e.end >= cutoff]

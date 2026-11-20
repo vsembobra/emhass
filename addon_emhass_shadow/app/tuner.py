@@ -1,22 +1,23 @@
-"""Tune the planner on the site's own history: replay, compare, pick.
+"""Tune the reserve margin on the site's own history: replay, compare, pick.
 
-For every deficit mode the owner's priority allows, the last two weeks are
-replayed with :func:`emhass.battery_backtest.simulate`: the forecasts the
-add-on actually issued (forecast log) drive an SOC floor policy, and the
-measured PV, load, critical load, grid availability and tariff decide what
-that policy would have achieved.
+During an outage series the floor is the series reserve plus a margin in
+hours of critical load. For every margin the owner's priority allows, the
+last two weeks are replayed with :func:`emhass.battery_backtest.simulate`:
+the reserves the add-on actually issued (forecast log) drive the floor, and
+the measured PV, load, critical load, grid availability and tariff decide
+what that floor would have achieved.
 
 Replay windows run from local noon to the next noon, so evening, night and
-morning — where the floor matters — are never cut at midnight; each starts
-from the SOC measured at its first hour.
+morning are never cut at midnight; each starts from the SOC measured at its
+first hour.
 
 The policy mimics a TOU inverter such as Deye: the battery is held at the
-zone floor, charges from surplus PV, and is grid-charged up to the floor in
-cheap hours (or at any hour without a tariff, or when SOC sits below the
-outage reserve). Candidates are ranked exactly in the add-on's priority
-order: unserved critical energy during real outages, then curtailed PV,
-then cost. A cheaper candidate that would have left the backup circuit dark
-for longer always loses.
+floor, charges from surplus PV, and is grid-charged up to the floor in
+cheap hours, or at any hour when it sits below the series reserve (without
+a tariff that is the only grid charging). Candidates are ranked exactly in
+the add-on's priority order: unserved critical energy during real outages,
+then curtailed PV, then cost — a smaller margin that would have left the
+backup circuit dark for longer always loses.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ import pandas as pd
 import policy
 
 from emhass.battery_backtest import Battery, Dispatch, ReplayStep, simulate
-from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.reserve import ReserveSettings
 
 TUNING_FILE = "tuning.json"
@@ -132,35 +132,33 @@ def _forecast_at(issued, at: pd.Timestamp):
 
 def floor_at(
     entry: dict,
-    starts: pd.DatetimeIndex,
     index: int,
-    mode: str,
+    margin_h: float,
     settings: ReserveSettings,
     step: float = 0.05,
 ) -> tuple[float, float]:
-    """(planning floor, outage-reserve floor) at the step, rounded up to the SOC step."""
-    load = {q: entry["load"][q][index:] for q in ("p10", "p50", "p90")}
-    pv = {q: entry["pv"][q][index:] for q in ("p10", "p50", "p90")}
-    deficit_load, deficit_pv = policy.deficit_inputs(mode, load, pv)
-    starts = starts[index:]
-    reserves = entry["reserve_kwh_by_hour"][index:]
-    steps = [
-        ForecastStep(start.to_pydatetime(), 1.0, float(pv_kw), float(load_kw))
-        for start, pv_kw, load_kw in zip(starts, deficit_pv, deficit_load, strict=True)
-    ]
-    profile = floor_profile(steps, reserves, settings)
-    reserve_floor = settings.floor_for_energy(float(reserves[0]))[0]
+    """(floor with margin, series-reserve floor) at the step, rounded up.
+
+    The margin applies only while the logged run saw a live outage series.
+    """
+    reserve = float(entry["reserve_kwh_by_hour"][index])
+    extra = 0.0
+    if entry.get("outage_regime"):
+        extra = margin_h * float(entry.get("critical_kw", 0.0)) / settings.discharge_efficiency
 
     def up(value: float) -> float:
         return math.ceil(value / step - 1e-9) * step
 
-    return up(profile.steps[0].floor_soc), up(reserve_floor)
+    return (
+        up(settings.floor_for_energy(reserve + extra)[0]),
+        up(settings.floor_for_energy(reserve)[0]),
+    )
 
 
 def make_policy(
     window: list[dict],
     issued: list,
-    mode: str,
+    margin_h: float,
     battery: Battery,
     settings: ReserveSettings,
     opts: dict,
@@ -174,14 +172,19 @@ def make_policy(
         found = _forecast_at(issued, pd.Timestamp(start))
         if found is None:
             return Dispatch(floor_soc=battery.min_soc)
-        floor, reserve = floor_at(*found, mode, settings, step)
+        entry, _, index = found
+        floor, reserve = floor_at(entry, index, margin_h, settings, step)
         floor = min(max(floor, battery.min_soc), battery.max_soc)
         reserve = min(max(reserve, battery.min_soc), battery.max_soc)
         if soc >= floor - 1e-9:
             return Dispatch(floor_soc=floor)
         local = pd.Timestamp(start).tz_convert(tz)
         minute = local.hour * 60 + local.minute
-        allowed = cheap is None or optimize._is_cheap_minute(minute, cheap) or soc < reserve
+        in_cheap = cheap is not None and optimize._is_cheap_minute(minute, cheap)
+        # Margin top-up only in cheap hours (or with one price all day, when
+        # holding the floor is the only reason to charge); the series reserve
+        # itself is restored at any price.
+        allowed = cheap is None or in_cheap or soc < reserve
         if not allowed:
             return Dispatch(floor_soc=floor)
         row = by_start[start]
@@ -195,7 +198,7 @@ def make_policy(
 def replay(
     windows: list[list[dict]],
     issued: list,
-    mode: str,
+    margin_h: float,
     battery: Battery,
     settings: ReserveSettings,
     opts: dict,
@@ -226,7 +229,10 @@ def replay(
         ]
         initial = min(max(window[0]["soc"], battery.min_soc), battery.max_soc)
         result = simulate(
-            steps, battery, initial, make_policy(window, issued, mode, battery, settings, opts, tz)
+            steps,
+            battery,
+            initial,
+            make_policy(window, issued, margin_h, battery, settings, opts, tz),
         )
         totals["unserved_critical_kwh"] += result.unserved_critical_kwh
         totals["curtailed_kwh"] += result.curtailed_kwh
@@ -244,12 +250,12 @@ def rank_key(metrics: dict) -> tuple:
 def tune(
     audit: pd.DataFrame, log: list[dict], opts: dict, tz: ZoneInfo, now: datetime, soh: float = 1.0
 ) -> dict:
-    """Replay every allowed deficit mode and pick the best one."""
+    """Replay every allowed reserve margin and pick the best one."""
     issued = issued_forecasts(log)
     until = pd.Timestamp(now).tz_convert(UTC).floor("h")
     since = until - pd.Timedelta(days=REPLAY_DAYS)
     windows = replay_windows(audit, tz, since, until)
-    allowed = policy.priority(opts)["deficit_modes"]
+    allowed = policy.priority(opts)["margins_h"]
     result: dict = {
         "tuned_utc": pd.Timestamp(now).isoformat(),
         "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
@@ -262,10 +268,12 @@ def tune(
         return result
     battery = battery_from_options(opts, soh)
     settings = settings_from_options(opts, soh)
-    for mode in allowed:
-        result["candidates"][mode] = replay(windows, issued, mode, battery, settings, opts, tz)
+    for margin in allowed:
+        result["candidates"][str(margin)] = replay(
+            windows, issued, margin, battery, settings, opts, tz
+        )
     result["best"] = min(
-        allowed, key=lambda mode: (rank_key(result["candidates"][mode]), allowed.index(mode))
+        allowed, key=lambda m: (rank_key(result["candidates"][str(m)]), allowed.index(m))
     )
     return result
 
@@ -290,9 +298,10 @@ def due(data_dir: Path, every: timedelta = timedelta(hours=24)) -> bool:
     return datetime.now(UTC) - datetime.fromisoformat(tuning["tuned_utc"]) >= every
 
 
-def tuned_mode(opts: dict, tuning: dict | None) -> str:
-    """Deficit mode for this run: the tuned one under autotune, if allowed."""
-    allowed = policy.priority(opts)["deficit_modes"]
-    if opts.get("autotune") and tuning and tuning.get("best") in allowed:
-        return str(tuning["best"])
-    return policy.default_deficit_mode(opts)
+def tuned_margin(opts: dict, tuning: dict | None) -> float:
+    """Reserve margin (hours) for this run: the tuned one under autotune, if allowed."""
+    allowed = policy.priority(opts)["margins_h"]
+    best = (tuning or {}).get("best")
+    if opts.get("autotune") and isinstance(best, (int, float)) and float(best) in allowed:
+        return float(best)
+    return policy.default_margin(opts)

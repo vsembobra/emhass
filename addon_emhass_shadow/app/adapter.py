@@ -13,11 +13,13 @@ ESS) are out of scope of this adapter.
 Grid-charge policy (only when a per-zone grid-charge entity template is
 configured, and only in apply mode): a zone may charge from the grid when
 
-* the plan reaches the zone below the outage reserve the zone protects
-  (reserve first, at any price), or
-* with a tariff: the whole zone lies in cheap hours; without a tariff: the
-  zone expects no sun (pessimistic PV) — grid-charging a sunny zone buys
-  energy the panels would deliver for free and leads to curtailment later.
+* the zone is entered below the outage reserve it protects (reserve first,
+  at any price; the reserve is zero outside an outage series), or
+* a night tariff is enabled and the whole zone lies in cheap hours — how
+  much to buy there is the optimizer's zone target.
+
+With one price all day the grid never charges the battery otherwise: a
+charge/discharge round trip loses ~10 % and buys nothing.
 """
 
 from __future__ import annotations
@@ -27,8 +29,6 @@ from dataclasses import dataclass
 
 import optimize
 import pandas as pd
-
-NO_SUN_KWH = 0.2
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def grid_charge_plan(
     tz,
     opts: dict,
     reserve_floors: list[float],
-    pv_p10_kw: list[float],
+    pv_p10_kw: list[float] | None,
     soc_opt: list[float] | None,
     soc_init: float,
 ) -> list[dict]:
@@ -93,8 +93,6 @@ def grid_charge_plan(
             in_cheap = all(optimize._is_cheap_minute(t.hour * 60 + t.minute, cheap) for t in local)
             desired, reason = in_cheap, "дешёвый тариф" if in_cheap else "дорогой тариф"
         else:
-            sun = sum(max(0.0, float(pv_p10_kw[i])) for i in window)
-            desired = sun < NO_SUN_KWH
-            reason = "солнца нет" if desired else "солнце зарядит"
+            desired, reason = False, "цена одинаковая — заряд только от солнца"
         plan.append({"n": program["n"], "desired": desired, "reason": reason})
     return plan

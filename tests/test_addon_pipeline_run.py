@@ -143,7 +143,7 @@ def test_priority_flexible_loads_and_sensors(fake_site, monkeypatch):
     )
     report = pipeline.run()
     assert report["data"]["priority_mode"] == "resilience"
-    assert report["data"]["deficit_mode"] == "conservative"
+    assert report["data"]["reserve_margin_hours"] == 0.0  # quiet: no margin
     (item,) = report["advisory"]["deferrable"]
     assert item["start_local"] is not None
     assert "Boiler" in report["notification"]
@@ -212,3 +212,53 @@ def test_readback_tolerance_is_below_half_a_step(fake_site):
     states["switch.y"] = "on"
     assert pipeline.readback_ok("switch.y", "on", 5)
     assert not pipeline.readback_ok("switch.y", "off", 5)
+
+
+def _write_outages(data, ends_days_ago, hours=3.0):
+    now = datetime.now(UTC)
+    lines = []
+    for days in ends_days_ago:
+        end = now - timedelta(days=days)
+        start = end - timedelta(hours=hours)
+        lines.append(
+            json.dumps(
+                {
+                    "start_utc": start.isoformat(),
+                    "end_record_utc": end.isoformat(),
+                    "interrupted": False,
+                }
+            )
+        )
+    (data / "outages.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_quiet_period_holds_no_outage_reserve(fake_site):
+    _write_outages(fake_site["data"], [30, 25, 21])  # a series that ended weeks ago
+    report = pipeline.run()
+    assert not report["reserve"]["regime"]["active"]
+    assert report["reserve"]["reserve_kwh"] == 0.0
+    assert report["advisory"]["recommended_floor_soc"] == pytest.approx(0.10)  # min SOC
+    assert report["outage_risk"] is None  # old outages leave no risk hours behind
+    assert "резерв под отключения не держим" in report["notification"]
+
+
+def test_live_series_holds_a_reserve_with_margin(fake_site):
+    _write_outages(fake_site["data"], [9, 6, 3, 1], hours=4.0)
+    fake_site["setup"](priority_mode="resilience")
+    report = pipeline.run()
+    regime = report["reserve"]["regime"]
+    assert regime["active"] and regime["events_in_window"] == 4
+    assert report["reserve"]["duration_hours"] == pytest.approx(4.0, abs=0.01)
+    assert report["reserve"]["margin_hours"] == 1.0  # resilience default
+    assert report["advisory"]["recommended_floor_soc"] > 0.10
+    assert "Серия отключений идёт" in report["notification"]
+
+
+def test_floor_is_never_the_overnight_deficit(fake_site):
+    # Winter-like: tiny PV, a whole night ahead; no series -> floor = min SOC.
+    report = pipeline.run()
+    assert max(step["floor_soc"] for step in report["advisory"]["floor_profile"]) == pytest.approx(
+        0.10
+    )
+    assert not report["advisory"]["optimizer"]["floor_relaxed"]
+    assert "не помещается" not in report["notification"]

@@ -32,13 +32,12 @@ OPTS = {
 }
 
 
-def _site(days=6, outage=None):
-    """Sunny days (3 kW 08-16), 0.5 kW load; optional outage (start, hours, kW)."""
+def _site(days=6, outage=None, series=True):
+    """Cloudy days (no PV), 0.5 kW load; a live series logs a 2 kWh reserve."""
     index = pd.date_range(DAY0, periods=days * 24, freq="h")
-    sunny = (index.hour >= 8) & (index.hour < 16)
     audit = pd.DataFrame(
         {
-            "pv_measured_kw": [3.0 if s else 0.0 for s in sunny],
+            "pv_measured_kw": 0.0,
             "load_kw": 0.5,
             "critical_load_kw": 0.5,
             "soc_mean": 0.5,
@@ -54,18 +53,25 @@ def _site(days=6, outage=None):
     log = []
     for issue in pd.date_range(DAY0, periods=days * 2, freq="12h"):
         starts = pd.date_range(issue, periods=48, freq="h")
-        sun = [(s.hour >= 8) & (s.hour < 16) for s in starts]
-        pv = (
-            [1.0 if s else 0.0 for s in sun],
-            [3.0 if s else 0.0 for s in sun],
-            [3.5 if s else 0.0 for s in sun],
+        zeros = ([0.0] * 48,) * 3
+        load = ([0.3] * 48, [0.5] * 48, [0.8] * 48)
+        log.append(
+            learning.log_entry(
+                issue,
+                starts,
+                load,
+                "model",
+                zeros,
+                "model",
+                [2.0 if series else 0.0] * 48,
+                extras={"outage_regime": series, "critical_kw": 1.5},
+            )
         )
-        load = ([0.3] * 48, [0.5] * 48, [1.5] * 48)
-        log.append(learning.log_entry(issue, starts, load, "model", pv, "model", [1.0] * 48))
     return audit, log
 
 
 NOW = DAY0 + pd.Timedelta(days=6)
+SMALL = dict(OPTS, capacity_kwh=10.0)
 
 
 def test_replay_windows_run_noon_to_noon_and_need_complete_hours():
@@ -79,37 +85,40 @@ def test_replay_windows_run_noon_to_noon_and_need_complete_hours():
     assert len(windows) == 4  # 01-12..05-12 minus the broken one
 
 
-def test_without_outages_the_cheaper_mode_wins():
+def test_without_outages_no_margin_wins():
     audit, log = _site()
-    result = tuner.tune(audit, log, OPTS, TZ, NOW)
+    result = tuner.tune(audit, log, SMALL, TZ, NOW)
     candidates = result["candidates"]
-    assert set(candidates) == {"conservative", "moderate"}
-    assert candidates["moderate"]["unserved_critical_kwh"] == 0.0
-    assert candidates["moderate"]["net_cost"] < candidates["conservative"]["net_cost"]
-    assert result["best"] == "moderate"
+    assert set(candidates) == {"0.0", "1.0"}
+    assert candidates["0.0"]["net_cost"] < candidates["1.0"]["net_cost"]
+    assert result["best"] == 0.0
 
 
-def test_a_long_outage_makes_the_conservative_mode_win():
-    outage = (DAY0 + pd.Timedelta(days=3, hours=18), 12, 2.0)
+def test_an_outage_longer_than_the_reserve_makes_the_margin_win():
+    outage = (DAY0 + pd.Timedelta(days=3, hours=18), 3, 2.0)
     audit, log = _site(outage=outage)
-    result = tuner.tune(audit, log, OPTS, TZ, NOW)
+    result = tuner.tune(audit, log, SMALL, TZ, NOW)
     candidates = result["candidates"]
-    assert (
-        candidates["conservative"]["unserved_critical_kwh"]
-        < candidates["moderate"]["unserved_critical_kwh"]
-    )
-    assert result["best"] == "conservative"
+    assert candidates["1.0"]["unserved_critical_kwh"] < candidates["0.0"]["unserved_critical_kwh"]
+    assert result["best"] == 1.0
 
 
-def test_resilience_only_considers_the_conservative_mode():
+def test_quiet_runs_ignore_the_margin():
+    audit, log = _site(series=False)
+    result = tuner.tune(audit, log, SMALL, TZ, NOW)
+    assert result["candidates"]["0.0"] == result["candidates"]["1.0"]
+    assert result["best"] == 0.0
+
+
+def test_resilience_only_considers_its_margins():
     audit, log = _site()
-    result = tuner.tune(audit, log, dict(OPTS, priority_mode="resilience"), TZ, NOW)
-    assert list(result["candidates"]) == ["conservative"] and result["best"] == "conservative"
+    result = tuner.tune(audit, log, dict(SMALL, priority_mode="resilience"), TZ, NOW)
+    assert set(result["candidates"]) == {"1.0", "2.0"}
 
 
 def test_too_little_history_gives_no_choice():
     audit, log = _site(days=2)
-    result = tuner.tune(audit, log, OPTS, TZ, DAY0 + pd.Timedelta(days=2))
+    result = tuner.tune(audit, log, SMALL, TZ, DAY0 + pd.Timedelta(days=2))
     assert result["best"] is None and "reason" in result
 
 
@@ -119,18 +128,19 @@ def test_rank_puts_outage_service_before_money():
     assert tuner.rank_key(safe) < tuner.rank_key(cheap)
 
 
-def test_tuned_mode_needs_autotune_and_an_allowed_choice():
-    tuning = {"best": "moderate"}
-    assert tuner.tuned_mode(OPTS, tuning) == "conservative"
-    assert tuner.tuned_mode(dict(OPTS, autotune=True), tuning) == "moderate"
-    resilient = dict(OPTS, autotune=True, priority_mode="resilience")
-    assert tuner.tuned_mode(resilient, tuning) == "conservative"
+def test_tuned_margin_needs_autotune_and_an_allowed_choice():
+    tuning = {"best": 1.0}
+    assert tuner.tuned_margin(OPTS, tuning) == 0.0
+    assert tuner.tuned_margin(dict(OPTS, autotune=True), tuning) == 1.0
+    economy = dict(OPTS, autotune=True, priority_mode="economy")
+    assert tuner.tuned_margin(economy, tuning) == 0.0
+    assert tuner.tuned_margin(dict(OPTS, autotune=True, priority_mode="resilience"), None) == 1.0
 
 
 def test_tuning_file_roundtrip(tmp_path):
     assert tuner.due(tmp_path)
-    tuner.save(tmp_path, {"tuned_utc": datetime.now(UTC).isoformat(), "best": "moderate"})
-    assert not tuner.due(tmp_path) and tuner.load(tmp_path)["best"] == "moderate"
+    tuner.save(tmp_path, {"tuned_utc": datetime.now(UTC).isoformat(), "best": 1.0})
+    assert not tuner.due(tmp_path) and tuner.load(tmp_path)["best"] == 1.0
 
 
 def test_hindsight_import_splits_forecast_and_execution():
