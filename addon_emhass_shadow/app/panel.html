@@ -101,11 +101,34 @@
   </div>
 
   <div class="card full">
-    <h3>Зоны TOU инвертора (6 программ)</h3>
+    <h3>Зоны TOU инвертора</h3>
     <table>
       <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Пол (эвристика)</th><th>Оптимизатор</th></tr></thead>
       <tbody id="zones"></tbody>
     </table>
+  </div>
+
+  <div class="card full" id="learncard" style="display:none">
+    <h3>Самообучение и автонастройка</h3>
+    <div class="sub" id="learnnote" style="margin-bottom:6px"></div>
+    <table>
+      <thead><tr><th>Что</th><th>Выучено по данным</th><th>Состояние</th></tr></thead>
+      <tbody id="learn"></tbody>
+    </table>
+    <div id="flexwrap" style="display:none">
+      <h3 style="margin-top:16px">Переносимые нагрузки — когда включать</h3>
+      <table>
+        <thead><tr><th>Нагрузка</th><th>Окно</th><th>На солнце</th><th>Из усечения</th></tr></thead>
+        <tbody id="flex"></tbody>
+      </table>
+    </div>
+    <div id="gcwrap" style="display:none">
+      <h3 style="margin-top:16px">Заряд из сети по зонам</h3>
+      <table>
+        <thead><tr><th>Зона</th><th>Сейчас</th><th>Нужно</th><th>Почему</th></tr></thead>
+        <tbody id="gc"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="card full">
@@ -179,6 +202,10 @@ function renderStatus(s) {
       else parts.push("переобучение: при следующем расчёте");
     }
     const m = r.models || {};
+    const word = {promoted: "обновлена", ok: "обновлена", kept: "оставлена текущая"};
+    const told = ["load", "pv"].filter(k => m[k] && word[m[k].status]).map(k =>
+      (k === "load" ? "нагрузка" : "солнце") + " " + word[m[k].status]);
+    if (told.length) parts.push("модели: " + told.join(", "));
     const bad = ["load", "pv"].filter(k => m[k] && m[k].status === "failed");
     if (bad.length) parts.push("⚠️ переобучение не удалось: " + bad.map(k => (k === "load" ? "нагрузка" : "солнце")).join(", "));
   }
@@ -367,6 +394,73 @@ function render(r) {
   }).join("");
   renderFloorProfile(a.floor_profile || [], r.outage_risk);
   renderOptimizer(a.optimizer, a.floor_profile || []);
+  renderLearning(r);
+}
+
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
+const MODE_LABEL = {conservative: "осторожный", moderate: "средний", expected: "по ожиданию"};
+const PRIORITY_LABEL = {resilience: "надёжность", balanced: "баланс", economy: "экономия"};
+
+function share(v) { return v == null ? "—" : Math.round(v * 100) + "%"; }
+
+function renderLearning(r) {
+  const d = r.data || {}, a = r.advisory || {};
+  const rows = [];
+  const sl = d.self_learning || {};
+  for (const [key, label] of [["load", "Прогноз нагрузки"], ["pv", "Прогноз солнца"]]) {
+    const c = sl[key];
+    if (!c) continue;
+    const shift = key === "load"
+      ? "сдвиг " + c.hourly.reduce((x, y) => x + y, 0).toFixed(1) + " кВт·ч/сутки"
+      : "×" + (c.hourly.filter(f => Math.abs(f - 1) > 1e-9).reduce((x, y, _, arr) => x + y / arr.length, 0) || 1).toFixed(2);
+    rows.push([label, c.active
+      ? shift + ", коридор ×" + c.scale_lo.toFixed(2) + "/×" + c.scale_hi.toFixed(2)
+      : "копит данные (" + c.pairs + " пар)",
+      c.active ? "охват P10–P90 " + share(c.coverage_raw) + " → " + share(c.coverage_calibrated) : "—"]);
+  }
+  if (sl.drift && sl.drift.drift) rows.push(["Дрейф моделей", esc(sl.drift.reasons.join(", ")), "переобучение раньше срока"]);
+  const hw = (d.hardware || {}).learned;
+  if (hw) {
+    const b = hw.battery || {};
+    if (b.status === "ok") rows.push(["Батарея", b.capacity_kwh.toFixed(1) + " кВт·ч, КПД цикла " + share(b.round_trip_efficiency), "по " + b.n_segments.join("/") + " циклам"]);
+    else rows.push(["Батарея", "мало глубоких циклов", esc(b.status || "—")]);
+    const g = hw.pv_geometry;
+    if (g) rows.push(["Панели", g.kwp.toFixed(1) + " кВтп, наклон " + g.tilt_deg + "°, азимут " + g.azimuth_deg + "°", "ошибка " + g.mae_kw.toFixed(2) + " кВт"]);
+    const l = hw.limits || {};
+    if (l.max_charge_kw) rows.push(["Мощность АКБ", "заряд до " + l.max_charge_kw.toFixed(1) + " кВт, разряд до " + (l.max_discharge_kw || 0).toFixed(1) + " кВт", "наблюдалось"]);
+  }
+  const t = d.tuning;
+  if (t && t.best) {
+    const cells = Object.entries(t.candidates).map(([m, v]) =>
+      (m === t.best ? "<b>" : "") + MODE_LABEL[m] + ": " + v.unserved_critical_kwh.toFixed(1) + " / " +
+      v.curtailed_kwh.toFixed(1) + " кВт·ч / " + v.net_cost.toFixed(1) + (m === t.best ? "</b>" : ""));
+    rows.push(["Подбор на истории (" + t.windows + " сут)", cells.join("<br>"), "недоданная критическая / усечение / стоимость"]);
+  } else if (t) rows.push(["Подбор на истории", "ещё нет данных", esc(t.reason || "")]);
+  const applied = (d.hardware || {}).applied || [];
+  const auto = (d.hardware || {}).autotune;
+  document.getElementById("learnnote").textContent =
+    "Приоритет: " + (PRIORITY_LABEL[d.priority_mode] || d.priority_mode || "—") +
+    " · запас до утра: " + (MODE_LABEL[d.deficit_mode] || d.deficit_mode || "—") +
+    (a.autonomy_hours != null ? " · автономия сейчас ~" + a.autonomy_hours.toFixed(1) + " ч" : "") +
+    " · автонастройка: " + (auto ? (applied.length ? "применено — " + applied.join(", ") : "включена") : "выключена (только совет)");
+  document.getElementById("learn").innerHTML = rows.map(([w, v, s]) =>
+    "<tr><td>" + w + "</td><td>" + v + "</td><td>" + s + "</td></tr>").join("");
+  document.getElementById("learncard").style.display = rows.length || a.autonomy_hours != null ? "block" : "none";
+
+  const flex = a.deferrable || [];
+  document.getElementById("flexwrap").style.display = flex.length ? "block" : "none";
+  document.getElementById("flex").innerHTML = flex.map(f => "<tr><td>" + esc(f.name) + "</td><td>" +
+    (f.start_local ? esc(f.start_local) + "–" + esc(f.end_local) : esc(f.reason || "—")) + "</td><td>" +
+    (f.start_local ? share(f.solar_share) : "—") + "</td><td>" +
+    (f.start_local ? f.free_solar_kwh.toFixed(1) + " кВт·ч" : "—") + "</td></tr>").join("");
+
+  const gc = a.grid_charge || [];
+  document.getElementById("gcwrap").style.display = gc.length ? "block" : "none";
+  document.getElementById("gc").innerHTML = gc.map(g => "<tr><td>Зона " + g.n + "</td><td>" +
+    esc(g.current ?? "—") + "</td><td>" + (g.desired ? "вкл" : "выкл") + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
 }
 
 function renderOptimizer(opt, profile) {
