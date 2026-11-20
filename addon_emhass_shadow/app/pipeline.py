@@ -138,6 +138,35 @@ def ha_service(domain: str, service: str, payload: dict) -> None:
         pass
 
 
+def notify_problem(key: str, title: str, message: str | None) -> None:
+    """Raise (or clear, when message is None) a persistent error notification.
+
+    One stable notification_id per problem kind: repeated failures update the
+    same notification instead of stacking, and recovery dismisses it. Sent
+    regardless of the plan-notification toggle — a broken input is exactly
+    what the owner must see. Never raises: alerting must not break the plan.
+    """
+    try:
+        if message is None:
+            ha_service(
+                "persistent_notification",
+                "dismiss",
+                {"notification_id": f"emhass_shadow_problem_{key}"},
+            )
+        else:
+            ha_service(
+                "persistent_notification",
+                "create",
+                {
+                    "title": title,
+                    "message": message,
+                    "notification_id": f"emhass_shadow_problem_{key}",
+                },
+            )
+    except Exception:
+        pass
+
+
 def fetch_history(start: datetime, end: datetime, entities: list[str]) -> dict[str, list[dict]]:
     entities = [e for e in entities if str(e or "").strip()]
     if not entities:
@@ -2470,4 +2499,36 @@ def run(notify: str = "always") -> dict:
                 "notification_id": "emhass_shadow_plan",
             },
         )
+
+    # Error notifications: stable ids, self-clearing on recovery. Unlike the
+    # plan summary these fire on every run, including quiet hourly replans.
+    if weather_stale:
+        if weather_name is not None:
+            notify_problem(
+                "weather",
+                "EMHASS Shadow: прогноз погоды устарел",
+                "Нет связи с Open-Meteo — солнечный прогноз посчитан по архивному "
+                f"снапшоту {weather_name} и может расходиться с реальной погодой. "
+                "Проверь интернет и маршрут на хосте. Уведомление исчезнет само, "
+                "когда свежий прогноз скачается.",
+            )
+        else:
+            notify_problem(
+                "weather",
+                "EMHASS Shadow: нет прогноза погоды",
+                "Нет связи с Open-Meteo и нет ни одного архивного снапшота — "
+                "солнечный прогноз принят нулевым, план консервативный. "
+                "Проверь интернет и маршрут на хосте.",
+            )
+    else:
+        notify_problem("weather", "", None)
+    if entity_note is not None:
+        notify_problem(
+            "entities",
+            "EMHASS Shadow: проблемы с сущностями",
+            entity_note.lstrip("• ")
+            + " Панель → «Проверка и настройка сущностей» подскажет, что именно не так.",
+        )
+    else:
+        notify_problem("entities", "", None)
     return report

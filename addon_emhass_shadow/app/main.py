@@ -22,6 +22,30 @@ STATE = {"running": False, "last_error": None, "last_run": None, "next_run": Non
 LOCK = threading.Lock()
 
 
+def _report_retrain_problems(status: dict) -> None:
+    """Raise/clear the retrain error notification from a retrain status dict."""
+    models = (status or {}).get("models") or {}
+    failed = {
+        name: info.get("error", "")
+        for name, info in models.items()
+        if info.get("status") == "failed"
+    }
+    if failed:
+        details = "; ".join(
+            f"{'нагрузка' if name == 'load' else 'солнце'}: {str(err)[:150]}"
+            for name, err in failed.items()
+        )
+        pipeline.notify_problem(
+            "retrain",
+            "EMHASS Shadow: переобучение не удалось",
+            f"Не удалось переобучить модели ({details}). Прогнозы работают на "
+            "прежних моделях. Панель → «Переобучить модели» повторит попытку; "
+            "уведомление исчезнет после успешного обучения.",
+        )
+    else:
+        pipeline.notify_problem("retrain", "", None)
+
+
 def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
     """One planning run. notify: "always" (daily, manual, grid change) or
     "changes" (hourly replans: notify only when something was written)."""
@@ -37,19 +61,28 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
             # train on it, and only then plan.
             try:
                 STATE["last_backfill"] = pipeline.bootstrap(pipeline.options())
-                retrain.retrain_if_due(force=True)
+                _report_retrain_problems(retrain.retrain_if_due(force=True))
             except Exception:
                 STATE["last_error"] = traceback.format_exc(limit=5)
         if retrain_first:
             try:
-                retrain.retrain_if_due()
+                _report_retrain_problems(retrain.retrain_if_due())
             except Exception:
                 # Retraining must never block the daily plan.
                 pass
         pipeline.run(notify=notify)
         STATE["last_run"] = datetime.now(UTC).isoformat()
+        pipeline.notify_problem("run", "", None)
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)
+        pipeline.notify_problem(
+            "run",
+            "EMHASS Shadow: расчёт не удался",
+            "Последний расчёт плана завершился ошибкой:\n"
+            + str(STATE["last_error"]).strip().splitlines()[-1][:300]
+            + "\nПолный traceback — в панели «Теневой план» и в журнале аддона. "
+            "Уведомление исчезнет после первого успешного расчёта.",
+        )
     finally:
         STATE["running"] = False
 
@@ -61,9 +94,16 @@ def run_retrain() -> None:
         STATE["running"] = True
         STATE["last_error"] = None
     try:
-        retrain.retrain_if_due(force=True)
+        _report_retrain_problems(retrain.retrain_if_due(force=True))
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)
+        pipeline.notify_problem(
+            "retrain",
+            "EMHASS Shadow: переобучение не удалось",
+            "Переобучение моделей завершилось ошибкой:\n"
+            + str(STATE["last_error"]).strip().splitlines()[-1][:300]
+            + "\nПолный traceback — в панели «Теневой план» и в журнале аддона.",
+        )
     finally:
         STATE["running"] = False
 

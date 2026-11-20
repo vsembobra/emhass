@@ -105,8 +105,13 @@ def test_run_produces_report_and_logs(fake_site):
     assert (data / "drift_state.json").exists()
     assert "self_learning" in report["data"]
     assert report["notification"].startswith("Теневой план")
-    # Shadow mode writes nothing but the notification.
-    assert {s[:2] for s in fake_site["services"]} == {("persistent_notification", "create")}
+    # Shadow mode writes nothing but the notification (plus self-clearing
+    # dismissals of the error notifications, which are no-ops here).
+    assert {s[:2] for s in fake_site["services"]} == {
+        ("persistent_notification", "create"),
+        ("persistent_notification", "dismiss"),
+    }
+    assert not [s for s in fake_site["services"] if s[1] == "create" and "problem" in s[2]["notification_id"]]
 
 
 def test_apply_mode_writes_zone_targets(fake_site):
@@ -322,10 +327,46 @@ def test_select_without_a_matching_option_is_reported(fake_site):
 def test_routine_replans_stay_quiet_unless_they_write(fake_site):
     report = pipeline.run(notify="changes")  # shadow mode: nothing written
     assert report["advisory"]["applied"] == []
-    assert not [s for s in fake_site["services"] if s[0] == "persistent_notification"]
+    # No plan summary and no error notifications raised on a healthy quiet run;
+    # only self-clearing dismissals are allowed.
+    assert not [s for s in fake_site["services"] if s[:2] == ("persistent_notification", "create")]
     fake_site["setup"](apply_mode=True)
     pipeline.run(notify="changes")
-    assert [s for s in fake_site["services"] if s[0] == "persistent_notification"]
+    assert [s for s in fake_site["services"] if s[:2] == ("persistent_notification", "create")]
+
+
+def test_stale_weather_raises_and_clears_error_notification(fake_site, monkeypatch):
+    def no_weather(site):
+        raise OSError("no route to open-meteo")
+
+    monkeypatch.setattr(pipeline, "archive_weather", no_weather)
+    pipeline.run(notify="changes")  # quiet replan still reports the problem
+    creates = [s for s in fake_site["services"] if s[:2] == ("persistent_notification", "create")]
+    weather = [s for s in creates if s[2]["notification_id"] == "emhass_shadow_problem_weather"]
+    assert weather and "Open-Meteo" in weather[0][2]["message"]
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    index = pd.date_range(now - timedelta(hours=48), periods=96, freq="h")
+    elevation = np.clip(np.sin((index.hour - 6) / 12 * np.pi), 0, None)
+    fresh = pd.DataFrame(
+        {
+            "temperature_2m": 8.0,
+            "shortwave_radiation": 700 * elevation,
+            "direct_normal_irradiance": 500 * elevation,
+            "diffuse_radiation": 120 * elevation,
+            "cloud_cover": 20.0,
+        },
+        index=index,
+    )
+    monkeypatch.setattr(pipeline, "archive_weather", lambda site: (fresh, "fresh.json", False))
+    fake_site["services"].clear()
+    pipeline.run(notify="changes")
+    dismissals = [s for s in fake_site["services"] if s[:2] == ("persistent_notification", "dismiss")]
+    assert any(s[2]["notification_id"] == "emhass_shadow_problem_weather" for s in dismissals)
+    assert not [
+        s for s in fake_site["services"]
+        if s[:2] == ("persistent_notification", "create") and "problem" in s[2]["notification_id"]
+    ]
 
 
 def test_bms_calibration_charges_the_night_zone_to_full(fake_site):

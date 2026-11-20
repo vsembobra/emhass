@@ -8,7 +8,7 @@ description: >-
   только если новая не хуже, определяет ёмкость батареи и ориентацию
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
-version: "0.14.1"
+version: "0.14.2"
 slug: emhass_shadow
 init: false
 arch:
@@ -229,7 +229,7 @@ translations:
         description: ЧЧ:ММ по местному времени. Расчёт и уведомление выполняются раз в день в этот момент.
       notifications:
         name: Уведомления
-        description: Показывать итог расчёта уведомлением в Home Assistant.
+        description: Показывать итог расчёта уведомлением в Home Assistant. Уведомления об ошибках (протухшая погода, сбой расчёта или переобучения, битые сущности) приходят всегда и снимаются сами при восстановлении.
       apply_mode:
         name: Применять план к инвертору
         description: "ВЫКЛ (рекомендуется на первые 1–2 недели): только советы, в инвертор ничего не пишется. ВКЛ: после расчёта аддон записывает целевые SOC в зоны TOU инвертора и порог SOC в input_number. Записываются только изменения от 5 п.п."
@@ -399,7 +399,7 @@ translations:
         description: HH:MM local. The plan and notification are produced once a day at this time.
       notifications:
         name: Notifications
-        description: Show the plan summary as a Home Assistant notification.
+        description: Show the plan summary as a Home Assistant notification. Error alerts (stale weather, failed run or retrain, broken entities) are always sent and clear themselves on recovery.
       apply_mode:
         name: Apply plan to inverter
         description: "OFF (recommended for the first 1-2 weeks): advisory only, nothing is written. ON: after each run the add-on writes target SOCs to the inverter's TOU zones and the floor SOC to the input_number. Only changes of 5 pp or more are written."
