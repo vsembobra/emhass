@@ -1061,7 +1061,7 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) 
         starts = pd.DatetimeIndex(pd.to_datetime(hourly["starts_utc"], utc=True))
         if len(starts) != HORIZON_HOURS or starts[-1] > audit_end:
             continue  # horizon not fully observed yet
-        actual_load = audit["load_kw"].where(audit["load_filter"] == "keep").reindex(starts)
+        actual_load = audit["load_kw"].where(learning.load_target_mask(audit)).reindex(starts)
         daylight = (audit["solar_elevation_deg"].reindex(starts) > 10).fillna(False)
         actual_pv = audit["pv_measured_kw"].where(
             (audit["pv_filter"] == "keep") & daylight
@@ -1298,11 +1298,13 @@ def _hardware_note(configured: dict, learned: dict | None, applied: list[str]) -
             f" КПД цикла {battery['round_trip_efficiency']:.0%}"
         )
     geometry = learned.get("pv_geometry")
-    if geometry:
+    if geometry and geometry.get("reliable"):
         facts.append(
             f"панели {geometry['kwp']:.1f} кВтп, наклон {geometry['tilt_deg']:.0f}°, "
             f"азимут {geometry['azimuth_deg']:.0f}°"
         )
+    elif geometry:
+        facts.append(f"ориентация панелей пока не определена ({geometry.get('reason')})")
     limits = learned.get("limits") or {}
     if limits.get("max_charge_kw"):
         facts.append(f"заряд до {limits['max_charge_kw']:.1f} кВт")
@@ -1374,7 +1376,7 @@ def _fallback_load_prediction(audit: pd.DataFrame, starts: pd.DatetimeIndex, tz)
     no history at all. Bands are deliberately wide (±40/50 %) so downstream
     planning stays conservative until LightGBM takes over.
     """
-    hist = audit["load_kw"].where(audit["load_filter"] == "keep").dropna()
+    hist = audit["load_kw"].where(learning.load_target_mask(audit)).dropna()
     if len(hist):
         by_hour = hist.groupby(hist.index.tz_convert(tz).hour).mean()
         p50 = np.array(
@@ -2272,6 +2274,7 @@ def run(notify: str = "always") -> dict:
             "battery_soh_source": soh_source,
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
+            "whole_house_backup": learning.whole_house_on_backup(audit),
             "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
             "reserve_margin_hours": margin_hours,
             "tuning": tuning,

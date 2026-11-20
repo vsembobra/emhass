@@ -432,7 +432,8 @@ function renderLearning(r) {
     if (b.status === "ok") rows.push(["Батарея", b.capacity_kwh.toFixed(1) + " кВт·ч, КПД цикла " + share(b.round_trip_efficiency), "по " + b.n_segments.join("/") + " циклам"]);
     else rows.push(["Батарея", "мало глубоких циклов", esc(b.status || "—")]);
     const g = hw.pv_geometry;
-    if (g) rows.push(["Панели", g.kwp.toFixed(1) + " кВтп, наклон " + g.tilt_deg + "°, азимут " + g.azimuth_deg + "°", "ошибка " + g.mae_kw.toFixed(2) + " кВт"]);
+    if (g) rows.push(["Панели", g.kwp.toFixed(1) + " кВтп, наклон " + g.tilt_deg + "°, азимут " + g.azimuth_deg + "°",
+      g.reliable === false ? "ненадёжно: " + esc(g.reason || "") : "ошибка " + g.mae_kw.toFixed(2) + " кВт"]);
     const l = hw.limits || {};
     if (l.max_charge_kw) rows.push(["Мощность АКБ", "заряд до " + l.max_charge_kw.toFixed(1) + " кВт, разряд до " + (l.max_discharge_kw || 0).toFixed(1) + " кВт", "наблюдалось"]);
   }

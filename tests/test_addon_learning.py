@@ -202,3 +202,48 @@ def test_log_entry_records_versions_and_bundle_hash(tmp_path):
     (tmp_path / "bundle.json").write_text('{"a": 2}')
     assert first and learning.bundle_version(tmp_path) != first
     assert learning.bundle_version(tmp_path / "missing") is None
+
+
+def _house(ratio, outages=30, hours=240):
+    index = pd.date_range("2026-11-10", periods=hours, freq="h", tz="UTC")
+    audit = pd.DataFrame(
+        {
+            "load_kw": 0.6,
+            "critical_load_kw": 0.6 * ratio,
+            "raw_grid_status": "up",
+            "load_filter": "keep",
+        },
+        index=index,
+    )
+    hit = audit.index[:outages]
+    audit.loc[hit, ["raw_grid_status", "load_filter"]] = ["outage", "grid_quality"]
+    return audit
+
+
+def test_whole_house_backup_keeps_outage_hours_as_load_targets():
+    audit = _house(ratio=0.99)
+    assert learning.whole_house_on_backup(audit)
+    assert learning.load_target_mask(audit).sum() == 240  # was 210
+
+
+def test_partial_backup_still_excludes_outage_hours():
+    audit = _house(ratio=0.6)
+    assert not learning.whole_house_on_backup(audit)
+    assert learning.load_target_mask(audit).sum() == 210
+
+
+def test_whole_house_needs_enough_normal_hours_and_columns():
+    assert not learning.whole_house_on_backup(_house(ratio=1.0, outages=230))
+    assert not learning.whole_house_on_backup(pd.DataFrame({"load_kw": [1.0]}))
+    # Hours invalid for other reasons (missing load) never become targets.
+    invalid = _house(ratio=0.99)
+    invalid.loc[invalid.index[:5], "load_filter"] = "invalid_target"
+    assert not learning.load_target_mask(invalid).iloc[:5].any()
+
+
+def test_retrain_trains_on_outage_hours_of_a_whole_house_site(monkeypatch, tmp_path):
+    monkeypatch.setattr(retrain, "MODELS", tmp_path)
+    audit = _house(ratio=0.99, hours=24 * 20)
+    audit["temp_air_observed_c"] = 5.0
+    info = retrain._retrain_load(audit, {"time_zone": "UTC"})
+    assert info["train_rows"] == 24 * 20

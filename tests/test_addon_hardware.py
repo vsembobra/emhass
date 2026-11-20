@@ -70,15 +70,51 @@ def test_observed_limits_and_taper_bands():
     assert top["charge_p95_kw"] == pytest.approx(0.8, abs=0.05)
 
 
-def test_geometry_estimate_recovers_orientation():
+def _clear_days(days):
     truth = PvGeometry(45.0, 34.0, 30.0, 180.0, 5.0)
-    index = pd.date_range("2026-06-01", periods=24 * 14, freq="h", tz="UTC")
+    index = pd.date_range("2026-06-01", periods=24 * days, freq="h", tz="UTC")
     midpoint_power = clear_sky_power_kw(truth, index + pd.Timedelta(minutes=30)).to_numpy()
-    audit = pd.DataFrame({"pv_measured_kw": midpoint_power, "pv_filter": "keep"}, index=index)
-    geometry = hardware.identify_geometry(audit, 45.0, 34.0)
+    return pd.DataFrame({"pv_measured_kw": midpoint_power, "pv_filter": "keep"}, index=index)
+
+
+def test_geometry_estimate_recovers_orientation():
+    geometry = hardware.identify_geometry(_clear_days(25), 45.0, 34.0)
     assert geometry["tilt_deg"] == pytest.approx(30.0, abs=5)
     assert geometry["azimuth_deg"] == pytest.approx(180.0, abs=10)
     assert geometry["kwp"] == pytest.approx(5.0, rel=0.05)
+    assert geometry["reliable"] and geometry["relative_error"] < 0.05
+
+
+def test_geometry_from_too_few_days_is_not_reliable():
+    geometry = hardware.identify_geometry(_clear_days(14), 45.0, 34.0)
+    assert not geometry["reliable"] and "мало дней" in geometry["reason"]
+
+
+def test_cloudy_fit_is_not_reliable():
+    # Real-site case: ten cloudy November days fitted a 290 deg roof with a
+    # 0.9 kW error on a ~3 kW peak.
+    audit = _clear_days(25)
+    rng = np.random.default_rng(5)
+    # Broken clouds: every hour either clear or nearly dark.
+    audit["pv_measured_kw"] = audit["pv_measured_kw"] * rng.choice([0.05, 1.0], len(audit))
+    geometry = hardware.identify_geometry(audit, 45.0, 34.0)
+    assert not geometry["reliable"] and "ошибка подгонки" in geometry["reason"]
+
+
+def test_big_turn_against_the_configured_roof_needs_confirmation():
+    # A 3 h clock offset fits a 290 deg roof with a small error.
+    audit = _clear_days(25)
+    audit["pv_measured_kw"] = audit["pv_measured_kw"].shift(3).fillna(0.0)
+    geometry = hardware.identify_geometry(audit, 45.0, 34.0, 30.0, 180.0)
+    assert geometry["relative_error"] < 0.15
+    assert not geometry["reliable"] and "проверьте вручную" in geometry["reason"]
+    # The same estimate without a configured roof to compare against.
+    assert hardware.identify_geometry(audit, 45.0, 34.0)["reliable"]
+
+
+def test_small_correction_of_the_configured_roof_is_accepted():
+    geometry = hardware.identify_geometry(_clear_days(25), 45.0, 34.0, 25.0, 195.0)
+    assert geometry["reliable"]
 
 
 def test_geometry_needs_enough_days():
@@ -104,7 +140,13 @@ def _learned():
             "round_trip_efficiency": 0.92,
         },
         "limits": {"max_charge_kw": 6.0, "max_discharge_kw": 3.0},
-        "pv_geometry": {"tilt_deg": 20.0, "azimuth_deg": 170.0, "kwp": 6.5, "mae_kw": 0.1},
+        "pv_geometry": {
+            "tilt_deg": 20.0,
+            "azimuth_deg": 170.0,
+            "kwp": 6.5,
+            "mae_kw": 0.1,
+            "reliable": True,
+        },
         "critical_profile_kw": [0.3] * 18 + [1.2] * 6,
     }
 
@@ -122,6 +164,13 @@ def test_effective_options_apply_learned_values():
     assert effective["max_discharge_kw"] == 5.0  # observed below: never lowered
     assert effective["panel_kwp"] == 6.5
     assert len(notes) == 3
+
+
+def test_effective_options_ignore_unreliable_geometry():
+    learned = _learned()
+    learned["pv_geometry"]["reliable"] = False
+    effective, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    assert "panel_kwp" not in effective
 
 
 def test_effective_options_ignore_unconfirmed_battery():

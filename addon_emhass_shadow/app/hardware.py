@@ -7,7 +7,8 @@ Weekly, from the hourly audit:
 * sustained charge/discharge power actually observed, overall and by SOC
   band (the BMS taper near full shows up as a lower limit in the top bands);
 * PV orientation and effective kWp (:func:`emhass.pv_quantiles.estimate_geometry`
-  on the clearest uncensored days);
+  on the clearest uncensored days), marked reliable only with enough days
+  and a close fit — a grid search always returns *some* orientation;
 * the critical (backup) load profile by local hour.
 
 Everything is advisory unless the ``autotune`` option is on. Even then the
@@ -37,7 +38,11 @@ BATTERY_WINDOW_DAYS = 60
 PROFILE_WINDOW_DAYS = 30
 MIN_POWER_SAMPLES = 20
 MIN_PROFILE_SAMPLES = 5
-MIN_GEOMETRY_DAYS = 10
+MIN_GEOMETRY_DAYS = 5  # below this nothing is estimated at all
+RELIABLE_GEOMETRY_DAYS = 20  # the 10 clearest of fewer days are often cloudy
+MAX_GEOMETRY_REL_ERROR = 0.15  # fit MAE relative to the measured peak
+MAX_AZIMUTH_CHANGE_DEG = 45.0  # beyond this vs the configured roof: confirm by hand
+MAX_TILT_CHANGE_DEG = 20.0
 POWER_EPS_KW = 0.05
 SOC_BANDS = ((0.0, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01))
 RAISE_LIMIT_MARGIN = 1.1  # observed must beat the setting by 10 % to raise it
@@ -119,7 +124,13 @@ def observed_limits(audit: pd.DataFrame) -> dict:
     return out
 
 
-def identify_geometry(audit: pd.DataFrame, latitude: float, longitude: float) -> dict | None:
+def identify_geometry(
+    audit: pd.DataFrame,
+    latitude: float,
+    longitude: float,
+    configured_tilt: float | None = None,
+    configured_azimuth: float | None = None,
+) -> dict | None:
     frame = _recent(audit, BATTERY_WINDOW_DAYS)
     keep = (
         frame["pv_filter"] == "keep"
@@ -139,11 +150,43 @@ def identify_geometry(audit: pd.DataFrame, latitude: float, longitude: float) ->
         return None
     geometry = estimate["geometry"]
     best = min(estimate["scores"], key=lambda s: s["mae_kw"])
+    days = len(set(measured.index.date))
+    peak = float(measured.quantile(0.98))
+    relative = float(best["mae_kw"]) / peak if peak > 0 else float("inf")
+    # A grid search always returns *some* orientation; only a close fit on
+    # enough days is evidence. Autotune applies reliable estimates only.
+    reasons = []
+    if days < RELIABLE_GEOMETRY_DAYS:
+        reasons.append(f"мало дней с солнцем ({days} из {RELIABLE_GEOMETRY_DAYS})")
+    if relative > MAX_GEOMETRY_REL_ERROR:
+        reasons.append(f"ошибка подгонки {relative:.0%} пика")
+    # A clock offset or morning shade fits as a rotated roof with a small
+    # error, so a big change against the configured roof is never taken
+    # automatically: the owner confirms it by editing the options.
+    if configured_azimuth is not None:
+        turn = abs(
+            (float(geometry.azimuth_deg) - float(configured_azimuth) + 180.0) % 360.0 - 180.0
+        )
+        if turn > MAX_AZIMUTH_CHANGE_DEG:
+            reasons.append(
+                f"азимут {geometry.azimuth_deg:.0f}° против {configured_azimuth:.0f}° в настройках — проверьте вручную"
+            )
+    if (
+        configured_tilt is not None
+        and abs(float(geometry.tilt_deg) - float(configured_tilt)) > MAX_TILT_CHANGE_DEG
+    ):
+        reasons.append(
+            f"наклон {geometry.tilt_deg:.0f}° против {configured_tilt:.0f}° в настройках — проверьте вручную"
+        )
     return {
         "tilt_deg": float(geometry.tilt_deg),
         "azimuth_deg": float(geometry.azimuth_deg),
         "kwp": round(float(geometry.kwp), 3),
         "mae_kw": round(float(best["mae_kw"]), 4),
+        "relative_error": round(relative, 3),
+        "days": days,
+        "reliable": not reasons,
+        "reason": "; ".join(reasons) or None,
     }
 
 
@@ -171,7 +214,13 @@ def identify(audit: pd.DataFrame, opts: dict, now: datetime | None = None) -> di
         "identified_utc": (now or datetime.now(UTC)).isoformat(),
         "battery": identify_battery(audit, float(opts["capacity_kwh"])),
         "limits": observed_limits(audit),
-        "pv_geometry": identify_geometry(audit, opts["latitude"], opts["longitude"]),
+        "pv_geometry": identify_geometry(
+            audit,
+            opts["latitude"],
+            opts["longitude"],
+            opts.get("panel_tilt_deg"),
+            opts.get("panel_azimuth_deg"),
+        ),
         "critical_profile_kw": critical_profile(audit, tz),
     }
 
@@ -224,7 +273,7 @@ def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str
             effective[key] = round(float(observed), 2)
             notes.append(f"лимит {label}а {opts[key]}→{effective[key]} кВт")
     geometry = hardware.get("pv_geometry")
-    if geometry:
+    if geometry and geometry.get("reliable"):
         effective["panel_tilt_deg"] = geometry["tilt_deg"]
         effective["panel_azimuth_deg"] = geometry["azimuth_deg"]
         effective["panel_kwp"] = geometry["kwp"]

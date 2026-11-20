@@ -127,6 +127,48 @@ def log_entry(
     return entry
 
 
+# -- load targets ------------------------------------------------------------
+
+WHOLE_HOUSE_RATIO = 0.95  # backup load / total load in normal operation
+WHOLE_HOUSE_MIN_ROWS = 24
+
+
+def whole_house_on_backup(audit: pd.DataFrame) -> bool:
+    """Does the inverter's backup output carry (nearly) the whole house?
+
+    Judged on grid-up hours only: there the backup and total load sensors
+    both see normal consumption. On such sites an outage cuts nothing, so
+    outage hours still show the real consumption. On partial-backup sites
+    the unprotected loads go dark during an outage and those hours must stay
+    out of the load model — a per-hour ratio cannot tell the two apart.
+    """
+    needed = ("load_kw", "critical_load_kw", "raw_grid_status")
+    if any(column not in audit for column in needed):
+        return False
+    load = pd.to_numeric(audit["load_kw"], errors="coerce")
+    critical = pd.to_numeric(audit["critical_load_kw"], errors="coerce")
+    normal = (audit["raw_grid_status"] == "up") & (load > 0.1) & critical.notna()
+    if int(normal.sum()) < WHOLE_HOUSE_MIN_ROWS:
+        return False
+    return float((critical[normal] / load[normal]).median()) >= WHOLE_HOUSE_RATIO
+
+
+def load_target_mask(audit: pd.DataFrame) -> pd.Series:
+    """Hours usable as load-model targets (training, metrics, correction).
+
+    Clean hours always; hours excluded only for grid quality (outage or an
+    unknown grid state) too when the whole house is on the backup output —
+    with frequent outages that is a third of the history on some sites.
+    """
+    if "load_filter" not in audit:
+        return pd.Series(False, index=audit.index)
+    keep = audit["load_filter"] == "keep"
+    if whole_house_on_backup(audit):
+        load = pd.to_numeric(audit["load_kw"], errors="coerce")
+        keep = keep | ((audit["load_filter"] == "grid_quality") & load.notna())
+    return keep
+
+
 # -- issued-vs-actual pairs ---------------------------------------------------
 
 
@@ -135,9 +177,7 @@ def actual_series(audit: pd.DataFrame, target: str) -> pd.Series:
     if target == "load":
         if "load_kw" not in audit or "load_filter" not in audit:
             return pd.Series(dtype=float)
-        return pd.to_numeric(audit["load_kw"], errors="coerce").where(
-            audit["load_filter"] == "keep"
-        )
+        return pd.to_numeric(audit["load_kw"], errors="coerce").where(load_target_mask(audit))
     if any(c not in audit for c in ("pv_measured_kw", "pv_filter", "solar_elevation_deg")):
         return pd.Series(dtype=float)
     daylight = pd.to_numeric(audit["solar_elevation_deg"], errors="coerce") > 10

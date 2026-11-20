@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import hardware
+import learning
 import numpy as np
 import pandas as pd
 import pipeline
@@ -262,9 +263,10 @@ def _retrain_load(
         # forecast the daily plan feeds in.
         grid["temp_forecast_c"] = weather["temperature_2m_previous_day1"].reindex(grid.index)
     load = pd.to_numeric(audit["load_kw"], errors="coerce")
-    # Only rows the audit marked clean are training targets; outage and
-    # invalid hours would teach the model the wrong consumption pattern.
-    grid["load_kw"] = load.where(audit["load_filter"] == "keep")
+    # Only clean rows are training targets; outage hours would teach the
+    # wrong consumption pattern — unless the whole house is on the backup
+    # output, where an outage cuts nothing (learning.load_target_mask).
+    grid["load_kw"] = load.where(learning.load_target_mask(audit))
     weights = recency_weights(grid.index)
     start = _holdout_start(grid.index, champion.trained_until if champion else None)
     pre, holdout = grid.loc[: start - HOUR], grid.loc[start:]
