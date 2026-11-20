@@ -407,6 +407,11 @@ def run_plan(
     soc_opt = [float(v) for v in result["SOC_opt"]]
     p_grid = [float(v) for v in result["P_grid_pos"]] if "P_grid_pos" in result else None
     p_batt = [float(v) for v in result["P_batt"]] if "P_batt" in result else None
+    p_curtail = (
+        [max(0.0, float(v)) for v in result["P_PV_curtailment"]]
+        if "P_PV_curtailment" in result
+        else None
+    )
     # cost_profit is revenue minus spend, so money spent is its negation.
     spent_plan = -float(result["cost_profit"].sum())
 
@@ -450,6 +455,7 @@ def run_plan(
         "soc_opt": [round(s, 4) for s in soc_opt],
         "p_grid_kw": [round(v / 1000.0, 3) for v in p_grid] if p_grid else None,
         "p_batt_kw": [round(v / 1000.0, 3) for v in p_batt] if p_batt else None,
+        "p_curtail_kw": [round(v / 1000.0, 3) for v in p_curtail] if p_curtail else None,
         "cost_plan": round(spent_plan, 2),
         "cost_baseline": round(spent_baseline, 2) if spent_baseline is not None else None,
         "savings": (

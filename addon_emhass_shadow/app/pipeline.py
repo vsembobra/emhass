@@ -24,11 +24,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import certifi
+import deferrable
 import hardware
 import learning
 import numpy as np
 import optimize
 import pandas as pd
+import policy
 
 from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
@@ -855,6 +857,81 @@ def _retrain_note() -> str | None:
     )
 
 
+def autonomy(
+    soc: float, min_soc: float, capacity_kwh: float, discharge_efficiency: float, critical_kw: float
+) -> float | None:
+    """Hours the battery carries the critical load from now, grid off, no sun."""
+    if critical_kw <= 0.05 or capacity_kwh <= 0:
+        return None
+    return max(0.0, soc - min_soc) * capacity_kwh * discharge_efficiency / critical_kw
+
+
+def _deferrable_line(item: dict) -> str:
+    if not item.get("start_local"):
+        return f"• {item['name']}: {item.get('reason', 'нет окна')}"
+    if not item["sunny"]:
+        return (
+            f"• {item['name']}: солнечного окна нет, лучшее {item['start_local']}–{item['end_local']} "
+            f"(солнце {item['solar_share']:.0%})"
+        )
+    line = (
+        f"• {item['name']}: включить {item['start_local']}–{item['end_local']} "
+        f"(на солнце {item['solar_share']:.0%}"
+    )
+    if item["free_solar_kwh"] >= 0.1:
+        line += f", из них {item['free_solar_kwh']:.1f} кВт·ч ушли бы в усечение"
+    return line + ")"
+
+
+def ha_post_state(entity_id: str, state, attributes: dict) -> None:
+    """Create/update a Home Assistant state (not a device write)."""
+    request = urllib.request.Request(
+        f"{HA_BASE}/api/states/{entity_id}",
+        data=json.dumps({"state": state, "attributes": attributes}, default=_json_default).encode(),
+        headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=30):
+        pass
+
+
+def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
+    """Expose the plan as sensors for the owner's automations; never raises."""
+    advisory = report["advisory"]
+    sensors = [
+        (
+            "sensor.emhass_shadow_floor_soc",
+            round(advisory["recommended_floor_soc"] * 100),
+            {
+                "unit_of_measurement": "%",
+                "friendly_name": "EMHASS Shadow: рекомендуемый пол SOC",
+                "profile": [step["floor_soc"] for step in advisory["floor_profile"]],
+                "issue_utc": report["issue_utc"],
+            },
+        ),
+        (
+            "sensor.emhass_shadow_autonomy_hours",
+            advisory["autonomy_hours"] if advisory["autonomy_hours"] is not None else "unknown",
+            {"unit_of_measurement": "h", "friendly_name": "EMHASS Shadow: автономия батареи"},
+        ),
+    ]
+    for item in flexible:
+        sensors.append(
+            (
+                f"sensor.emhass_shadow_{item['slug']}_start",
+                item.get("start_local") or "unknown",
+                {"friendly_name": f"EMHASS Shadow: {item['name']} — старт", **item},
+            )
+        )
+    published = []
+    for entity_id, state, attributes in sensors:
+        try:
+            ha_post_state(entity_id, state, attributes)
+            published.append(entity_id)
+        except Exception:
+            continue
+    return published
+
+
 def _hardware_note(configured: dict, learned: dict | None, applied: list[str]) -> str | None:
     """One notification line: what the data says about the hardware."""
     if not learned:
@@ -1308,7 +1385,7 @@ def run() -> dict:
         cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
         cold_start_hours=min(20.0, max(1.0, float(opts.get("reserve_cold_start_hours", 2.0)))),
         window_days=14.0,
-        quantile=0.9,
+        quantile=policy.priority(opts)["reserve_quantile"],
         margin=0.0,
         decay_days=1.0e6,  # owner rule: hold 14 days, no gradual reduction
         profile_mode="all_hours",
@@ -1322,12 +1399,21 @@ def run() -> dict:
         and pd.notna(row["critical_load_kw"])
     ]
     plan = calculate_reserve(issue, events, observations, settings)
+    # The to-sunrise deficit is sized on the quantiles the priority (and,
+    # with autotune, the replay tuner) selects; the outage reserve below
+    # always stays on pessimistic PV.
+    deficit_mode = policy.default_deficit_mode(opts)
+    deficit_load, deficit_pv = policy.deficit_inputs(
+        deficit_mode,
+        {q: load_prediction[f"load_{q}_kw"].to_numpy() for q in ("p10", "p50", "p90")},
+        {"p10": pv_p10, "p50": pv_p50, "p90": pv_p90},
+    )
     steps = [
         ForecastStep(
             start=starts_plan[i].to_pydatetime(),
             hours=1.0,
-            pv_p10_kw=pv_p10[i],
-            load_p90_kw=float(load_prediction["load_p90_kw"].iloc[i]),
+            pv_p10_kw=float(deficit_pv[i]),
+            load_p90_kw=float(deficit_load[i]),
         )
         for i in range(PLAN_HOURS)
     ]
@@ -1444,6 +1530,24 @@ def run() -> dict:
             )
         except Exception:
             optimizer_plan = None
+
+    # Flexible loads: the best start inside each load's window, on the sun
+    # the plan expects to curtail first, then on plain surplus.
+    load_p50_day = load_prediction["load_p50_kw"].to_numpy()[:HORIZON_HOURS]
+    surplus = np.maximum(np.asarray(pv_p50[:HORIZON_HOURS]) - load_p50_day, 0.0)
+    curtail = (
+        (optimizer_plan or {}).get("p_curtail_kw") or [0.0] * PLAN_HOURS
+    )[:HORIZON_HOURS]
+    flexible = deferrable.recommend(
+        list(opts.get("deferrable_loads") or []), starts, tz, curtail, surplus
+    )
+    autonomy_hours = autonomy(
+        float(battery_now) / 100.0,
+        _soc_bounds(opts)[0],
+        float(opts["capacity_kwh"]) * soh,
+        settings.discharge_efficiency,
+        plan.critical_load_kw,
+    )
 
     # Apply mode (off by default): write the plan into the inverter through
     # Home Assistant services. Optimizer zone targets win when available,
@@ -1678,6 +1782,13 @@ def run() -> dict:
     hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
     if hardware_note is not None:
         lines.append(hardware_note)
+    if autonomy_hours is not None:
+        lines.append(
+            f"• Автономия сейчас: ~{autonomy_hours:.1f} ч критической нагрузки "
+            f"({plan.critical_load_kw:.2f} кВт)"
+        )
+    for item in flexible:
+        lines.append(_deferrable_line(item))
     learning_note = _self_learning_note(calibrations, drift)
     if learning_note is not None:
         lines.append(learning_note)
@@ -1703,6 +1814,8 @@ def run() -> dict:
             "battery_soh_source": soh_source,
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
+            "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
+            "deficit_mode": deficit_mode,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
             "hardware": {
                 "learned": learned_hardware,
@@ -1761,6 +1874,8 @@ def run() -> dict:
             "delta_pp": delta_pp,
             "programs": programs,
             "would_raise_zones": would_raise,
+            "deferrable": flexible,
+            "autonomy_hours": None if autonomy_hours is None else round(autonomy_hours, 2),
             "optimizer": optimizer_plan,
             "applied": applied,
             "apply_errors": apply_errors,
@@ -1796,6 +1911,11 @@ def run() -> dict:
         pass
 
     report["data"]["metrics_scored_days"] = metrics_scored
+
+    published: list[str] = []
+    if opts.get("publish_sensors", False):
+        published = publish_sensors(report, flexible, tz)
+    report["data"]["published_sensors"] = published
 
     if opts.get("notifications", True):
         ha_service(

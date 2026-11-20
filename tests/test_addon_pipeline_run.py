@@ -127,3 +127,28 @@ def test_learned_hardware_is_advice_only_without_autotune(fake_site):
     assert report["data"]["battery_soh_source"] == "default"
     assert report["data"]["hardware"]["applied"] == []
     assert "только совет" in report["notification"]
+
+
+def test_priority_flexible_loads_and_sensors(fake_site, monkeypatch):
+    posted = {}
+    monkeypatch.setattr(
+        pipeline, "ha_post_state", lambda entity, state, attrs: posted.update({entity: state})
+    )
+    fake_site["setup"](
+        priority_mode="resilience",
+        publish_sensors=True,
+        deferrable_loads=[{"name": "Boiler", "power_kw": 2.0, "hours": 2}],
+    )
+    report = pipeline.run()
+    assert report["data"]["priority_mode"] == "resilience"
+    assert report["data"]["deficit_mode"] == "conservative"
+    (item,) = report["advisory"]["deferrable"]
+    assert item["start_local"] is not None
+    assert "Boiler" in report["notification"]
+    assert "Автономия сейчас" in report["notification"]
+    assert set(posted) == {
+        "sensor.emhass_shadow_floor_soc",
+        "sensor.emhass_shadow_autonomy_hours",
+        "sensor.emhass_shadow_boiler_start",
+    }
+    assert report["data"]["published_sensors"] == sorted(posted, key=list(posted).index)
