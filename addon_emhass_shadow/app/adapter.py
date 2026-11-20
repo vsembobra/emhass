@@ -71,29 +71,41 @@ def select_option(
 
     Explicit overrides win when they are valid options. Otherwise the names
     are recognised: "Grid" for on, "Disabled"/"Off" for off. A zone that
-    also charges from a generator keeps it ("Grid & Gen" / "Gen"), so
-    toggling grid charging never silently drops generator charging. None
-    when no option fits (the caller reports it instead of guessing).
+    also charges from a generator keeps it — Deye names that "Both" (grid +
+    generator), other integrations "Grid & Gen" — so toggling grid charging
+    never silently drops generator charging. None when no option fits (the
+    caller reports it instead of guessing).
     """
     options = [str(o) for o in options or []]
     override = on_override if desired else off_override
     if override:
         return override if override in options else None
-    low = {o: o.lower() for o in options}
-    with_gen = current is not None and "gen" in str(current).lower()
+    low = {o: o.lower().strip() for o in options}
+
+    def grid_and_gen(name: str) -> bool:
+        return name == "both" or ("grid" in name and "gen" in name)
+
+    def gen_only(name: str) -> bool:
+        return "gen" in name and not grid_and_gen(name) and "grid" not in name
+
+    now = str(current or "").lower().strip()
+    with_gen = grid_and_gen(now) or gen_only(now)
     if desired:
-        grid = [o for o in options if "grid" in low[o] or "сеть" in low[o]]
         if with_gen:
-            both = [o for o in grid if "gen" in low[o]]
+            both = [o for o in options if grid_and_gen(low[o])]
             if both:
                 return both[0]
-        only = [o for o in grid if "gen" not in low[o]]
-        exact = [o for o in only if low[o] in ("grid", "сеть")]
-        return (exact or only or [None])[0]
+        grid = [
+            o
+            for o in options
+            if ("grid" in low[o] or "сеть" in low[o]) and not grid_and_gen(low[o])
+        ]
+        exact = [o for o in grid if low[o] in ("grid", "сеть")]
+        return (exact or grid or [None])[0]
     if with_gen:
-        gen_only = [o for o in options if "gen" in low[o] and "grid" not in low[o]]
-        if gen_only:
-            return gen_only[0]
+        gen = [o for o in options if gen_only(low[o])]
+        if gen:
+            return gen[0]
     off = [o for o in options if low[o].strip() in OFF_WORDS]
     return off[0] if off else None
 

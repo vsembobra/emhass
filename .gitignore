@@ -178,3 +178,7 @@ docs/EMHASS_presentation.pdf
 # to the HA add-on store (deploy.sh re-syncs it from src/emhass each deploy).
 addon_emhass_shadow/models/*
 !addon_emhass_shadow/models/.gitkeep
+
+# Home Assistant exports (private site data)
+ha_states.json
+ha_history*.json

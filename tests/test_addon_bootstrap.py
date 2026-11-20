@@ -231,7 +231,8 @@ def test_outage_log_backfill_reads_recorder_depth_in_chunks(monkeypatch, tmp_pat
     ent = {"grid_binary": "binary_sensor.grid", "mean_sensors": {"load_kw": ("sensor.load", 0.001)}}
     pipeline.update_outage_log(ent, hours=240)
     assert len(calls) == 4  # 10 days in 3-day chunks
-    assert all("sensor.load" not in c[2] for c in calls)  # skip the chatty load sensor
+    # The load sensor is the heartbeat on sites without sensor.time.
+    assert all("sensor.load" in c[2] for c in calls)
     calls.clear()
     pipeline.update_outage_log(ent)
     assert len(calls) == 1 and "sensor.load" in calls[0][2]

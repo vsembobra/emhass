@@ -825,8 +825,7 @@ def update_outage_log(ent, hours: float = 48.0) -> int:
 
     The daily run looks back 48 h; a fresh install (or the backfill button)
     passes the recorder depth so past outages count at once. Long ranges
-    are fetched in chunks and skip the chatty load sensor (sensor.time or
-    sun.sun prove the recorder was alive).
+    are fetched in chunks.
     """
     grid_binary = str(ent.get("grid_binary") or "").strip()
     if not grid_binary:
@@ -834,7 +833,9 @@ def update_outage_log(ent, hours: float = 48.0) -> int:
     now = datetime.now(UTC)
     fetch_entities = [grid_binary, "sensor.time", "sun.sun"]
     load = ent.get("mean_sensors", {}).get("load_kw")
-    if hours <= 72 and load and load[0] not in fetch_entities:
+    # The load sensor is the heartbeat on sites without sensor.time (sun.sun
+    # changes only twice a day): chatty, but read in chunks.
+    if load and load[0] not in fetch_entities:
         fetch_entities.append(load[0])
     history: dict[str, list[dict]] = {}
     cursor = now - timedelta(hours=hours)

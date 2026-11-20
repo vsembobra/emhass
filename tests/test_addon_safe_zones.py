@@ -93,6 +93,24 @@ def test_select_option_recognises_deye_names(desired, current, expected):
     )
 
 
+DEYE_SOLARMAN = ["Disabled", "Grid", "Generator", "Both"]  # this site's real options
+
+
+@pytest.mark.parametrize(
+    ("desired", "current", "expected"),
+    [
+        (True, "Disabled", "Grid"),
+        (False, "Grid", "Disabled"),
+        (True, "Generator", "Both"),  # generator charging is kept
+        (False, "Both", "Generator"),
+        (True, "Both", "Both"),
+        (False, "Generator", "Generator"),
+    ],
+)
+def test_select_option_on_deye_solarman_names(desired, current, expected):
+    assert adapter.select_option(desired, current, DEYE_SOLARMAN) == expected
+
+
 def test_select_option_overrides_and_unknown_names():
     options = ["Нет", "Сеть", "Ген"]
     assert adapter.select_option(True, "Нет", options) == "Сеть"
