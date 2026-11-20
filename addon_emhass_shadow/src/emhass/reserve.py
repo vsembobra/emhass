@@ -42,6 +42,7 @@ class ReserveSettings:
     profile_mode: Literal["all_hours", "historical_hours"] = "all_hours"
     site_timezone: str = "UTC"
     scheduled_precharge_hours: float = 2.0
+    flap_gap_hours: float = 0.5
 
     def __post_init__(self) -> None:
         for name in (
@@ -57,6 +58,7 @@ class ReserveSettings:
             "margin",
             "decay_days",
             "scheduled_precharge_hours",
+            "flap_gap_hours",
         ):
             finite_number(getattr(self, name), name)
         if self.nominal_capacity_kwh == 0 or not 0 < self.soh <= 1:
@@ -119,10 +121,18 @@ class ReservePlan:
 
 def _merge_intervals(
     intervals: Iterable[tuple[datetime, datetime]],
+    gap: timedelta = timedelta(0),
 ) -> list[tuple[datetime, datetime]]:
+    """Merge overlapping intervals, and those separated by less than ``gap``.
+
+    For outages ``gap`` is ``flap_gap_hours``: a grid back for a few minutes
+    stops the drain but does not refill the battery, so a flapping grid is
+    one long outage for the reserve, not many short ones that drag the
+    duration quantile down.
+    """
     merged: list[tuple[datetime, datetime]] = []
     for start, end in sorted(intervals):
-        if merged and start < merged[-1][1]:
+        if merged and start - merged[-1][1] < gap:
             first, previous_end = merged[-1]
             merged[-1] = (first, max(previous_end, end))
         else:
@@ -213,7 +223,7 @@ def calculate_reserve(
             measured.append((start, end))
         elif event.source == "scheduled" and end > now:
             announced.append((start, end))
-    history = _merge_intervals(measured)
+    history = _merge_intervals(measured, timedelta(hours=settings.flap_gap_hours))
     durations = [(end - start).total_seconds() / 3600 for start, end in history]
     duration = settings.cold_start_hours
     if durations:

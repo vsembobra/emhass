@@ -108,3 +108,25 @@ def test_naive_times_and_bad_physical_parameters_are_rejected():
         calculate_reserve(NOW.replace(tzinfo=None), [], [], settings())
     with pytest.raises(ValueError, match="efficiency"):
         ReserveSettings(12.5, 1, 0.1, 0.9, 0, 1)
+
+
+def _flapping(gap_minutes):
+    """Three 50-minute outages with the grid back for ``gap_minutes`` between them."""
+    events, end = [], NOW
+    for _ in range(3):
+        events.append(OutageEvent(end - timedelta(minutes=50), end, "measured"))
+        end -= timedelta(minutes=50 + gap_minutes)
+    return events
+
+
+def test_a_flapping_grid_counts_as_one_long_outage():
+    # Back for 10 minutes: the battery is not refilled, the drain only pauses.
+    plan = calculate_reserve(NOW, _flapping(10), [], settings())
+    assert plan.duration_hours == pytest.approx(170 / 60)
+
+
+def test_outages_apart_by_half_an_hour_or_more_stay_separate():
+    plan = calculate_reserve(NOW, _flapping(30), [], settings())
+    assert plan.duration_hours == pytest.approx(50 / 60)
+    glued = calculate_reserve(NOW, _flapping(30), [], settings(flap_gap_hours=1.0))
+    assert glued.duration_hours == pytest.approx(210 / 60)

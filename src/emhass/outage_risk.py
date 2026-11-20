@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from emhass.reserve import _quantile, utc_time
+from emhass.reserve import _merge_intervals, _quantile, utc_time
 
 if TYPE_CHECKING:
     pass
@@ -67,11 +67,15 @@ def outage_risk_profile(
     min_days: float = MIN_DAYS_OBSERVED,
     risk_ratio: float = 2.0,
     min_probability: float = 0.05,
+    flap_gap_hours: float = 0.5,
 ) -> OutageRiskProfile | None:
     """Build the hourly risk profile, or None when the journal is too sparse.
 
     Only finished, uninterrupted, measured outages count: scheduled
     announcements and still-open events say nothing about typical timing.
+    Durations glue outages the grid interrupted for less than
+    ``flap_gap_hours`` (see :func:`emhass.reserve._merge_intervals`); the
+    count and the hourly profile keep every recorded outage.
     """
     now = utc_time(at)
     zone = ZoneInfo(site_timezone)
@@ -90,9 +94,11 @@ def outage_risk_profile(
         return None
 
     totals = [0.0] * 24
-    durations = []
+    durations = [
+        (end - start).total_seconds() / 3600
+        for start, end in _merge_intervals(intervals, timedelta(hours=flap_gap_hours))
+    ]
     for start, end in intervals:
-        durations.append((end - start).total_seconds() / 3600)
         for hour, weight in _hour_weights(start, end, zone):
             totals[hour] += weight
     hourly = tuple(total / days_observed for total in totals)

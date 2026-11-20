@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from emhass.outage_log import OutageEvent
 from emhass.outage_risk import outage_risk_profile
 
@@ -58,3 +60,16 @@ def test_hour_weights_split_across_local_midnight():
     assert profile.hourly_probability[23] > 0
     assert profile.hourly_probability[0] > 0
     assert profile.hourly_probability[1] > 0
+
+
+def test_flapping_outages_glue_for_the_duration_only():
+    events = []
+    for i in range(10):
+        first = _outage(NOW - timedelta(days=40 - 4 * i), 18, 1.0)
+        # The grid returns for 10 minutes, then fails for another hour.
+        second_start = first.end + timedelta(minutes=10)
+        second = OutageEvent(second_start, second_start + timedelta(hours=1), "measured", False)
+        events += [first, second]
+    profile = outage_risk_profile(events, NOW, TZ)
+    assert profile.duration_p90_hours == pytest.approx(2 + 10 / 60)
+    assert profile.outages_count == 20  # every recorded outage still counts
