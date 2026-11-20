@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 import pvlib
 
-from emhass.load_quantiles import QUANTILE_LABELS, QUANTILES
+from emhass.load_quantiles import QUANTILE_LABELS, QUANTILES, _row_weights
 
 MODEL_VERSION = "pv-quantiles-1"
 
@@ -227,8 +227,12 @@ class PvQuantileBundle:
         ratio_max: float = 1.2,
         min_clearsky_kw: float = 0.1,
         params: dict | None = None,
+        sample_weight: pd.Series | None = None,
     ) -> PvQuantileBundle:
-        """Fit ratio quantiles on rows with a meaningful clear-sky denominator."""
+        """Fit ratio quantiles on rows with a meaningful clear-sky denominator.
+
+        ``sample_weight`` (indexed like ``frame``) weights the training rows.
+        """
         lgb = _lightgbm()
         if frame.index.tz is None:
             raise ValueError("frame must be indexed by timezone-aware timestamps")
@@ -240,11 +244,12 @@ class PvQuantileBundle:
         ratio = (target[usable] / clearsky[usable]).clip(0, ratio_max)
         if len(ratio) < 24:
             raise ValueError("at least 24 usable daylight rows are required")
+        weights = _row_weights(sample_weight, frame.index, usable)
         merged = {**DEFAULT_LGB_PARAMS, **(params or {})}
         x_train = features.loc[usable, list(DEFAULT_FEATURES)]
         for alpha in QUANTILES:
             booster = lgb.LGBMRegressor(alpha=alpha, **merged)
-            booster.fit(x_train, ratio.to_numpy())
+            booster.fit(x_train, ratio.to_numpy(), sample_weight=weights)
             bundle.boosters[alpha] = booster
         bundle.trained_from = frame.index[0].isoformat()
         bundle.trained_until = frame.index[-1].isoformat()

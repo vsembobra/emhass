@@ -69,6 +69,7 @@ def run_backfill() -> None:
             "latitude": opts["latitude"],
             "longitude": opts["longitude"],
             "time_zone": opts["time_zone"],
+            "max_charge_kw": opts.get("max_charge_kw"),
         }
         ent = pipeline.resolve_entities(opts)
         days = float(opts.get("history_backfill_days", 14))

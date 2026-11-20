@@ -23,9 +23,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import adapter
 import certifi
+import deferrable
+import hardware
+import learning
 import numpy as np
+import optimize
 import pandas as pd
+import policy
+import tuner
 
 from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
@@ -55,7 +62,6 @@ MEAN_SENSOR_FIELDS = {
     "grid_power_kw_raw_sign": ("entity_grid_power", 0.001),
     "temp_air_observed_c": ("entity_outdoor_temperature", 1.0),
 }
-TOU_ZONES = 6
 
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
@@ -67,9 +73,10 @@ def options() -> dict:
 def resolve_entities(opts: dict) -> dict:
     """Entity map: every HA entity id comes from the add-on options.
 
-    TOU zone entities use templates with {n} (zone number, 1..6) so a
-    different naming scheme is one string instead of twelve.
+    TOU zone entities use templates with {n} (zone number, 1..tou_zones)
+    so a different naming scheme is one string instead of twelve.
     """
+    caps = adapter.caps(opts)
     return {
         "mean_sensors": {
             field: (opts[key], scale)
@@ -84,11 +91,12 @@ def resolve_entities(opts: dict) -> dict:
             else {}
         ),
         "tou_soc": [
-            opts["tou_soc_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+            opts["tou_soc_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
         ],
         "tou_time": [
-            opts["tou_time_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+            opts["tou_time_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
         ],
+        "tou_grid_charge": caps.grid_charge_entities(),
         "floor_input": opts["floor_input_entity"],
     }
 
@@ -248,7 +256,84 @@ def grid_status_series(states):
     return series
 
 
-def build_audit_rows(history, hours, latitude, longitude, ent):
+CURTAIL_FULL_SOC = 0.95  # battery full: nothing absorbs a PV surplus
+CURTAIL_TAPER_SOC = 0.90  # BMS tapers charge current near full
+CURTAIL_SATURATION = 0.9  # share of max charge power counted as "charging flat out"
+FLOW_EPS_KW = 0.05  # hourly mean power below this is "no flow"
+
+
+def _finite(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def pv_sink_limited(
+    soc_mean, export_kwh, battery_kw, grid_kw, max_charge_kw=None
+) -> bool:
+    """Whether measured PV was likely throttled for lack of a sink.
+
+    With feed-in closed the inverter caps PV at load + battery charge, so
+    measured PV is only a lower bound of what the array could produce.
+    Exporting means a sink existed, so the hour is never flagged then;
+    otherwise three signatures (sign convention: battery < 0 charging,
+    grid > 0 importing):
+
+    * battery full (SOC >= 95 %);
+    * charge taper: SOC >= 90 %, battery charging, no grid import — the BMS
+      limits the current, the surplus above it is throttled;
+    * charge saturation: battery charging at >= 90 % of max_charge_kw with
+      no grid import — load + max charge is the ceiling.
+
+    On a no-export site export is always 0, so the former rule
+    (SOC >= 95 % and no export) missed the taper and saturation hours; they
+    reached the PV model as "cloudy" rows and pulled the forecast down.
+    Values may be None/NaN (unknown): an unknown export never flags.
+    """
+    soc = _finite(soc_mean)
+    export = _finite(export_kwh)
+    if soc is None or export is None or export > 0.01:
+        return False
+    if soc >= CURTAIL_FULL_SOC:
+        return True
+    battery = _finite(battery_kw)
+    charging_kw = -battery if battery is not None and battery < 0 else 0.0
+    grid = _finite(grid_kw)
+    if charging_kw <= FLOW_EPS_KW or (grid is not None and grid > FLOW_EPS_KW):
+        return False
+    if soc >= CURTAIL_TAPER_SOC:
+        return True
+    limit = _finite(max_charge_kw)
+    return bool(limit) and charging_kw >= CURTAIL_SATURATION * limit
+
+
+def pv_sink_limited_mask(audit: pd.DataFrame, max_charge_kw=None) -> pd.Series:
+    """pv_sink_limited over stored audit rows (columns may be absent)."""
+
+    def column(name: str) -> pd.Series:
+        if name in audit:
+            return audit[name]
+        return pd.Series(np.nan, index=audit.index)
+
+    return pd.Series(
+        [
+            pv_sink_limited(soc, export, battery, grid, max_charge_kw)
+            for soc, export, battery, grid in zip(
+                column("soc_mean"),
+                column("export_kwh"),
+                column("battery_power_kw_raw_sign"),
+                column("grid_power_kw_raw_sign"),
+                strict=True,
+            )
+        ],
+        index=audit.index,
+        dtype=bool,
+    )
+
+
+def build_audit_rows(history, hours, latitude, longitude, ent, max_charge_kw=None):
     means = {
         field: numeric_samples(history.get(entity, []), scale)
         for field, (entity, scale) in ent["mean_sensors"].items()
@@ -318,11 +403,12 @@ def build_audit_rows(history, hours, latitude, longitude, ent):
             row["pv_filter"] = "outside_daylight"
             row["possible_pv_curtailment"] = False
         else:
-            curtailment = (
-                row["soc_mean"] is not None
-                and row["soc_mean"] >= 0.95
-                and row["export_kwh"] is not None
-                and row["export_kwh"] <= 0.01
+            curtailment = pv_sink_limited(
+                row["soc_mean"],
+                row["export_kwh"],
+                row.get("battery_power_kw_raw_sign"),
+                row.get("grid_power_kw_raw_sign"),
+                max_charge_kw,
             )
             row["possible_pv_curtailment"] = bool(curtailment)
             if row["pv_measured_kw"] is None:
@@ -370,7 +456,14 @@ def _rows_for_hours(site, ent, hours: list) -> list[dict]:
         chunk_hours = [h for h in hours if cursor <= h < chunk_end]
         history = fetch_history(cursor, chunk_end, entities)
         rows.extend(
-            build_audit_rows(history, chunk_hours, site["latitude"], site["longitude"], ent)
+            build_audit_rows(
+                history,
+                chunk_hours,
+                site["latitude"],
+                site["longitude"],
+                ent,
+                max_charge_kw=site.get("max_charge_kw"),
+            )
         )
         cursor = chunk_end
     return rows
@@ -571,7 +664,7 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={site['latitude']}&longitude={site['longitude']}"
-        f"&hourly={variables}&forecast_hours=48&timezone=UTC&timeformat=unixtime"
+        f"&hourly={variables}&past_hours=48&forecast_hours=48&timezone=UTC&timeformat=unixtime"
     )
     archive = DATA / "weather_archive"
     archive.mkdir(exist_ok=True)
@@ -592,6 +685,49 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
     frame = pd.DataFrame(payload["hourly"])
     frame["start_utc"] = pd.to_datetime(frame.pop("time"), unit="s", utc=True)
     return frame.set_index("start_utc").sort_index(), received + ".json", stale
+
+
+def forecast_load(
+    bundle: LoadQuantileBundle,
+    audit: pd.DataFrame,
+    starts_plan: pd.DatetimeIndex,
+    issue: datetime,
+    weather: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Causal 48 h load quantiles: day 1 direct, day 2 recursive.
+
+    The model's 24 h features (load lag/rolling mean, temperature lag) for
+    day 2 read day-1 hours, which are still in the future at issue time.
+    Left as NaN — a value never seen in training — they degraded day 2 to a
+    calendar + lag-168 guess, and day 2 is what drives tonight's charging.
+    Day-1 P50 stands in for the missing load actuals, the weather forecast
+    for the missing temperatures.
+
+    Temperature gaps (no outdoor sensor, sensor outages) are filled from
+    Open-Meteo on the whole grid: the fetch carries past hours, so day 1's
+    temp lag reads the recent past too, matching training, which fills the
+    same gaps from the previous-runs archive. Observed values always win.
+    """
+    day1_index = starts_plan[:HORIZON_HOURS]
+    day2_index = starts_plan[HORIZON_HOURS:]
+    grid = audit.reindex(columns=["temp_air_observed_c", "load_kw"]).apply(
+        pd.to_numeric, errors="coerce"
+    )
+    grid = grid.reindex(grid.index.union(starts_plan))
+    if weather is not None and "temperature_2m" in weather:
+        forecast_temp = pd.to_numeric(weather["temperature_2m"], errors="coerce").reindex(grid.index)
+        grid["temp_air_observed_c"] = grid["temp_air_observed_c"].fillna(forecast_temp)
+        # As-of forecast for the target hour (used by lead-aware bundles that
+        # opted into forecast_temperature; ignored by older ones).
+        grid["temp_forecast_c"] = forecast_temp
+    day1 = bundle.predict(grid.loc[: day1_index[-1]], issue_time=issue).loc[day1_index]
+    if not len(day2_index):
+        return day1
+    grid.loc[day1_index, "load_kw"] = day1["load_p50_kw"].to_numpy()
+    day2 = bundle.predict(
+        grid, issue_time=issue + pd.Timedelta(hours=HORIZON_HOURS)
+    ).loc[day2_index]
+    return pd.concat([day1, day2])
 
 
 def load_outage_events() -> list[OutageEvent]:
@@ -630,7 +766,34 @@ def _score(actual: pd.Series, p10: list, p50: list, p90: list) -> dict | None:
     }
 
 
-def update_metrics(audit: pd.DataFrame, tz: ZoneInfo) -> int:
+def hindsight_import(
+    report: dict, audit: pd.DataFrame, starts: pd.DatetimeIndex, opts: dict
+) -> float | None:
+    """Grid import the same plan would have needed with perfect forecasts.
+
+    Re-solves the day with the measured load and PV, the same starting SOC
+    and floors. planned -> hindsight is the cost of forecast error,
+    hindsight -> metered is the cost of execution (the inverter or the
+    zone translation not following the plan).
+    """
+    load = pd.to_numeric(audit["load_kw"], errors="coerce").reindex(starts)
+    pv = pd.to_numeric(audit["pv_measured_kw"], errors="coerce").reindex(starts)
+    soc = pd.to_numeric(audit["soc_mean"], errors="coerce").reindex(starts[:1])
+    if load.isna().sum() > 4 or pv.isna().sum() > 4 or soc.isna().all():
+        return None
+    hourly = report["hourly"]
+    load = load.fillna(pd.Series(hourly["load_p50_kw"], index=starts))
+    pv = pv.fillna(pd.Series(hourly["pv_p50_kw"], index=starts))
+    floors = [step["floor_soc"] for step in report["advisory"]["floor_profile"]]
+    plan = optimize.run_plan(
+        starts, list(pv), list(load), floors, float(soc.iloc[0]), [], opts
+    )
+    if plan is None or not plan.get("p_grid_kw"):
+        return None
+    return round(sum(max(0.0, float(v)) for v in plan["p_grid_kw"]), 2)
+
+
+def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) -> int:
     """Score fully observed past reports against audit actuals, append once."""
     entries = []
     if METRICS.exists():
@@ -674,12 +837,21 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo) -> int:
         if plan_grid and len(plan_grid) >= HORIZON_HOURS:
             actual_import = audit["grid_power_kw_raw_sign"].reindex(starts).clip(lower=0.0)
             if actual_import.notna().sum() >= 20:
-                entry["plan_vs_fact"] = {
-                    "planned_grid_kwh": round(
-                        sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS]), 2
-                    ),
-                    "actual_grid_kwh": round(float(actual_import.sum()), 2),
-                }
+                planned = round(sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS]), 2)
+                actual = round(float(actual_import.sum()), 2)
+                entry["plan_vs_fact"] = {"planned_grid_kwh": planned, "actual_grid_kwh": actual}
+                hindsight = None
+                if opts is not None:
+                    try:
+                        hindsight = hindsight_import(report, audit, starts, opts)
+                    except Exception:
+                        hindsight = None
+                if hindsight is not None:
+                    entry["plan_vs_fact"].update(
+                        hindsight_grid_kwh=hindsight,
+                        forecast_effect_kwh=round(hindsight - planned, 2),
+                        execution_effect_kwh=round(actual - hindsight, 2),
+                    )
         entries.append(entry)
         added += 1
     if added:
@@ -710,8 +882,11 @@ def _retrain_note() -> str | None:
         return None
 
     def fmt(info: dict) -> str:
-        if info.get("status") == "ok":
-            return f"ok ({info.get('train_rows', '?')} строк)"
+        status = info.get("status")
+        if status in ("ok", "promoted"):
+            return f"обновлена ({info.get('train_rows', '?')} строк)"
+        if status == "kept":
+            return f"оставлена текущая — {info.get('reason', '')}"
         return f"ошибка: {info.get('error', '?')[:80]}"
 
     models = state.get("models", {})
@@ -719,6 +894,155 @@ def _retrain_note() -> str | None:
         f"• Переобучение моделей: нагрузка — {fmt(models.get('load', {}))}, "
         f"солнце — {fmt(models.get('pv', {}))}"
     )
+
+
+DEFICIT_MODE_LABELS = {
+    "conservative": "осторожный",
+    "moderate": "средний",
+    "expected": "по ожиданию",
+}
+
+
+def _tuning_note(tuning: dict | None, mode: str, autotune: bool) -> str | None:
+    """One notification line: what the replay on the site's history chose."""
+    if not tuning or not tuning.get("best"):
+        return None
+    best = tuning["candidates"][tuning["best"]]
+    line = (
+        f"• Подбор на истории ({tuning['windows']} сут): лучший запас до утра — "
+        f"{DEFICIT_MODE_LABELS.get(tuning['best'], tuning['best'])} "
+        f"(недоданная критическая {best['unserved_critical_kwh']:.1f} кВт·ч, "
+        f"усечение {best['curtailed_kwh']:.1f} кВт·ч, стоимость {best['net_cost']:.1f})"
+    )
+    if autotune:
+        return line + f" — применён: {DEFICIT_MODE_LABELS.get(mode, mode)}"
+    return line + " — совет, автонастройка выключена"
+
+
+def autonomy(
+    soc: float, min_soc: float, capacity_kwh: float, discharge_efficiency: float, critical_kw: float
+) -> float | None:
+    """Hours the battery carries the critical load from now, grid off, no sun."""
+    if critical_kw <= 0.05 or capacity_kwh <= 0:
+        return None
+    return max(0.0, soc - min_soc) * capacity_kwh * discharge_efficiency / critical_kw
+
+
+def _deferrable_line(item: dict) -> str:
+    if not item.get("start_local"):
+        return f"• {item['name']}: {item.get('reason', 'нет окна')}"
+    if not item["sunny"]:
+        return (
+            f"• {item['name']}: солнечного окна нет, лучшее {item['start_local']}–{item['end_local']} "
+            f"(солнце {item['solar_share']:.0%})"
+        )
+    line = (
+        f"• {item['name']}: включить {item['start_local']}–{item['end_local']} "
+        f"(на солнце {item['solar_share']:.0%}"
+    )
+    if item["free_solar_kwh"] >= 0.1:
+        line += f", из них {item['free_solar_kwh']:.1f} кВт·ч ушли бы в усечение"
+    return line + ")"
+
+
+def ha_post_state(entity_id: str, state, attributes: dict) -> None:
+    """Create/update a Home Assistant state (not a device write)."""
+    request = urllib.request.Request(
+        f"{HA_BASE}/api/states/{entity_id}",
+        data=json.dumps({"state": state, "attributes": attributes}, default=_json_default).encode(),
+        headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=30):
+        pass
+
+
+def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
+    """Expose the plan as sensors for the owner's automations; never raises."""
+    advisory = report["advisory"]
+    sensors = [
+        (
+            "sensor.emhass_shadow_floor_soc",
+            round(advisory["recommended_floor_soc"] * 100),
+            {
+                "unit_of_measurement": "%",
+                "friendly_name": "EMHASS Shadow: рекомендуемый пол SOC",
+                "profile": [step["floor_soc"] for step in advisory["floor_profile"]],
+                "issue_utc": report["issue_utc"],
+            },
+        ),
+        (
+            "sensor.emhass_shadow_autonomy_hours",
+            advisory["autonomy_hours"] if advisory["autonomy_hours"] is not None else "unknown",
+            {"unit_of_measurement": "h", "friendly_name": "EMHASS Shadow: автономия батареи"},
+        ),
+    ]
+    for item in flexible:
+        sensors.append(
+            (
+                f"sensor.emhass_shadow_{item['slug']}_start",
+                item.get("start_local") or "unknown",
+                {"friendly_name": f"EMHASS Shadow: {item['name']} — старт", **item},
+            )
+        )
+    published = []
+    for entity_id, state, attributes in sensors:
+        try:
+            ha_post_state(entity_id, state, attributes)
+            published.append(entity_id)
+        except Exception:
+            continue
+    return published
+
+
+def _hardware_note(configured: dict, learned: dict | None, applied: list[str]) -> str | None:
+    """One notification line: what the data says about the hardware."""
+    if not learned:
+        return None
+    facts = []
+    battery = learned.get("battery") or {}
+    if battery.get("status") == "ok":
+        facts.append(
+            f"ёмкость {battery['capacity_kwh']:.1f} кВт·ч (в настройках {configured['capacity_kwh']}),"
+            f" КПД цикла {battery['round_trip_efficiency']:.0%}"
+        )
+    geometry = learned.get("pv_geometry")
+    if geometry:
+        facts.append(
+            f"панели {geometry['kwp']:.1f} кВтп, наклон {geometry['tilt_deg']:.0f}°, "
+            f"азимут {geometry['azimuth_deg']:.0f}°"
+        )
+    limits = learned.get("limits") or {}
+    if limits.get("max_charge_kw"):
+        facts.append(f"заряд до {limits['max_charge_kw']:.1f} кВт")
+    if not facts:
+        return None
+    line = "• Железо по данным: " + "; ".join(facts)
+    if configured.get("autotune"):
+        line += " — применено: " + (", ".join(applied) if applied else "нечего менять")
+    else:
+        line += " (только совет, автонастройка выключена)"
+    return line
+
+
+def _self_learning_note(calibrations: dict, drift: dict) -> str | None:
+    """One notification line on the active forecast self-correction."""
+    parts = []
+    load = calibrations.get("load")
+    if load is not None and load.active:
+        day_shift = sum(load.hourly)
+        parts.append(
+            f"нагрузка {day_shift:+.1f} кВт·ч/сутки, коридор ×{load.scale_lo:.2f}/×{load.scale_hi:.2f}"
+        )
+    pv = calibrations.get("pv")
+    if pv is not None and pv.active:
+        daylight = [f for f in pv.hourly if abs(f - 1.0) > 1e-9] or [1.0]
+        parts.append(f"солнце ×{float(np.mean(daylight)):.2f}")
+    if not parts and not (drift or {}).get("drift"):
+        return None
+    line = "• Самокоррекция прогноза: " + ("; ".join(parts) if parts else "ещё копит данные")
+    if (drift or {}).get("drift"):
+        line += " — дрейф (" + ", ".join(drift["reasons"]) + "), переобучение раньше срока"
+    return line
 
 
 def _plan_vs_fact_note() -> str | None:
@@ -737,11 +1061,17 @@ def _plan_vs_fact_note() -> str | None:
         pvf = entry.get("plan_vs_fact")
         if pvf:
             delta = pvf["actual_grid_kwh"] - pvf["planned_grid_kwh"]
-            return (
+            line = (
                 f"• План vs факт ({entry['date']}): импорт из сети по плану "
                 f"{pvf['planned_grid_kwh']} кВт·ч, по счётчику {pvf['actual_grid_kwh']} кВт·ч "
                 f"({delta:+.1f})"
             )
+            if "forecast_effect_kwh" in pvf:
+                line += (
+                    f": из-за прогноза {pvf['forecast_effect_kwh']:+.1f}, "
+                    f"из-за исполнения {pvf['execution_effect_kwh']:+.1f}"
+                )
+            return line
     return None
 
 
@@ -909,9 +1239,11 @@ def validate_entities() -> list[dict]:
         ("Напряжение сети", str(entity or ""), "number", "entity_grid_voltage")
         for entity in ent["voltages"].values()
     ]
-    for n in range(TOU_ZONES):
+    for n in range(len(ent["tou_soc"])):
         specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
         specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
+    for n, entity in enumerate(ent.get("tou_grid_charge", []), start=1):
+        specs.append((f"Зона {n}: заряд из сети", entity, "binary", None))
     specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
     specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
@@ -963,8 +1295,42 @@ def _entity_issue_note(checks: list[dict]) -> str | None:
     return f"• ⚠️ Проверь настройки сущностей: {items}"
 
 
+def recommend_zone_socs(
+    programs: list[dict],
+    floors: list[float],
+    reserve_floors: list[float],
+    starts: pd.DatetimeIndex,
+    tz: ZoneInfo,
+    step_pct: int = 5,
+) -> None:
+    """Heuristic Batt% per TOU zone, stored as program["recommended_soc_pct"].
+
+    Each zone gets the floating floor of its own start hour (next occurrence
+    in the horizon), raised to the highest outage reserve inside the zone's
+    window. The start-hour floor alone is the daily low for a zone such as
+    09:00-17:00; the inverter holds that one value all afternoon, so on a
+    cloudy day the battery could drain below the reserve the evening hours
+    of the same zone need.
+    """
+    windows = optimize.zone_windows(programs, starts, tz)
+    for program in programs:
+        zone = windows[program["n"]]
+        if zone is None:
+            program["recommended_soc_pct"] = None
+            continue
+        match, window, _ = zone
+        program["recommended_soc_pct"] = max(
+            round(floors[match] * 100),
+            optimize.reserve_floor_pct(reserve_floors, window, step_pct),
+        )
+
+
 def run() -> dict:
-    opts = options()
+    configured = options()
+    learned_hardware = hardware.load(DATA)
+    # autotune: learned capacity/efficiency/limits/geometry replace the
+    # configured ones (in this run's copy only); otherwise opts == configured.
+    opts, autotune_notes = hardware.effective_options(configured, learned_hardware)
     ent = resolve_entities(opts)
     entity_checks = validate_entities()
     site = {
@@ -975,7 +1341,9 @@ def run() -> dict:
     tz = ZoneInfo(site["time_zone"])
 
     audit, appended = update_audit(
-        site, ent, backfill_days=float(opts.get("history_backfill_days", 14))
+        dict(site, max_charge_kw=opts.get("max_charge_kw")),
+        ent,
+        backfill_days=float(opts.get("history_backfill_days", 14)),
     )
     new_transitions = update_outage_log(ent)
 
@@ -991,26 +1359,13 @@ def run() -> dict:
         weather, weather_name, weather_stale = archive_weather(site)
     except OSError:
         weather, weather_name, weather_stale = None, None, True
-    if weather is not None and "temp_air_observed_c" in audit:
-        audit = audit.assign(
-            temp_air_observed_c=audit["temp_air_observed_c"].fillna(
-                weather["temperature_2m"].reindex(audit.index)
-            )
-        )
-
+    load_method = "model"
     try:
         load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
-        grid = audit[["temp_air_observed_c", "load_kw"]].copy()
-        grid = grid.reindex(grid.index.union(starts_plan))
-        # Causal 48 h: two 24 h windows. For day 2 the issue time is shifted
-        # by 24 h, so lag-24 features read today's actuals — known at issue.
-        day1 = load_bundle.predict(grid.loc[: starts[-1]], issue_time=issue).loc[starts]
-        day2 = load_bundle.predict(
-            grid, issue_time=issue + pd.Timedelta(hours=HORIZON_HOURS)
-        ).loc[starts_plan[HORIZON_HOURS:]]
-        load_prediction = pd.concat([day1, day2])
+        load_prediction = forecast_load(load_bundle, audit, starts_plan, issue, weather)
     except (OSError, ValueError, KeyError):
         models_learning = True
+        load_method = "fallback"
         load_prediction = _fallback_load_prediction(audit, starts_plan, tz)
 
     pv_bundle = None
@@ -1025,8 +1380,6 @@ def run() -> dict:
         pv_p10 = [0.0] * PLAN_HOURS
         pv_p50 = [0.0] * PLAN_HOURS
         pv_p90 = [0.0] * PLAN_HOURS
-        pv_day = None
-        pv_day2 = None
     elif pv_bundle is not None:
         poa = plane_power_kw(
             pv_bundle.geometry,
@@ -1047,32 +1400,52 @@ def run() -> dict:
         pv_p10 = [float(pv_prediction["pv_p10_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p50 = [float(pv_prediction["pv_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)]
         pv_p90 = [float(pv_prediction["pv_p90_kw"].iloc[i]) for i in range(PLAN_HOURS)]
-        pv_day = {
-            "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
-            "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
-            "p90": round(float(np.sum(pv_p90[:HORIZON_HOURS])), 2),
-        }
-        pv_day2 = {
-            "p10": round(float(np.sum(pv_p10[HORIZON_HOURS:])), 2),
-            "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
-            "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
-        }
     else:
         pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
+    pv_method = "model" if weather is not None and pv_bundle is not None else "fallback"
+
+    # Self-correction between retrains: the RAW forecasts are logged (below,
+    # once the reserve is known) and the last two weeks of issued-vs-actual
+    # pairs shift P50 per hour and rescale the P10/P90 band. Never let it
+    # break the daily plan.
+    raw_load = tuple(
+        load_prediction[f"load_{q}_kw"].to_numpy(dtype=float).tolist() for q in ("p10", "p50", "p90")
+    )
+    raw_pv = (list(pv_p10), list(pv_p50), list(pv_p90))
+    calibrations: dict = {}
+    drift: dict = {}
+    try:
+        calibrations, drift = learning.self_correct(
+            learning.read_forecast_log(DATA / "forecast_log.jsonl"), audit, tz, issue
+        )
+        (DATA / "drift_state.json").write_text(json.dumps(drift, ensure_ascii=False), encoding="utf-8")
+        if load_method == "model":
+            c10, c50, c90 = calibrations["load"].apply(*raw_load, starts_plan, tz)
+            load_prediction = pd.DataFrame(
+                {"load_p10_kw": c10, "load_p50_kw": c50, "load_p90_kw": c90}, index=starts_plan
+            )
+        if pv_method == "model":
+            c10, c50, c90 = calibrations["pv"].apply(*raw_pv, starts_plan, tz)
+            pv_p10, pv_p50, pv_p90 = c10.tolist(), c50.tolist(), c90.tolist()
+    except Exception:
+        calibrations, drift = {}, {}
+
+    pv_day = pv_day2 = None
+    if weather is not None:
         pv_day = {
-            "p10": round(float(np.sum(pv_p10[:HORIZON_HOURS])), 2),
-            "p50": round(float(np.sum(pv_p50[:HORIZON_HOURS])), 2),
-            "p90": round(float(np.sum(pv_p90[:HORIZON_HOURS])), 2),
+            q: round(float(np.sum(values[:HORIZON_HOURS])), 2)
+            for q, values in (("p10", pv_p10), ("p50", pv_p50), ("p90", pv_p90))
         }
         pv_day2 = {
-            "p10": round(float(np.sum(pv_p10[HORIZON_HOURS:])), 2),
-            "p50": round(float(np.sum(pv_p50[HORIZON_HOURS:])), 2),
-            "p90": round(float(np.sum(pv_p90[HORIZON_HOURS:])), 2),
+            q: round(float(np.sum(values[HORIZON_HOURS:])), 2)
+            for q, values in (("p10", pv_p10), ("p50", pv_p50), ("p90", pv_p90))
         }
 
     # State of health: entity id or a plain number ("99"); missing or
     # unreadable values keep the nominal 100 % and are flagged in the report.
     soh, soh_source = _battery_soh(opts)
+    if opts.get("_soh_identified"):
+        soh, soh_source = 1.0, "identified"
 
     critical = audit["critical_load_kw"].dropna()
     settings = ReserveSettings(
@@ -1084,7 +1457,7 @@ def run() -> dict:
         cold_start_kw=float(critical.quantile(0.9)) if len(critical) else 0.5,
         cold_start_hours=min(20.0, max(1.0, float(opts.get("reserve_cold_start_hours", 2.0)))),
         window_days=14.0,
-        quantile=0.9,
+        quantile=policy.priority(opts)["reserve_quantile"],
         margin=0.0,
         decay_days=1.0e6,  # owner rule: hold 14 days, no gradual reduction
         profile_mode="all_hours",
@@ -1098,12 +1471,30 @@ def run() -> dict:
         and pd.notna(row["critical_load_kw"])
     ]
     plan = calculate_reserve(issue, events, observations, settings)
+    # The to-sunrise deficit is sized on the quantiles the priority (and,
+    # with autotune, the replay tuner) selects; the outage reserve below
+    # always stays on pessimistic PV.
+    tuning = tuner.load(DATA)
+    if tuner.due(DATA):
+        try:
+            tuning = tuner.tune(
+                audit, learning.read_forecast_log(DATA / "forecast_log.jsonl"), opts, tz, issue, soh
+            )
+            tuner.save(DATA, tuning)
+        except Exception:
+            pass  # tuning is advisory; the plan runs on the default mode
+    deficit_mode = tuner.tuned_mode(opts, tuning)
+    deficit_load, deficit_pv = policy.deficit_inputs(
+        deficit_mode,
+        {q: load_prediction[f"load_{q}_kw"].to_numpy() for q in ("p10", "p50", "p90")},
+        {"p10": pv_p10, "p50": pv_p50, "p90": pv_p90},
+    )
     steps = [
         ForecastStep(
             start=starts_plan[i].to_pydatetime(),
             hours=1.0,
-            pv_p10_kw=pv_p10[i],
-            load_p90_kw=float(load_prediction["load_p90_kw"].iloc[i]),
+            pv_p10_kw=float(deficit_pv[i]),
+            load_p90_kw=float(deficit_load[i]),
         )
         for i in range(PLAN_HOURS)
     ]
@@ -1112,6 +1503,16 @@ def run() -> dict:
     # local hours instead of relying only on the post-outage reactive hold.
     risk = outage_risk_profile(events, issue, site["time_zone"])
     reserve_by_hour = [plan.reserve_kwh] * PLAN_HOURS
+    if opts.get("autotune") and learned_hardware:
+        reserve_by_hour = hardware.reshape_reserve(
+            reserve_by_hour,
+            starts_plan,
+            tz,
+            learned_hardware.get("critical_profile_kw"),
+            plan.duration_hours,
+            settings.cold_start_hours,
+            settings.discharge_efficiency,
+        )
     risk_windows: list[str] = []
     if risk is not None and any(risk.risk_hours):
         risk_energy = (
@@ -1149,9 +1550,22 @@ def run() -> dict:
     profile = floor_profile(steps, reserve_by_hour, settings)
     # Round floors UP to the inverter's 5 % step: rounding down (or to the
     # nearest step) would shave up to 5 pp off the outage reserve.
-    floors_plan = [math.ceil(step.floor_soc / 0.05 - 1e-9) * 0.05 for step in profile.steps]
+    caps = adapter.caps(opts)
+    floors_plan = [caps.ceil_soc(step.floor_soc) for step in profile.steps]
     floors = floors_plan[:HORIZON_HOURS]  # advisory/report day; plan horizon is longer
     recommended_floor = floors[0]  # binding constraint is the current hour
+    # Outage reserve alone, as device SOC per hour: the hard lower bound of
+    # every TOU zone (see optimize.zone_targets / recommend_zone_socs).
+    reserve_floors_plan = [settings.floor_for_energy(kwh)[0] for kwh in reserve_by_hour]
+    try:
+        learning.append_forecast_log(
+            DATA / "forecast_log.jsonl",
+            learning.log_entry(
+                issue, starts_plan, raw_load, load_method, raw_pv, pv_method, reserve_by_hour
+            ),
+        )
+    except OSError:
+        pass
 
     floor_entity = ent["floor_input"]
     floor_warning: str | None = None
@@ -1169,21 +1583,9 @@ def run() -> dict:
         soc = float(ha_get(f"/api/states/{soc_entity}")["state"])
         start = ha_get(f"/api/states/{time_entity}")["state"]
         programs.append({"n": n, "from": start, "soc_pct": soc})
-    # Each TOU zone gets the floor of its own start hour (next occurrence in
-    # the horizon), not a single all-day value.
-    for program in programs:
-        hour = int(program["from"][:2])
-        match = next(
-            (
-                i
-                for i in range(HORIZON_HOURS)
-                if starts[i].astimezone(tz).hour == hour and starts[i] >= issue
-            ),
-            None,
-        )
-        program["recommended_soc_pct"] = (
-            round(floors[match] * 100) if match is not None else None
-        )
+    recommend_zone_socs(
+        programs, floors, reserve_floors_plan[:HORIZON_HOURS], starts, tz, caps.soc_step_pct
+    )
     would_raise = [
         p
         for p in programs
@@ -1201,8 +1603,6 @@ def run() -> dict:
     optimizer_plan = None
     if opts.get("optimizer_enabled", True):
         try:
-            import optimize
-
             load_p50 = [
                 float(load_prediction["load_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)
             ]
@@ -1210,9 +1610,28 @@ def run() -> dict:
             optimizer_plan = optimize.run_plan(
                 starts_plan, pv_p50, load_p50, floors_plan,
                 float(battery_now) / 100.0, programs, opt_opts,
+                reserve_floors=reserve_floors_plan,
             )
         except Exception:
             optimizer_plan = None
+
+    # Flexible loads: the best start inside each load's window, on the sun
+    # the plan expects to curtail first, then on plain surplus.
+    load_p50_day = load_prediction["load_p50_kw"].to_numpy()[:HORIZON_HOURS]
+    surplus = np.maximum(np.asarray(pv_p50[:HORIZON_HOURS]) - load_p50_day, 0.0)
+    curtail = (
+        (optimizer_plan or {}).get("p_curtail_kw") or [0.0] * PLAN_HOURS
+    )[:HORIZON_HOURS]
+    flexible = deferrable.recommend(
+        list(opts.get("deferrable_loads") or []), starts, tz, curtail, surplus
+    )
+    autonomy_hours = autonomy(
+        float(battery_now) / 100.0,
+        _soc_bounds(opts)[0],
+        float(opts["capacity_kwh"]) * soh,
+        settings.discharge_efficiency,
+        plan.critical_load_kw,
+    )
 
     # Apply mode (off by default): write the plan into the inverter through
     # Home Assistant services. Optimizer zone targets win when available,
@@ -1221,12 +1640,44 @@ def run() -> dict:
     # were computed against the flat min-SOC band — writing them would
     # silently drop the outage reserve (e.g. requested 80 %, written 20 %),
     # so the heuristic floors are applied instead. Writes happen only when
-    # the change is at least 5 percentage points — no churn on rounding
+    # the change is at least one inverter SOC step — no churn on rounding
     # noise. Every write is read back: HTTP 200 only means HA accepted the
     # service call, not that the inverter applied the value.
+    grid_charge = []
+    if caps.controls_grid_charge:
+        grid_charge = adapter.grid_charge_plan(
+            programs,
+            starts,
+            tz,
+            opts,
+            reserve_floors_plan[:HORIZON_HOURS],
+            pv_p10[:HORIZON_HOURS],
+            (optimizer_plan or {}).get("soc_opt"),
+            float(battery_now) / 100.0,
+        )
+        for item in grid_charge:
+            entity = ent["tou_grid_charge"][item["n"] - 1]
+            item["entity"] = entity
+            try:
+                item["current"] = str(ha_get(f"/api/states/{entity}")["state"])
+            except Exception:
+                item["current"] = None
     applied: list[str] = []
     apply_errors: list[str] = []
     if opts.get("apply_mode", False):
+        for item in grid_charge:
+            wanted = "on" if item["desired"] else "off"
+            if item["current"] == wanted:
+                continue
+            domain = item["entity"].split(".", 1)[0]
+            if domain not in ("switch", "input_boolean"):
+                apply_errors.append(f"заряд из сети, зона {item['n']}: домен {domain} не поддерживается")
+                continue
+            try:
+                ha_service(domain, f"turn_{wanted}", {"entity_id": item["entity"]})
+                applied.append(f"заряд из сети зона {item['n']}: {wanted} ({item['reason']})")
+            except Exception:
+                apply_errors.append(f"заряд из сети, зона {item['n']}")
         zone_pct = {}
         if optimizer_plan is not None and not optimizer_plan.get("floor_relaxed"):
             for t in optimizer_plan["zone_targets"]:
@@ -1244,7 +1695,7 @@ def run() -> dict:
             if target is None:
                 continue
             target = min(max(int(round(target)), min_pct), max_pct)
-            if abs(target - p["soc_pct"]) < 5:
+            if abs(target - p["soc_pct"]) < caps.soc_step_pct:
                 continue
             try:
                 ha_service(
@@ -1262,7 +1713,7 @@ def run() -> dict:
                 f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%",
             ))
         floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
-        if abs(floor_target - round(current_floor * 100)) >= 5:
+        if abs(floor_target - round(current_floor * 100)) >= caps.soc_step_pct:
             try:
                 # Domain follows the entity id: number.* and input_number.*
                 # share the set_value service name but live in own domains.
@@ -1289,7 +1740,7 @@ def run() -> dict:
                     confirmed = float(ha_get(f"/api/states/{entity}")["state"])
                 except Exception:
                     confirmed = None
-                if confirmed is None or abs(confirmed - target) > 5:
+                if confirmed is None or abs(confirmed - target) > caps.soc_step_pct:
                     apply_errors.append(f"{label} (запись не подтверждена)")
                 else:
                     applied.append(ok_msg)
@@ -1311,7 +1762,7 @@ def run() -> dict:
         q: round(float(load_prediction[f"load_{q}_kw"].iloc[HORIZON_HOURS:].sum()), 2)
         for q in ("p10", "p50", "p90")
     }
-    metrics_scored = update_metrics(audit, tz)
+    metrics_scored = update_metrics(audit, tz, dict(opts, capacity_kwh=float(opts["capacity_kwh"]) * soh))
     delta_pp = round((recommended_floor - current_floor) * 100)
 
     pv_line = (
@@ -1408,7 +1859,7 @@ def run() -> dict:
             t
             for t in optimizer_plan["zone_targets"]
             if t.get("optimal_soc_pct") is not None
-            and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= 5
+            and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= caps.soc_step_pct
         ]
         # When the relaxed targets are not applied (reserve protection), do
         # not present them as the plan's zone targets.
@@ -1444,6 +1895,22 @@ def run() -> dict:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
         )
+    tuning_note = _tuning_note(tuning, deficit_mode, bool(opts.get("autotune")))
+    if tuning_note is not None:
+        lines.append(tuning_note)
+    hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
+    if hardware_note is not None:
+        lines.append(hardware_note)
+    if autonomy_hours is not None:
+        lines.append(
+            f"• Автономия сейчас: ~{autonomy_hours:.1f} ч критической нагрузки "
+            f"({plan.critical_load_kw:.2f} кВт)"
+        )
+    for item in flexible:
+        lines.append(_deferrable_line(item))
+    learning_note = _self_learning_note(calibrations, drift)
+    if learning_note is not None:
+        lines.append(learning_note)
     retrain_note = _retrain_note()
     if retrain_note is not None:
         lines.append(retrain_note)
@@ -1466,7 +1933,20 @@ def run() -> dict:
             "battery_soh_source": soh_source,
             "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
+            "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
+            "deficit_mode": deficit_mode,
+            "tuning": tuning,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
+            "hardware": {
+                "learned": learned_hardware,
+                "autotune": bool(opts.get("autotune", False)),
+                "applied": autotune_notes,
+            },
+            "self_learning": {
+                "load": calibrations["load"].to_dict() if "load" in calibrations else None,
+                "pv": calibrations["pv"].to_dict() if "pv" in calibrations else None,
+                "drift": drift or None,
+            },
         },
         "hourly": {
             "starts_utc": [s.isoformat() for s in starts],
@@ -1505,7 +1985,7 @@ def run() -> dict:
                 }
                 for i in range(HORIZON_HOURS)
             ],
-            "max_floor_soc": math.ceil(profile.max_floor_soc / 0.05 - 1e-9) * 0.05,
+            "max_floor_soc": caps.ceil_soc(profile.max_floor_soc),
             "energy_to_crossover_kwh": round(profile.steps[0].stored_kwh, 3),
             "crossover_utc": (
                 profile.steps[0].crossover.isoformat() if profile.steps[0].crossover else None
@@ -1514,6 +1994,9 @@ def run() -> dict:
             "delta_pp": delta_pp,
             "programs": programs,
             "would_raise_zones": would_raise,
+            "deferrable": flexible,
+            "grid_charge": grid_charge,
+            "autonomy_hours": None if autonomy_hours is None else round(autonomy_hours, 2),
             "optimizer": optimizer_plan,
             "applied": applied,
             "apply_errors": apply_errors,
@@ -1549,6 +2032,11 @@ def run() -> dict:
         pass
 
     report["data"]["metrics_scored_days"] = metrics_scored
+
+    published: list[str] = []
+    if opts.get("publish_sensors", False):
+        published = publish_sensors(report, flexible, tz)
+    report["data"]["published_sensors"] = published
 
     if opts.get("notifications", True):
         ha_service(

@@ -3,10 +3,12 @@ description: >-
   Теневой режим EMHASS: ежедневный сбор данных из Recorder, квантильные
   прогнозы нагрузки и солнечной генерации, расчёт резерва отключений и
   MILP-оптимизатор (CVXPY/HiGHS) суточного плана батареи: плавающий пол SOC,
-  целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
-  периодически переобучаются на накопленных данных объекта, точность
-  прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.9.0"
+  целевые SOC для зон TOU, ночная зарядка по дешёвому тарифу. Аддон учится
+  на данных объекта: ежедневно поправляет прогнозы, переобучает модели
+  только если новая не хуже, определяет ёмкость батареи и ориентацию
+  панелей, подбирает настройки на своей истории. По умолчанию в инвертор
+  ничего не записывает.
+version: "0.10.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -65,6 +67,14 @@ options:
   reserve_pv_aware: true
   history_backfill_days: 14
   entity_battery_soh: ""
+  load_holidays: ""
+  autotune: false
+  priority_mode: balanced
+  publish_sensors: false
+  deferrable_loads: []
+  tou_zones: 6
+  tou_soc_step_pct: 5
+  tou_grid_charge_entity_template: ""
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -107,6 +117,18 @@ schema:
   reserve_pv_aware: bool
   history_backfill_days: int(0,60)
   entity_battery_soh: str?
+  load_holidays: str?
+  autotune: bool
+  priority_mode: list(resilience|balanced|economy)
+  publish_sensors: bool
+  deferrable_loads:
+    - name: str
+      power_kw: float(0.1,30)
+      hours: float(0.5,12)
+      window: str?
+  tou_zones: int(1,12)
+  tou_soc_step_pct: int(1,10)
+  tou_grid_charge_entity_template: str?
 translations:
   ru:
     configuration:
@@ -222,7 +244,7 @@ translations:
         name: Окна дешёвого тарифа
         description: Местное время, ЧЧ:ММ-ЧЧ:ММ; несколько окон через запятую. Окно может переходить через полночь, например 23:00-07:00, 13:00-15:00.
       reserve_cold_start_hours:
-        name: Резерв холодного старта, часы
+        name: Минимальная автономия, часы
         description: "Базовый резерв отключений в часах работы критической нагрузки (1–20, по умолчанию 2). Это нижняя полка: она действует всегда, даже когда отключений давно не было. Чем больше значение, тем выше минимальный SOC, который аддон не позволит проедать."
       reserve_pv_aware:
         name: Резерв с учётом солнца
@@ -233,6 +255,30 @@ translations:
       history_backfill_days:
         name: Глубина загрузки истории, дней
         description: "Сколько дней прошлого аддон забирает из истории Home Assistant при первом запуске и по кнопке «Загрузить историю» (0–60, по умолчанию 14). Реальная глубина ограничена сроком хранения рекордера HA (обычно 10 дней). Эти данные сразу идут в обучение моделей прогноза."
+      load_holidays:
+        name: Праздничные дни
+        description: "Ежегодные даты, когда потребление похоже на выходной, через запятую в формате ММ-ДД, например 01-01,01-07,03-08,05-09. Модель нагрузки учтёт их со следующего переобучения. Пусто = без праздников."
+      autotune:
+        name: Автонастройка по данным
+        description: "Применять то, что аддон выучил сам: реальную ёмкость и КПД батареи, ориентацию панелей, профиль критической нагрузки по часам и подобранные на вашей истории настройки плана. Лимиты мощности только повышаются, если данные доказывают, что инвертор может больше. Выключено = выученное показывается в панели как совет."
+      priority_mode:
+        name: Приоритет
+        description: "Насколько важна защита от отключений по сравнению с экономией. resilience — максимум надёжности (резерв под 95% отключений, запас до утра по пессимистичному прогнозу); balanced — как раньше (90%); economy — больше солнца и экономии (80%, запас до утра может считаться по ожидаемому прогнозу). Автонастройка выбирает только среди вариантов, которые разрешает приоритет."
+      publish_sensors:
+        name: Публиковать сенсоры
+        description: "Создавать в Home Assistant сенсоры sensor.emhass_shadow_*: рекомендуемый пол SOC, автономия батареи в часах и время старта каждой переносимой нагрузки — для ваших автоматизаций. Это не запись в инвертор. Выключено = только уведомление."
+      deferrable_loads:
+        name: Переносимые нагрузки
+        description: "Приборы, которые можно включать в любое время в своём окне: бойлер, стиральная машина, насос. Для каждого: name — название, power_kw — мощность, hours — сколько часов в сутки работать, window — допустимое окно ЧЧ:ММ-ЧЧ:ММ (пусто = весь день). Аддон подберёт время, когда они будут работать на солнце, которое иначе ушло бы в усечение."
+      tou_zones:
+        name: Число зон TOU
+        description: "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей ниже подставляют номер зоны вместо {n}."
+      tou_soc_step_pct:
+        name: Шаг SOC зон, %
+        description: "С каким шагом инвертор принимает SOC зоны (у Deye — 5). Цели всегда округляются вверх до этого шага, чтобы не срезать резерв."
+      tou_grid_charge_entity_template:
+        name: Шаблон флага «заряд из сети» зоны
+        description: "Сущность switch или input_boolean, которая включает заряд из сети в зоне, с {n} вместо номера, например switch.inverter_program_{n}_charging. Если задано и включено применение плана, аддон разрешает заряд из сети только там, где он нужен для резерва, в дешёвые часы, а без тарифа — в зонах без солнца. Пусто = флаги не трогать."
   en:
     configuration:
       latitude:
@@ -347,7 +393,7 @@ translations:
         name: Cheap tariff windows
         description: Local time, HH:MM-HH:MM; several windows comma-separated. A window may wrap midnight, e.g. 23:00-07:00, 13:00-15:00.
       reserve_cold_start_hours:
-        name: Cold start reserve, hours
+        name: Minimum autonomy, hours
         description: "Baseline outage reserve in hours of critical load (1-20, default 2). This is the bottom shelf: it applies always, even after long quiet periods. Higher values raise the minimum SOC the add-on will not let the battery drain below."
       reserve_pv_aware:
         name: PV-aware reserve
@@ -358,3 +404,27 @@ translations:
       history_backfill_days:
         name: History backfill depth, days
         description: "How many past days the add-on pulls from Home Assistant history on first run and via the 'Backfill history' button (0-60, default 14). Actual depth is limited by the HA recorder retention (usually 10 days). This data feeds the forecast model training immediately."
+      load_holidays:
+        name: Holidays
+        description: "Recurring dates with weekend-like consumption, comma-separated MM-DD, e.g. 01-01,12-25. The load model uses them from the next retrain. Empty = no holidays."
+      autotune:
+        name: Autotune from data
+        description: "Apply what the add-on learned by itself: real battery capacity and efficiency, panel orientation, hourly critical-load profile and plan settings tuned on your history. Power limits are only raised when the data proves the inverter can do more. Off = learned values are shown in the panel as advice."
+      priority_mode:
+        name: Priority
+        description: "How outage protection weighs against savings. resilience: maximum safety (reserve for 95% of outages, overnight deficit on the pessimistic forecast); balanced: previous behaviour (90%); economy: more sun and savings (80%, the overnight deficit may use the expected forecast). Autotune only picks among the options the priority allows."
+      publish_sensors:
+        name: Publish sensors
+        description: "Create sensor.emhass_shadow_* in Home Assistant: recommended SOC floor, battery autonomy in hours and the start time of every flexible load, for your automations. This is not an inverter write. Off = notification only."
+      deferrable_loads:
+        name: Flexible loads
+        description: "Appliances that may run at any time inside their window: water heater, washer, pump. For each: name, power_kw, hours per day, window HH:MM-HH:MM (empty = all day). The add-on picks the time they run on sun that would otherwise be curtailed."
+      tou_zones:
+        name: TOU zones
+        description: "How many time-of-use programs (zones) the inverter has. Deye has 6. The entity templates below substitute the zone number for {n}."
+      tou_soc_step_pct:
+        name: Zone SOC step, %
+        description: "The SOC granularity the inverter accepts for a zone (Deye: 5). Targets are always rounded up to this step so the reserve is never shaved."
+      tou_grid_charge_entity_template:
+        name: Zone grid-charge flag template
+        description: "switch or input_boolean entity that enables grid charging in a zone, with {n} for the zone number, e.g. switch.inverter_program_{n}_charging. When set and apply mode is on, the add-on allows grid charging only where the reserve needs it, in cheap hours, or (without a tariff) in zones with no sun. Empty = leave the flags alone."

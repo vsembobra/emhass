@@ -29,7 +29,7 @@ def fake_ha(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline,
         "build_audit_rows",
-        lambda history, hours, lat, lon, ent: [
+        lambda history, hours, lat, lon, ent, **kwargs: [
             {"start_utc": h.isoformat().replace("+00:00", ".000Z"), "load_kw": 1.0}
             for h in hours
         ],
