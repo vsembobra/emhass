@@ -175,3 +175,28 @@ def test_plan_vs_fact_note_shows_the_split(monkeypatch, tmp_path):
     )
     note = pipeline._plan_vs_fact_note()
     assert "из-за прогноза +3.0" in note and "из-за исполнения +1.0" in note
+
+
+def test_load_rejects_legacy_string_best(tmp_path):
+    """The early named-candidate format is treated as absent (forces retune)."""
+    legacy = {
+        "tuned_utc": "2026-11-20T17:00:00+00:00",
+        "windows": 10,
+        "candidates": {"conservative": {"net_cost": 1.0}},
+        "best": "conservative",
+    }
+    import json
+
+    (tmp_path / tuner.TUNING_FILE).write_text(json.dumps(legacy), encoding="utf-8")
+    assert tuner.load(tmp_path) is None
+    assert tuner.due(tmp_path) is True  # absent -> retune rewrites the file
+
+
+def test_tuning_note_ignores_legacy_string_best():
+    legacy = {
+        "tuned_utc": "2026-11-20T17:00:00+00:00",
+        "windows": 10,
+        "candidates": {"conservative": {"net_cost": 1.0}},
+        "best": "conservative",
+    }
+    assert pipeline._tuning_note(legacy, 1.0, True, True) is None

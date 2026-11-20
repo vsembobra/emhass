@@ -280,9 +280,16 @@ def tune(
 
 def load(data_dir: Path) -> dict | None:
     try:
-        return json.loads((data_dir / TUNING_FILE).read_text(encoding="utf-8"))
+        tuning = json.loads((data_dir / TUNING_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    # Schema gate: an early format named candidates ("conservative") instead
+    # of numeric hour margins. Treat such a file as absent — due() then
+    # forces a retune, which rewrites it in the current format.
+    best = tuning.get("best") if isinstance(tuning, dict) else None
+    if best is not None and not isinstance(best, (int, float)):
+        return None
+    return tuning
 
 
 def save(data_dir: Path, tuning: dict) -> None:

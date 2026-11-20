@@ -1145,6 +1145,12 @@ def _tuning_note(tuning: dict | None, margin: float, autotune: bool, series: boo
     """One notification line: what the replay on the site's history chose."""
     if not tuning or tuning.get("best") is None:
         return None
+    # Defense in depth: a foreign/legacy tuning file (string margin names)
+    # yields no note instead of crashing the whole run.
+    if not isinstance(tuning["best"], (int, float)) or str(tuning["best"]) not in tuning.get(
+        "candidates", {}
+    ):
+        return None
     best = tuning["candidates"][str(tuning["best"])]
     line = (
         f"• Подбор на истории ({tuning['windows']} сут): запас сверх резерва +{float(tuning['best']):.0f} ч "
