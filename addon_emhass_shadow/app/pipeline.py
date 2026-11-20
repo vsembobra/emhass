@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import adapter
 import certifi
 import deferrable
 import hardware
@@ -61,7 +62,6 @@ MEAN_SENSOR_FIELDS = {
     "grid_power_kw_raw_sign": ("entity_grid_power", 0.001),
     "temp_air_observed_c": ("entity_outdoor_temperature", 1.0),
 }
-TOU_ZONES = 6
 
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
@@ -73,9 +73,10 @@ def options() -> dict:
 def resolve_entities(opts: dict) -> dict:
     """Entity map: every HA entity id comes from the add-on options.
 
-    TOU zone entities use templates with {n} (zone number, 1..6) so a
-    different naming scheme is one string instead of twelve.
+    TOU zone entities use templates with {n} (zone number, 1..tou_zones)
+    so a different naming scheme is one string instead of twelve.
     """
+    caps = adapter.caps(opts)
     return {
         "mean_sensors": {
             field: (opts[key], scale)
@@ -90,11 +91,12 @@ def resolve_entities(opts: dict) -> dict:
             else {}
         ),
         "tou_soc": [
-            opts["tou_soc_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+            opts["tou_soc_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
         ],
         "tou_time": [
-            opts["tou_time_entity_template"].format(n=n) for n in range(1, TOU_ZONES + 1)
+            opts["tou_time_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
         ],
+        "tou_grid_charge": caps.grid_charge_entities(),
         "floor_input": opts["floor_input_entity"],
     }
 
@@ -1237,9 +1239,11 @@ def validate_entities() -> list[dict]:
         ("Напряжение сети", str(entity or ""), "number", "entity_grid_voltage")
         for entity in ent["voltages"].values()
     ]
-    for n in range(TOU_ZONES):
+    for n in range(len(ent["tou_soc"])):
         specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
         specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
+    for n, entity in enumerate(ent.get("tou_grid_charge", []), start=1):
+        specs.append((f"Зона {n}: заряд из сети", entity, "binary", None))
     specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
     specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
@@ -1297,6 +1301,7 @@ def recommend_zone_socs(
     reserve_floors: list[float],
     starts: pd.DatetimeIndex,
     tz: ZoneInfo,
+    step_pct: int = 5,
 ) -> None:
     """Heuristic Batt% per TOU zone, stored as program["recommended_soc_pct"].
 
@@ -1315,7 +1320,8 @@ def recommend_zone_socs(
             continue
         match, window, _ = zone
         program["recommended_soc_pct"] = max(
-            round(floors[match] * 100), optimize.reserve_floor_pct(reserve_floors, window)
+            round(floors[match] * 100),
+            optimize.reserve_floor_pct(reserve_floors, window, step_pct),
         )
 
 
@@ -1544,7 +1550,8 @@ def run() -> dict:
     profile = floor_profile(steps, reserve_by_hour, settings)
     # Round floors UP to the inverter's 5 % step: rounding down (or to the
     # nearest step) would shave up to 5 pp off the outage reserve.
-    floors_plan = [math.ceil(step.floor_soc / 0.05 - 1e-9) * 0.05 for step in profile.steps]
+    caps = adapter.caps(opts)
+    floors_plan = [caps.ceil_soc(step.floor_soc) for step in profile.steps]
     floors = floors_plan[:HORIZON_HOURS]  # advisory/report day; plan horizon is longer
     recommended_floor = floors[0]  # binding constraint is the current hour
     # Outage reserve alone, as device SOC per hour: the hard lower bound of
@@ -1576,7 +1583,9 @@ def run() -> dict:
         soc = float(ha_get(f"/api/states/{soc_entity}")["state"])
         start = ha_get(f"/api/states/{time_entity}")["state"]
         programs.append({"n": n, "from": start, "soc_pct": soc})
-    recommend_zone_socs(programs, floors, reserve_floors_plan[:HORIZON_HOURS], starts, tz)
+    recommend_zone_socs(
+        programs, floors, reserve_floors_plan[:HORIZON_HOURS], starts, tz, caps.soc_step_pct
+    )
     would_raise = [
         p
         for p in programs
@@ -1631,12 +1640,44 @@ def run() -> dict:
     # were computed against the flat min-SOC band — writing them would
     # silently drop the outage reserve (e.g. requested 80 %, written 20 %),
     # so the heuristic floors are applied instead. Writes happen only when
-    # the change is at least 5 percentage points — no churn on rounding
+    # the change is at least one inverter SOC step — no churn on rounding
     # noise. Every write is read back: HTTP 200 only means HA accepted the
     # service call, not that the inverter applied the value.
+    grid_charge = []
+    if caps.controls_grid_charge:
+        grid_charge = adapter.grid_charge_plan(
+            programs,
+            starts,
+            tz,
+            opts,
+            reserve_floors_plan[:HORIZON_HOURS],
+            pv_p10[:HORIZON_HOURS],
+            (optimizer_plan or {}).get("soc_opt"),
+            float(battery_now) / 100.0,
+        )
+        for item in grid_charge:
+            entity = ent["tou_grid_charge"][item["n"] - 1]
+            item["entity"] = entity
+            try:
+                item["current"] = str(ha_get(f"/api/states/{entity}")["state"])
+            except Exception:
+                item["current"] = None
     applied: list[str] = []
     apply_errors: list[str] = []
     if opts.get("apply_mode", False):
+        for item in grid_charge:
+            wanted = "on" if item["desired"] else "off"
+            if item["current"] == wanted:
+                continue
+            domain = item["entity"].split(".", 1)[0]
+            if domain not in ("switch", "input_boolean"):
+                apply_errors.append(f"заряд из сети, зона {item['n']}: домен {domain} не поддерживается")
+                continue
+            try:
+                ha_service(domain, f"turn_{wanted}", {"entity_id": item["entity"]})
+                applied.append(f"заряд из сети зона {item['n']}: {wanted} ({item['reason']})")
+            except Exception:
+                apply_errors.append(f"заряд из сети, зона {item['n']}")
         zone_pct = {}
         if optimizer_plan is not None and not optimizer_plan.get("floor_relaxed"):
             for t in optimizer_plan["zone_targets"]:
@@ -1654,7 +1695,7 @@ def run() -> dict:
             if target is None:
                 continue
             target = min(max(int(round(target)), min_pct), max_pct)
-            if abs(target - p["soc_pct"]) < 5:
+            if abs(target - p["soc_pct"]) < caps.soc_step_pct:
                 continue
             try:
                 ha_service(
@@ -1672,7 +1713,7 @@ def run() -> dict:
                 f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%",
             ))
         floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
-        if abs(floor_target - round(current_floor * 100)) >= 5:
+        if abs(floor_target - round(current_floor * 100)) >= caps.soc_step_pct:
             try:
                 # Domain follows the entity id: number.* and input_number.*
                 # share the set_value service name but live in own domains.
@@ -1699,7 +1740,7 @@ def run() -> dict:
                     confirmed = float(ha_get(f"/api/states/{entity}")["state"])
                 except Exception:
                     confirmed = None
-                if confirmed is None or abs(confirmed - target) > 5:
+                if confirmed is None or abs(confirmed - target) > caps.soc_step_pct:
                     apply_errors.append(f"{label} (запись не подтверждена)")
                 else:
                     applied.append(ok_msg)
@@ -1818,7 +1859,7 @@ def run() -> dict:
             t
             for t in optimizer_plan["zone_targets"]
             if t.get("optimal_soc_pct") is not None
-            and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= 5
+            and abs(t["optimal_soc_pct"] - t["soc_pct"]) >= caps.soc_step_pct
         ]
         # When the relaxed targets are not applied (reserve protection), do
         # not present them as the plan's zone targets.
@@ -1944,7 +1985,7 @@ def run() -> dict:
                 }
                 for i in range(HORIZON_HOURS)
             ],
-            "max_floor_soc": math.ceil(profile.max_floor_soc / 0.05 - 1e-9) * 0.05,
+            "max_floor_soc": caps.ceil_soc(profile.max_floor_soc),
             "energy_to_crossover_kwh": round(profile.steps[0].stored_kwh, 3),
             "crossover_utc": (
                 profile.steps[0].crossover.isoformat() if profile.steps[0].crossover else None
@@ -1954,6 +1995,7 @@ def run() -> dict:
             "programs": programs,
             "would_raise_zones": would_raise,
             "deferrable": flexible,
+            "grid_charge": grid_charge,
             "autonomy_hours": None if autonomy_hours is None else round(autonomy_hours, 2),
             "optimizer": optimizer_plan,
             "applied": applied,

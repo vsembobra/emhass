@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import adapter
 import optimize
 import pandas as pd
 import policy
@@ -39,7 +40,6 @@ TUNING_FILE = "tuning.json"
 REPLAY_DAYS = 14
 MIN_WINDOWS = 3
 UNSERVED_TOLERANCE_KWH = 0.05
-SOC_STEP = 0.05
 HOUR = pd.Timedelta(hours=1)
 
 
@@ -131,9 +131,14 @@ def _forecast_at(issued, at: pd.Timestamp):
 
 
 def floor_at(
-    entry: dict, starts: pd.DatetimeIndex, index: int, mode: str, settings: ReserveSettings
+    entry: dict,
+    starts: pd.DatetimeIndex,
+    index: int,
+    mode: str,
+    settings: ReserveSettings,
+    step: float = 0.05,
 ) -> tuple[float, float]:
-    """(planning floor, outage-reserve floor) at the step, rounded up to 5 %."""
+    """(planning floor, outage-reserve floor) at the step, rounded up to the SOC step."""
     load = {q: entry["load"][q][index:] for q in ("p10", "p50", "p90")}
     pv = {q: entry["pv"][q][index:] for q in ("p10", "p50", "p90")}
     deficit_load, deficit_pv = policy.deficit_inputs(mode, load, pv)
@@ -147,7 +152,7 @@ def floor_at(
     reserve_floor = settings.floor_for_energy(float(reserves[0]))[0]
 
     def up(value: float) -> float:
-        return math.ceil(value / SOC_STEP - 1e-9) * SOC_STEP
+        return math.ceil(value / step - 1e-9) * step
 
     return up(profile.steps[0].floor_soc), up(reserve_floor)
 
@@ -163,12 +168,13 @@ def make_policy(
 ):
     by_start = {row["start"]: row for row in window}
     cheap = optimize._cheap_windows(opts) if opts.get("tariff_enabled", False) else None
+    step = adapter.caps(opts).soc_step
 
     def decide(start: datetime, soc: float) -> Dispatch:
         found = _forecast_at(issued, pd.Timestamp(start))
         if found is None:
             return Dispatch(floor_soc=battery.min_soc)
-        floor, reserve = floor_at(*found, mode, settings)
+        floor, reserve = floor_at(*found, mode, settings, step)
         floor = min(max(floor, battery.min_soc), battery.max_soc)
         reserve = min(max(reserve, battery.min_soc), battery.max_soc)
         if soc >= floor - 1e-9:

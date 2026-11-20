@@ -70,6 +70,9 @@ options:
   priority_mode: balanced
   publish_sensors: false
   deferrable_loads: []
+  tou_zones: 6
+  tou_soc_step_pct: 5
+  tou_grid_charge_entity_template: ""
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -121,6 +124,9 @@ schema:
       power_kw: float(0.1,30)
       hours: float(0.5,12)
       window: str?
+  tou_zones: int(1,12)
+  tou_soc_step_pct: int(1,10)
+  tou_grid_charge_entity_template: str?
 translations:
   ru:
     configuration:
@@ -262,6 +268,15 @@ translations:
       deferrable_loads:
         name: Переносимые нагрузки
         description: "Приборы, которые можно включать в любое время в своём окне: бойлер, стиральная машина, насос. Для каждого: name — название, power_kw — мощность, hours — сколько часов в сутки работать, window — допустимое окно ЧЧ:ММ-ЧЧ:ММ (пусто = весь день). Аддон подберёт время, когда они будут работать на солнце, которое иначе ушло бы в усечение."
+      tou_zones:
+        name: Число зон TOU
+        description: "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей ниже подставляют номер зоны вместо {n}."
+      tou_soc_step_pct:
+        name: Шаг SOC зон, %
+        description: "С каким шагом инвертор принимает SOC зоны (у Deye — 5). Цели всегда округляются вверх до этого шага, чтобы не срезать резерв."
+      tou_grid_charge_entity_template:
+        name: Шаблон флага «заряд из сети» зоны
+        description: "Сущность switch или input_boolean, которая включает заряд из сети в зоне, с {n} вместо номера, например switch.inverter_program_{n}_charging. Если задано и включено применение плана, аддон разрешает заряд из сети только там, где он нужен для резерва, в дешёвые часы, а без тарифа — в зонах без солнца. Пусто = флаги не трогать."
   en:
     configuration:
       latitude:
@@ -402,3 +417,12 @@ translations:
       deferrable_loads:
         name: Flexible loads
         description: "Appliances that may run at any time inside their window: water heater, washer, pump. For each: name, power_kw, hours per day, window HH:MM-HH:MM (empty = all day). The add-on picks the time they run on sun that would otherwise be curtailed."
+      tou_zones:
+        name: TOU zones
+        description: "How many time-of-use programs (zones) the inverter has. Deye has 6. The entity templates below substitute the zone number for {n}."
+      tou_soc_step_pct:
+        name: Zone SOC step, %
+        description: "The SOC granularity the inverter accepts for a zone (Deye: 5). Targets are always rounded up to this step so the reserve is never shaved."
+      tou_grid_charge_entity_template:
+        name: Zone grid-charge flag template
+        description: "switch or input_boolean entity that enables grid charging in a zone, with {n} for the zone number, e.g. switch.inverter_program_{n}_charging. When set and apply mode is on, the add-on allows grid charging only where the reserve needs it, in cheap hours, or (without a tariff) in zones with no sun. Empty = leave the flags alone."

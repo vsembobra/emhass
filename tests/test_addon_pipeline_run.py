@@ -152,3 +152,32 @@ def test_priority_flexible_loads_and_sensors(fake_site, monkeypatch):
         "sensor.emhass_shadow_boiler_start",
     }
     assert report["data"]["published_sensors"] == sorted(posted, key=list(posted).index)
+
+
+def test_apply_mode_drives_grid_charge_flags(fake_site):
+    states = fake_site["states"]
+    for n in range(1, 7):
+        states[f"switch.inverter_program_{n}_charging"] = "on"
+    fake_site["setup"](
+        apply_mode=True,
+        tariff_enabled=True,
+        tariff_cheap_windows="23:00-07:00",
+        tou_grid_charge_entity_template="switch.inverter_program_{n}_charging",
+    )
+    report = pipeline.run()
+    plan = {item["n"]: item for item in report["advisory"]["grid_charge"]}
+    assert plan[1]["desired"] and plan[1]["reason"] == "дешёвый тариф"  # 00:00-06:00
+    off = {s[2]["entity_id"] for s in fake_site["services"] if s[:2] == ("switch", "turn_off")}
+    # 10:00 and 14:00 zones: expensive hours, the small cold-start reserve is met.
+    assert {"switch.inverter_program_3_charging", "switch.inverter_program_4_charging"} <= off
+    assert "switch.inverter_program_1_charging" not in off
+    assert any(
+        line.startswith("заряд из сети зона 3: off") for line in report["advisory"]["applied"]
+    )
+
+
+def test_shadow_mode_reports_grid_charge_advice_without_writing(fake_site):
+    fake_site["setup"](tou_grid_charge_entity_template="switch.inverter_program_{n}_charging")
+    report = pipeline.run()
+    assert len(report["advisory"]["grid_charge"]) == 6
+    assert not [s for s in fake_site["services"] if s[0] == "switch"]

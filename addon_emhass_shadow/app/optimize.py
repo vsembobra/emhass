@@ -256,14 +256,14 @@ def zone_windows(
     return windows
 
 
-def reserve_floor_pct(reserve_floors: list[float], window: list[int]) -> int:
-    """Highest outage-reserve floor inside a zone window, in % rounded UP to 5.
+def reserve_floor_pct(reserve_floors: list[float], window: list[int], step_pct: int = 5) -> int:
+    """Highest outage-reserve floor inside a zone window, in % rounded UP to the step.
 
     A TOU zone holds one Batt% for its whole window, so it must protect the
     highest reserve any hour of that window needs — not the reserve at the
     zone start or at the window's SOC minimum.
     """
-    return math.ceil(max(reserve_floors[i] for i in window) * 100.0 / 5.0 - 1e-9) * 5
+    return math.ceil(max(reserve_floors[i] for i in window) * 100.0 / step_pct - 1e-9) * step_pct
 
 
 def zone_targets(
@@ -271,6 +271,7 @@ def zone_targets(
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
     strategy: str = "ladder", cheap_windows: list[tuple[int, int]] | None = None,
     reserve_floors: list[float] | None = None,
+    soc_step_pct: int = 5,
 ) -> list[dict]:
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
@@ -330,15 +331,15 @@ def zone_targets(
         # fake a rising window, pinning the zone to a bogus charge target.
         end_soc = soc_opt[forward_end - 1]
         if end_soc > entry_soc + 0.005 and _charge_target_kept(window, strategy, cheap_windows, starts, tz):
-            pct = math.ceil(clamp_pct(end_soc) / 5.0 - 1e-9) * 5
+            pct = math.ceil(clamp_pct(end_soc) / soc_step_pct - 1e-9) * soc_step_pct
         else:
             floor_soc = min(soc_opt[i] for i in window)
             if strategy == "flat":
                 floor_soc = min(floor_soc, horizon_min)
             # Round UP: rounding down would shave up to 5 pp off the reserve.
-            pct = math.ceil(clamp_pct(floor_soc) / 5.0 - 1e-9) * 5
+            pct = math.ceil(clamp_pct(floor_soc) / soc_step_pct - 1e-9) * soc_step_pct
         if reserve_floors is not None:
-            reserve_pct = reserve_floor_pct(reserve_floors, window)
+            reserve_pct = reserve_floor_pct(reserve_floors, window, soc_step_pct)
             pct = max(pct, min(reserve_pct, math.floor(max_soc * 100.0 + 1e-9)))
         targets.append({**program, "optimal_soc_pct": pct})
     return targets
@@ -479,5 +480,6 @@ def run_plan(
             strategy=str(opts.get("day_zone_strategy", "ladder")),
             cheap_windows=_cheap_windows(opts),
             reserve_floors=reserve_floors[:day1] if reserve_floors is not None else None,
+            soc_step_pct=max(1, int(opts.get("tou_soc_step_pct", 5))),
         ),
     }
