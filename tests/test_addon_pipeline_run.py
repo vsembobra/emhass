@@ -41,10 +41,16 @@ def fake_site(monkeypatch, tmp_path):
         states[f"time.inverter_program_{n}_time"] = at
     states[opts["floor_input_entity"]] = "20"
 
+    attributes: dict[str, dict] = {}
+
     def ha_get(path, timeout=180):
         entity = path.rsplit("/", 1)[-1]
         if entity in states:
-            return {"entity_id": entity, "state": states[entity]}
+            return {
+                "entity_id": entity,
+                "state": states[entity],
+                "attributes": attributes.get(entity, {}),
+            }
         return {"entity_id": entity, "state": "1000"}
 
     def ha_service(domain, service, payload):
@@ -53,6 +59,8 @@ def fake_site(monkeypatch, tmp_path):
             states[payload["entity_id"]] = str(payload["value"])
         elif service in ("turn_on", "turn_off"):
             states[payload["entity_id"]] = service.removeprefix("turn_")
+        elif service == "select_option":
+            states[payload["entity_id"]] = payload["option"]
 
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     index = pd.date_range(now - timedelta(hours=48), periods=96, freq="h")
@@ -76,7 +84,13 @@ def fake_site(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "fetch_history", lambda start, end, entities: {})
     monkeypatch.setattr(pipeline, "archive_weather", lambda site: (weather, "fake.json", False))
     setup()
-    return {"setup": setup, "services": services, "states": states, "data": tmp_path}
+    return {
+        "setup": setup,
+        "services": services,
+        "states": states,
+        "attributes": attributes,
+        "data": tmp_path,
+    }
 
 
 def test_run_produces_report_and_logs(fake_site):
@@ -262,3 +276,50 @@ def test_floor_is_never_the_overnight_deficit(fake_site):
     )
     assert not report["advisory"]["optimizer"]["floor_relaxed"]
     assert "не помещается" not in report["notification"]
+
+
+DEYE_OPTIONS = ["Disabled", "Grid", "Gen", "Grid & Gen"]
+
+
+def test_apply_mode_drives_deye_select_flags(fake_site):
+    for n in range(1, 7):
+        entity = f"select.inverter_program_{n}_charging"
+        fake_site["states"][entity] = "Grid"
+        fake_site["attributes"][entity] = {"options": DEYE_OPTIONS}
+    fake_site["states"]["select.inverter_program_6_charging"] = "Grid & Gen"
+    fake_site["setup"](
+        apply_mode=True,
+        tariff_enabled=True,
+        tariff_cheap_windows="23:00-07:00",
+        tou_grid_charge_entity_template="select.inverter_program_{n}_charging",
+    )
+    report = pipeline.run()
+    plan = {item["n"]: item for item in report["advisory"]["grid_charge"]}
+    assert plan[1]["target_state"] == "Grid"  # 00:00-06:00, cheap
+    assert plan[3]["target_state"] == "Disabled"  # 10:00, expensive
+    assert plan[6]["target_state"] == "Gen"  # 22:00 keeps its generator charging
+    selects = [s for s in fake_site["services"] if s[:2] == ("select", "select_option")]
+    assert {s[2]["option"] for s in selects} <= {"Disabled", "Gen"}
+    assert not report["advisory"]["apply_errors"]
+    assert fake_site["states"]["select.inverter_program_3_charging"] == "Disabled"
+
+
+def test_select_without_a_matching_option_is_reported(fake_site):
+    for n in range(1, 7):
+        entity = f"select.inverter_program_{n}_charging"
+        fake_site["states"][entity] = "Mode A"
+        fake_site["attributes"][entity] = {"options": ["Mode A", "Mode B"]}
+    fake_site["setup"](
+        apply_mode=True, tou_grid_charge_entity_template="select.inverter_program_{n}_charging"
+    )
+    report = pipeline.run()
+    assert any("нет подходящего варианта" in e for e in report["advisory"]["apply_errors"])
+
+
+def test_routine_replans_stay_quiet_unless_they_write(fake_site):
+    report = pipeline.run(notify="changes")  # shadow mode: nothing written
+    assert report["advisory"]["applied"] == []
+    assert not [s for s in fake_site["services"] if s[0] == "persistent_notification"]
+    fake_site["setup"](apply_mode=True)
+    pipeline.run(notify="changes")
+    assert [s for s in fake_site["services"] if s[0] == "persistent_notification"]

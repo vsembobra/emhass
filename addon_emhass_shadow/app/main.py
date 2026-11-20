@@ -21,7 +21,9 @@ STATE = {"running": False, "last_error": None, "last_run": None, "next_run": Non
 LOCK = threading.Lock()
 
 
-def run_pipeline(retrain_first: bool = True) -> None:
+def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
+    """One planning run. notify: "always" (daily, manual, grid change) or
+    "changes" (hourly replans: notify only when something was written)."""
     with LOCK:
         if STATE["running"]:
             return
@@ -43,7 +45,7 @@ def run_pipeline(retrain_first: bool = True) -> None:
             except Exception:
                 # Retraining must never block the daily plan.
                 pass
-        pipeline.run()
+        pipeline.run(notify=notify)
         STATE["last_run"] = datetime.now(UTC).isoformat()
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)
@@ -120,7 +122,15 @@ def latest_report() -> dict | None:
 
 
 TRIGGER_MIN_INTERVAL = timedelta(minutes=20)  # rate limit for event-driven runs
-TRIGGER_STALE_AFTER = timedelta(hours=4)  # replan when the last run is older
+DEFAULT_REPLAN_MINUTES = 60  # MPC cadence: replan when the last run is older
+
+
+def replan_interval(opts) -> timedelta:
+    try:
+        minutes = int(opts.get("replan_minutes", DEFAULT_REPLAN_MINUTES))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_REPLAN_MINUTES
+    return timedelta(minutes=min(240, max(15, minutes)))
 TRIGGER_SOC_DEVIATION_PP = 10.0  # replan when SOC leaves the plan by this much
 TICK_SECONDS = 600
 
@@ -128,11 +138,12 @@ TICK_SECONDS = 600
 def _trigger_reason(opts) -> str | None:
     """Why an unscheduled recalculation is due; None when the plan stands.
 
-    Triggers: the grid binary changed state (outage or restore), no
-    successful run for over 4 h, or the battery SOC deviates from the
-    current hour's optimizer plan by more than 10 pp. Triggered runs are
-    rate-limited to one per 20 minutes so a flapping sensor cannot spin
-    the pipeline.
+    Triggers: the grid binary changed state (outage or restore), the plan
+    is older than the replan interval (hourly by default — the solve takes
+    milliseconds, and a fresh plan keeps the zone values on the measured
+    SOC), or the battery SOC deviates from the current hour's optimizer plan
+    by more than 10 pp. Triggered runs are rate-limited to one per 20
+    minutes so a flapping sensor cannot spin the pipeline.
     """
     last_trigger = STATE.get("last_trigger")
     if last_trigger is not None:
@@ -153,8 +164,8 @@ def _trigger_reason(opts) -> str | None:
     last_run = STATE.get("last_run")
     if last_run is None:
         return "ещё ни одного успешного расчёта"
-    if datetime.now(UTC) - datetime.fromisoformat(last_run) > TRIGGER_STALE_AFTER:
-        return "план устарел (>4 ч)"
+    if datetime.now(UTC) - datetime.fromisoformat(last_run) >= replan_interval(opts):
+        return "плановый пересчёт"
     report = latest_report()
     optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
     soc_opt = optimizer.get("soc_opt")
@@ -215,7 +226,12 @@ def scheduler() -> None:
                             "reason": reason,
                             "at": datetime.now(UTC).isoformat(),
                         }
-                        threading.Thread(target=run_pipeline, daemon=True).start()
+                        # A grid change is news; routine replans speak only
+                        # when they wrote something or failed to.
+                        notify = "always" if reason.startswith("сеть") else "changes"
+                        threading.Thread(
+                            target=run_pipeline, kwargs={"notify": notify}, daemon=True
+                        ).start()
             threading.Thread(target=run_pipeline, daemon=True).start()
         except Exception:
             STATE["last_error"] = traceback.format_exc(limit=5)

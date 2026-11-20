@@ -200,7 +200,7 @@ def test_fresh_install_bootstraps_then_trains_then_plans(monkeypatch, tmp_path):
     monkeypatch.setattr(
         retrain, "retrain_if_due", lambda force=False: order.append(f"retrain force={force}")
     )
-    monkeypatch.setattr(pipeline, "run", lambda: order.append("plan"))
+    monkeypatch.setattr(pipeline, "run", lambda **kwargs: order.append("plan"))
     main.STATE["running"] = False
     main.run_pipeline()
     assert order == ["bootstrap", "retrain force=True", "retrain force=False", "plan"]

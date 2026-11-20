@@ -838,6 +838,12 @@ def update_outage_log(ent, hours: float = 48.0) -> int:
         fetch_entities.append(load[0])
     history: dict[str, list[dict]] = {}
     cursor = now - timedelta(hours=hours)
+    if hours <= 48:
+        # Routine runs (hourly) only need what is new since the journal's
+        # last observation, plus a little overlap for the carry rows.
+        last = _last_observation()
+        if last is not None:
+            cursor = max(cursor, last - timedelta(hours=2))
     while cursor < now:
         chunk_end = min(cursor + timedelta(days=BACKFILL_CHUNK_DAYS), now)
         for entity, states in fetch_history(cursor, chunk_end, fetch_entities).items():
@@ -891,6 +897,7 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
         received = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         (archive / f"{received}.json").write_text(body, encoding="utf-8")
         payload = json.loads(body)
+        prune_weather_archive(archive)
     except OSError:
         files = sorted(archive.glob("*.json"))
         if not files:
@@ -944,6 +951,26 @@ def forecast_load(
         grid, issue_time=issue + pd.Timedelta(hours=HORIZON_HOURS)
     ).loc[day2_index]
     return pd.concat([day1, day2])
+
+
+WEATHER_ARCHIVE_DAYS = 7  # the archive only backs the offline fallback
+
+
+def prune_weather_archive(archive: Path, keep_days: float = WEATHER_ARCHIVE_DAYS) -> int:
+    """Delete snapshots older than keep_days (hourly runs add 24 a day);
+    the newest one always stays. Returns the number removed."""
+    files = sorted(archive.glob("*.json"))
+    cutoff = datetime.now(UTC) - timedelta(days=keep_days)
+    removed = 0
+    for path in files[:-1]:
+        try:
+            received = datetime.strptime(path.stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            continue  # seeded or foreign files are left alone
+        if received < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
 
 
 def load_outage_events() -> list[OutageEvent]:
@@ -1507,7 +1534,8 @@ def validate_entities() -> list[dict]:
         specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
         specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
     for n, entity in enumerate(ent.get("tou_grid_charge", []), start=1):
-        specs.append((f"Зона {n}: заряд из сети", entity, "binary", None))
+        kind = "select" if entity.startswith("select.") else "binary"
+        specs.append((f"Зона {n}: заряд из сети", entity, kind, None))
     specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
     specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
@@ -1540,6 +1568,8 @@ def validate_entities() -> list[dict]:
             except ValueError:
                 row["status"] = "not_numeric"
         elif kind == "binary" and state not in ("on", "off"):
+            row["status"] = "unexpected"
+        elif kind == "select" and state in ("unknown", "unavailable"):
             row["status"] = "unexpected"
         elif kind == "time" and ":" not in state:
             row["status"] = "unexpected"
@@ -1589,7 +1619,9 @@ def recommend_zone_socs(
         )
 
 
-def run() -> dict:
+def run(notify: str = "always") -> dict:
+    """One planning run; notify "changes" sends the notification only when
+    the run wrote to the inverter or hit a write error."""
     configured = options()
     learned_hardware = hardware.load(DATA)
     # autotune: learned capacity/efficiency/limits/geometry replace the
@@ -1960,9 +1992,12 @@ def run() -> dict:
             entity = ent["tou_grid_charge"][item["n"] - 1]
             item["entity"] = entity
             try:
-                item["current"] = str(ha_get(f"/api/states/{entity}")["state"])
+                state = ha_get(f"/api/states/{entity}")
+                item["current"] = str(state["state"])
+                item["options"] = list((state.get("attributes") or {}).get("options") or [])
             except Exception:
                 item["current"] = None
+            item["target_state"] = adapter.flag_state(item, opts)
     applied: list[str] = []
     apply_errors: list[str] = []
     # Writes waiting for read-back: (label, entity, expected, ok message);
@@ -1970,15 +2005,16 @@ def run() -> dict:
     pending: list[tuple[str, str, float | str, str]] = []
     if opts.get("apply_mode", False):
         for item in grid_charge:
-            wanted = "on" if item["desired"] else "off"
+            wanted = item["target_state"]
+            if wanted is None:
+                apply_errors.append(
+                    f"заряд из сети, зона {item['n']}: нет подходящего варианта у {item['entity']}"
+                )
+                continue
             if item["current"] == wanted:
                 continue
-            domain = item["entity"].split(".", 1)[0]
-            if domain not in ("switch", "input_boolean"):
-                apply_errors.append(f"заряд из сети, зона {item['n']}: домен {domain} не поддерживается")
-                continue
             try:
-                ha_service(domain, f"turn_{wanted}", {"entity_id": item["entity"]})
+                ha_service(*adapter.flag_service(item["entity"], wanted))
             except Exception:
                 apply_errors.append(f"заряд из сети, зона {item['n']}")
                 continue
@@ -2343,7 +2379,7 @@ def run() -> dict:
         published = publish_sensors(report, flexible, tz)
     report["data"]["published_sensors"] = published
 
-    if opts.get("notifications", True):
+    if opts.get("notifications", True) and (notify == "always" or applied or apply_errors):
         ha_service(
             "persistent_notification",
             "create",

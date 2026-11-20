@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-LOG_RETENTION_DAYS = 60
+LOG_RETENTION_DAYS = 21  # calibration and the replay tuner read 14 days
 CALIBRATION_WINDOW_DAYS = 14
 DRIFT_WINDOW_DAYS = 7
 MIN_PAIRS = 48  # below this the calibration is the identity

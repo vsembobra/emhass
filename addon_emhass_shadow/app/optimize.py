@@ -206,14 +206,18 @@ def _charge_target_kept(
 ) -> bool:
     """Whether a charging window keeps its rounded-up charge target.
 
-    Only "flat" presses charging windows, and only outside the cheap night
-    hours: with the target pressed to the flat floor the inverter cannot
-    grid-charge at peak prices when PV falls short of the plan. None means
-    the caller gave no window info — keep the target (legacy behavior).
+    A Deye zone's Batt% is the discharge floor AND the grid-charge target.
+    A target above the SOC in a window that is not entirely cheap makes the
+    inverter buy the difference at full price (grid charge on) or refuse to
+    discharge while it lags the plan (grid charge off) — and PV needs no
+    target to charge the battery at all. So, whatever the strategy, only a
+    window lying wholly inside the cheap tariff hours keeps its charge
+    target; pass an empty list when no tariff is enabled. None means the
+    caller gave no window info — keep the target (legacy behaviour).
     """
-    if strategy != "flat" or cheap_windows is None:
+    if cheap_windows is None:
         return True
-    return all(
+    return bool(cheap_windows) and all(
         _is_cheap_minute(
             (lambda local: local.hour * 60 + local.minute)(starts[i].tz_convert(tz)),
             cheap_windows,
@@ -327,11 +331,13 @@ def zone_targets(
       trajectory, saving energy for the evening peak and outages;
     - "flat": the whole-horizon minimum SOC — one low floor everywhere, the
       battery is spent whenever loads appear.
-    Charging windows are unaffected by "ladder". In "flat" a charging window
-    keeps its rounded-up target only when the whole window sits inside
-    tariff_cheap_windows (the night charge zone); a charging window in the
-    expensive period is pressed to the same flat floor, so the inverter
-    cannot grid-charge at peak prices when PV falls short of the plan.
+    With either strategy a charging window keeps its rounded-up target only
+    when the whole window sits inside tariff_cheap_windows (the night charge
+    zone); any other rising window — PV charging, which needs no target —
+    gets the discharging floor, so the inverter can never grid-charge at
+    full price when PV falls short of the plan. The zone in effect right now
+    is also capped at the measured SOC (rounded down) unless it is a cheap
+    charge window: hourly replanning keeps that cap current.
 
     reserve_floors (outage-reserve SOC fraction per horizon step) put a hard
     lower bound on every zone: the highest reserve inside its window. The
@@ -365,7 +371,8 @@ def zone_targets(
         else:
             entry_soc = soc_opt[zone.match - 1]
         end_soc = soc_opt[span[-1]]
-        if end_soc > entry_soc + 0.005 and _charge_target_kept(span, strategy, cheap_windows, starts, tz):
+        cheap_charge = _charge_target_kept(span, strategy, cheap_windows, starts, tz)
+        if end_soc > entry_soc + 0.005 and cheap_charge:
             pct = math.ceil(clamp_pct(end_soc) / soc_step_pct - 1e-9) * soc_step_pct
         else:
             floor_soc = min(soc_opt[i] for i in span)
@@ -373,6 +380,12 @@ def zone_targets(
                 floor_soc = min(floor_soc, horizon_min)
             # Round UP: rounding down would shave up to 5 pp off the reserve.
             pct = math.ceil(clamp_pct(floor_soc) / soc_step_pct - 1e-9) * soc_step_pct
+        if in_effect and not cheap_charge:
+            # The zone in effect governs NOW: a value above the measured SOC
+            # would buy grid energy at full price (or freeze the battery while
+            # it lags the plan). Round the measured SOC DOWN for the cap; the
+            # outage reserve below still wins and is restored at any price.
+            pct = min(pct, math.floor(clamp_pct(soc_init) / soc_step_pct + 1e-9) * soc_step_pct)
         if reserve_floors is not None:
             # The value persists into the zone's next occurrence until a later
             # run rewrites it, so the reserve bound covers the whole window.
@@ -515,7 +528,7 @@ def run_plan(
         "zone_targets": zone_targets(
             soc_opt[:day1], soc_init, programs, starts[:day1], tz, min_soc, max_soc,
             strategy=str(opts.get("day_zone_strategy", "ladder")),
-            cheap_windows=_cheap_windows(opts),
+            cheap_windows=_cheap_windows(opts) if opts.get("tariff_enabled", False) else [],
             reserve_floors=reserve_floors[:day1] if reserve_floors is not None else None,
             soc_step_pct=max(1, int(opts.get("tou_soc_step_pct", 5))),
         ),

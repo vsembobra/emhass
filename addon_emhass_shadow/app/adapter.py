@@ -11,7 +11,9 @@ Inverters steered by power setpoints instead of TOU zones (e.g. Victron
 ESS) are out of scope of this adapter.
 
 Grid-charge policy (only when a per-zone grid-charge entity template is
-configured, and only in apply mode): a zone may charge from the grid when
+configured, and only in apply mode; switch, input_boolean or select such
+as Deye's ``select.inverter_program_{n}_charging``): a zone may charge from
+the grid when
 
 * the zone is entered below the outage reserve it protects (reserve first,
   at any price; the reserve is zero outside an outage series), or
@@ -53,6 +55,71 @@ class InverterCaps:
         if not self.controls_grid_charge:
             return []
         return [self.grid_charge_template.format(n=n) for n in range(1, self.zones + 1)]
+
+
+OFF_WORDS = ("disabled", "disable", "off", "none", "no", "выкл", "нет", "отключено")
+
+
+def select_option(
+    desired: bool,
+    current: str | None,
+    options: list[str],
+    on_override: str = "",
+    off_override: str = "",
+) -> str | None:
+    """Option of a grid-charge ``select`` that means "grid charge on/off".
+
+    Explicit overrides win when they are valid options. Otherwise the names
+    are recognised: "Grid" for on, "Disabled"/"Off" for off. A zone that
+    also charges from a generator keeps it ("Grid & Gen" / "Gen"), so
+    toggling grid charging never silently drops generator charging. None
+    when no option fits (the caller reports it instead of guessing).
+    """
+    options = [str(o) for o in options or []]
+    override = on_override if desired else off_override
+    if override:
+        return override if override in options else None
+    low = {o: o.lower() for o in options}
+    with_gen = current is not None and "gen" in str(current).lower()
+    if desired:
+        grid = [o for o in options if "grid" in low[o] or "сеть" in low[o]]
+        if with_gen:
+            both = [o for o in grid if "gen" in low[o]]
+            if both:
+                return both[0]
+        only = [o for o in grid if "gen" not in low[o]]
+        exact = [o for o in only if low[o] in ("grid", "сеть")]
+        return (exact or only or [None])[0]
+    if with_gen:
+        gen_only = [o for o in options if "gen" in low[o] and "grid" not in low[o]]
+        if gen_only:
+            return gen_only[0]
+    off = [o for o in options if low[o].strip() in OFF_WORDS]
+    return off[0] if off else None
+
+
+def flag_state(item: dict, opts: dict) -> str | None:
+    """State to write for a grid-charge entity, by its domain; None = no fit."""
+    domain = item["entity"].split(".", 1)[0]
+    if domain in ("switch", "input_boolean"):
+        return "on" if item["desired"] else "off"
+    if domain == "select":
+        return select_option(
+            item["desired"],
+            item.get("current"),
+            item.get("options") or [],
+            str(opts.get("tou_grid_charge_on_option") or ""),
+            str(opts.get("tou_grid_charge_off_option") or ""),
+        )
+    return None
+
+
+def flag_service(entity: str, state: str) -> tuple[str, str, dict]:
+    """(domain, service, payload) that sets the grid-charge entity."""
+    domain = entity.split(".", 1)[0]
+    if domain == "select":
+        return "select", "select_option", {"entity_id": entity, "option": state}
+    return domain, f"turn_{state}", {"entity_id": entity}
 
 
 def caps(opts: dict) -> InverterCaps:

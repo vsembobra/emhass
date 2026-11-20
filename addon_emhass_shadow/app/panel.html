@@ -467,7 +467,7 @@ function renderLearning(r) {
   const gc = a.grid_charge || [];
   document.getElementById("gcwrap").style.display = gc.length ? "block" : "none";
   document.getElementById("gc").innerHTML = gc.map(g => "<tr><td>Зона " + g.n + "</td><td>" +
-    esc(g.current ?? "—") + "</td><td>" + (g.desired ? "вкл" : "выкл") + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
+    esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? (g.desired ? "вкл" : "выкл")) + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
 }
 
 function renderOptimizer(opt, profile) {
