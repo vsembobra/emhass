@@ -31,6 +31,7 @@ import numpy as np
 import optimize
 import pandas as pd
 import policy
+import tuner
 
 from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
@@ -763,7 +764,34 @@ def _score(actual: pd.Series, p10: list, p50: list, p90: list) -> dict | None:
     }
 
 
-def update_metrics(audit: pd.DataFrame, tz: ZoneInfo) -> int:
+def hindsight_import(
+    report: dict, audit: pd.DataFrame, starts: pd.DatetimeIndex, opts: dict
+) -> float | None:
+    """Grid import the same plan would have needed with perfect forecasts.
+
+    Re-solves the day with the measured load and PV, the same starting SOC
+    and floors. planned -> hindsight is the cost of forecast error,
+    hindsight -> metered is the cost of execution (the inverter or the
+    zone translation not following the plan).
+    """
+    load = pd.to_numeric(audit["load_kw"], errors="coerce").reindex(starts)
+    pv = pd.to_numeric(audit["pv_measured_kw"], errors="coerce").reindex(starts)
+    soc = pd.to_numeric(audit["soc_mean"], errors="coerce").reindex(starts[:1])
+    if load.isna().sum() > 4 or pv.isna().sum() > 4 or soc.isna().all():
+        return None
+    hourly = report["hourly"]
+    load = load.fillna(pd.Series(hourly["load_p50_kw"], index=starts))
+    pv = pv.fillna(pd.Series(hourly["pv_p50_kw"], index=starts))
+    floors = [step["floor_soc"] for step in report["advisory"]["floor_profile"]]
+    plan = optimize.run_plan(
+        starts, list(pv), list(load), floors, float(soc.iloc[0]), [], opts
+    )
+    if plan is None or not plan.get("p_grid_kw"):
+        return None
+    return round(sum(max(0.0, float(v)) for v in plan["p_grid_kw"]), 2)
+
+
+def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) -> int:
     """Score fully observed past reports against audit actuals, append once."""
     entries = []
     if METRICS.exists():
@@ -807,12 +835,21 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo) -> int:
         if plan_grid and len(plan_grid) >= HORIZON_HOURS:
             actual_import = audit["grid_power_kw_raw_sign"].reindex(starts).clip(lower=0.0)
             if actual_import.notna().sum() >= 20:
-                entry["plan_vs_fact"] = {
-                    "planned_grid_kwh": round(
-                        sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS]), 2
-                    ),
-                    "actual_grid_kwh": round(float(actual_import.sum()), 2),
-                }
+                planned = round(sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS]), 2)
+                actual = round(float(actual_import.sum()), 2)
+                entry["plan_vs_fact"] = {"planned_grid_kwh": planned, "actual_grid_kwh": actual}
+                hindsight = None
+                if opts is not None:
+                    try:
+                        hindsight = hindsight_import(report, audit, starts, opts)
+                    except Exception:
+                        hindsight = None
+                if hindsight is not None:
+                    entry["plan_vs_fact"].update(
+                        hindsight_grid_kwh=hindsight,
+                        forecast_effect_kwh=round(hindsight - planned, 2),
+                        execution_effect_kwh=round(actual - hindsight, 2),
+                    )
         entries.append(entry)
         added += 1
     if added:
@@ -855,6 +892,29 @@ def _retrain_note() -> str | None:
         f"• Переобучение моделей: нагрузка — {fmt(models.get('load', {}))}, "
         f"солнце — {fmt(models.get('pv', {}))}"
     )
+
+
+DEFICIT_MODE_LABELS = {
+    "conservative": "осторожный",
+    "moderate": "средний",
+    "expected": "по ожиданию",
+}
+
+
+def _tuning_note(tuning: dict | None, mode: str, autotune: bool) -> str | None:
+    """One notification line: what the replay on the site's history chose."""
+    if not tuning or not tuning.get("best"):
+        return None
+    best = tuning["candidates"][tuning["best"]]
+    line = (
+        f"• Подбор на истории ({tuning['windows']} сут): лучший запас до утра — "
+        f"{DEFICIT_MODE_LABELS.get(tuning['best'], tuning['best'])} "
+        f"(недоданная критическая {best['unserved_critical_kwh']:.1f} кВт·ч, "
+        f"усечение {best['curtailed_kwh']:.1f} кВт·ч, стоимость {best['net_cost']:.1f})"
+    )
+    if autotune:
+        return line + f" — применён: {DEFICIT_MODE_LABELS.get(mode, mode)}"
+    return line + " — совет, автонастройка выключена"
 
 
 def autonomy(
@@ -999,11 +1059,17 @@ def _plan_vs_fact_note() -> str | None:
         pvf = entry.get("plan_vs_fact")
         if pvf:
             delta = pvf["actual_grid_kwh"] - pvf["planned_grid_kwh"]
-            return (
+            line = (
                 f"• План vs факт ({entry['date']}): импорт из сети по плану "
                 f"{pvf['planned_grid_kwh']} кВт·ч, по счётчику {pvf['actual_grid_kwh']} кВт·ч "
                 f"({delta:+.1f})"
             )
+            if "forecast_effect_kwh" in pvf:
+                line += (
+                    f": из-за прогноза {pvf['forecast_effect_kwh']:+.1f}, "
+                    f"из-за исполнения {pvf['execution_effect_kwh']:+.1f}"
+                )
+            return line
     return None
 
 
@@ -1402,7 +1468,16 @@ def run() -> dict:
     # The to-sunrise deficit is sized on the quantiles the priority (and,
     # with autotune, the replay tuner) selects; the outage reserve below
     # always stays on pessimistic PV.
-    deficit_mode = policy.default_deficit_mode(opts)
+    tuning = tuner.load(DATA)
+    if tuner.due(DATA):
+        try:
+            tuning = tuner.tune(
+                audit, learning.read_forecast_log(DATA / "forecast_log.jsonl"), opts, tz, issue, soh
+            )
+            tuner.save(DATA, tuning)
+        except Exception:
+            pass  # tuning is advisory; the plan runs on the default mode
+    deficit_mode = tuner.tuned_mode(opts, tuning)
     deficit_load, deficit_pv = policy.deficit_inputs(
         deficit_mode,
         {q: load_prediction[f"load_{q}_kw"].to_numpy() for q in ("p10", "p50", "p90")},
@@ -1646,7 +1721,7 @@ def run() -> dict:
         q: round(float(load_prediction[f"load_{q}_kw"].iloc[HORIZON_HOURS:].sum()), 2)
         for q in ("p10", "p50", "p90")
     }
-    metrics_scored = update_metrics(audit, tz)
+    metrics_scored = update_metrics(audit, tz, dict(opts, capacity_kwh=float(opts["capacity_kwh"]) * soh))
     delta_pp = round((recommended_floor - current_floor) * 100)
 
     pv_line = (
@@ -1779,6 +1854,9 @@ def run() -> dict:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
         )
+    tuning_note = _tuning_note(tuning, deficit_mode, bool(opts.get("autotune")))
+    if tuning_note is not None:
+        lines.append(tuning_note)
     hardware_note = _hardware_note(configured, learned_hardware, autotune_notes)
     if hardware_note is not None:
         lines.append(hardware_note)
@@ -1816,6 +1894,7 @@ def run() -> dict:
             "plan_horizon_hours": PLAN_HOURS,
             "priority_mode": str(opts.get("priority_mode", policy.DEFAULT_PRIORITY)),
             "deficit_mode": deficit_mode,
+            "tuning": tuning,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
             "hardware": {
                 "learned": learned_hardware,
