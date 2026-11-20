@@ -20,7 +20,9 @@ import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pipeline
 
 from emhass.load_quantiles import LoadQuantileBundle
 from emhass.pv_quantiles import PvGeometry, PvQuantileBundle, plane_power_kw
@@ -202,14 +204,17 @@ def _fill_audit_temperature(audit: pd.DataFrame, weather: pd.DataFrame | None) -
     day-ahead temperature is close to the actual and keeps the temp_lag
     feature of the load model alive. Observed values always win.
     """
-    if weather is None or "temperature_2m_previous_day1" not in weather:
-        return audit
-    if "temp_air_observed_c" not in audit:
-        return audit
-    filled = audit["temp_air_observed_c"].fillna(
-        weather["temperature_2m_previous_day1"].reindex(audit.index)
+    # The column can be missing altogether: backfill rewrites the audit
+    # without null fields, so a site with no outdoor sensor loses it, and
+    # _retrain_load would then fail on the KeyError.
+    observed = (
+        pd.to_numeric(audit["temp_air_observed_c"], errors="coerce")
+        if "temp_air_observed_c" in audit
+        else pd.Series(np.nan, index=audit.index)
     )
-    return audit.assign(temp_air_observed_c=filled)
+    if weather is not None and "temperature_2m_previous_day1" in weather:
+        observed = observed.fillna(weather["temperature_2m_previous_day1"].reindex(audit.index))
+    return audit.assign(temp_air_observed_c=observed)
 
 
 def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = None) -> dict:
@@ -242,7 +247,10 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
     )
     frame = pd.DataFrame(index=audit.index)
     measured = pd.to_numeric(audit["pv_measured_kw"], errors="coerce")
-    frame["pv_measured_kw"] = measured.where(audit["pv_filter"] == "keep")
+    # Re-check censoring on every stored row: hours recorded before the
+    # taper/saturation rules existed still say "keep" in pv_filter.
+    censored = pipeline.pv_sink_limited_mask(audit, site.get("max_charge_kw"))
+    frame["pv_measured_kw"] = measured.where((audit["pv_filter"] == "keep") & ~censored)
     frame["poa_forecast_kw"] = poa.reindex(audit.index)
     frame["cloud_cover_pct"] = weather["cloud_cover_previous_day1"].reindex(audit.index)
     frame["temp_air_c"] = weather["temperature_2m_previous_day1"].reindex(audit.index)
@@ -299,6 +307,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             "panel_kwp": opts.get("panel_kwp", 7.0),
             "panel_tilt_deg": opts.get("panel_tilt_deg", 26.0),
             "panel_azimuth_deg": opts.get("panel_azimuth_deg", 195.0),
+            "max_charge_kw": opts.get("max_charge_kw"),
         }
     result = {"started_utc": datetime.now(UTC).isoformat(), "models": {}}
     try:

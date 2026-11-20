@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 import certifi
 import numpy as np
+import optimize
 import pandas as pd
 
 from emhass.battery_planning import ForecastStep, floor_profile
@@ -248,7 +249,84 @@ def grid_status_series(states):
     return series
 
 
-def build_audit_rows(history, hours, latitude, longitude, ent):
+CURTAIL_FULL_SOC = 0.95  # battery full: nothing absorbs a PV surplus
+CURTAIL_TAPER_SOC = 0.90  # BMS tapers charge current near full
+CURTAIL_SATURATION = 0.9  # share of max charge power counted as "charging flat out"
+FLOW_EPS_KW = 0.05  # hourly mean power below this is "no flow"
+
+
+def _finite(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def pv_sink_limited(
+    soc_mean, export_kwh, battery_kw, grid_kw, max_charge_kw=None
+) -> bool:
+    """Whether measured PV was likely throttled for lack of a sink.
+
+    With feed-in closed the inverter caps PV at load + battery charge, so
+    measured PV is only a lower bound of what the array could produce.
+    Exporting means a sink existed, so the hour is never flagged then;
+    otherwise three signatures (sign convention: battery < 0 charging,
+    grid > 0 importing):
+
+    * battery full (SOC >= 95 %);
+    * charge taper: SOC >= 90 %, battery charging, no grid import — the BMS
+      limits the current, the surplus above it is throttled;
+    * charge saturation: battery charging at >= 90 % of max_charge_kw with
+      no grid import — load + max charge is the ceiling.
+
+    On a no-export site export is always 0, so the former rule
+    (SOC >= 95 % and no export) missed the taper and saturation hours; they
+    reached the PV model as "cloudy" rows and pulled the forecast down.
+    Values may be None/NaN (unknown): an unknown export never flags.
+    """
+    soc = _finite(soc_mean)
+    export = _finite(export_kwh)
+    if soc is None or export is None or export > 0.01:
+        return False
+    if soc >= CURTAIL_FULL_SOC:
+        return True
+    battery = _finite(battery_kw)
+    charging_kw = -battery if battery is not None and battery < 0 else 0.0
+    grid = _finite(grid_kw)
+    if charging_kw <= FLOW_EPS_KW or (grid is not None and grid > FLOW_EPS_KW):
+        return False
+    if soc >= CURTAIL_TAPER_SOC:
+        return True
+    limit = _finite(max_charge_kw)
+    return bool(limit) and charging_kw >= CURTAIL_SATURATION * limit
+
+
+def pv_sink_limited_mask(audit: pd.DataFrame, max_charge_kw=None) -> pd.Series:
+    """pv_sink_limited over stored audit rows (columns may be absent)."""
+
+    def column(name: str) -> pd.Series:
+        if name in audit:
+            return audit[name]
+        return pd.Series(np.nan, index=audit.index)
+
+    return pd.Series(
+        [
+            pv_sink_limited(soc, export, battery, grid, max_charge_kw)
+            for soc, export, battery, grid in zip(
+                column("soc_mean"),
+                column("export_kwh"),
+                column("battery_power_kw_raw_sign"),
+                column("grid_power_kw_raw_sign"),
+                strict=True,
+            )
+        ],
+        index=audit.index,
+        dtype=bool,
+    )
+
+
+def build_audit_rows(history, hours, latitude, longitude, ent, max_charge_kw=None):
     means = {
         field: numeric_samples(history.get(entity, []), scale)
         for field, (entity, scale) in ent["mean_sensors"].items()
@@ -318,11 +396,12 @@ def build_audit_rows(history, hours, latitude, longitude, ent):
             row["pv_filter"] = "outside_daylight"
             row["possible_pv_curtailment"] = False
         else:
-            curtailment = (
-                row["soc_mean"] is not None
-                and row["soc_mean"] >= 0.95
-                and row["export_kwh"] is not None
-                and row["export_kwh"] <= 0.01
+            curtailment = pv_sink_limited(
+                row["soc_mean"],
+                row["export_kwh"],
+                row.get("battery_power_kw_raw_sign"),
+                row.get("grid_power_kw_raw_sign"),
+                max_charge_kw,
             )
             row["possible_pv_curtailment"] = bool(curtailment)
             if row["pv_measured_kw"] is None:
@@ -370,7 +449,14 @@ def _rows_for_hours(site, ent, hours: list) -> list[dict]:
         chunk_hours = [h for h in hours if cursor <= h < chunk_end]
         history = fetch_history(cursor, chunk_end, entities)
         rows.extend(
-            build_audit_rows(history, chunk_hours, site["latitude"], site["longitude"], ent)
+            build_audit_rows(
+                history,
+                chunk_hours,
+                site["latitude"],
+                site["longitude"],
+                ent,
+                max_charge_kw=site.get("max_charge_kw"),
+            )
         )
         cursor = chunk_end
     return rows
@@ -571,7 +657,7 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={site['latitude']}&longitude={site['longitude']}"
-        f"&hourly={variables}&forecast_hours=48&timezone=UTC&timeformat=unixtime"
+        f"&hourly={variables}&past_hours=48&forecast_hours=48&timezone=UTC&timeformat=unixtime"
     )
     archive = DATA / "weather_archive"
     archive.mkdir(exist_ok=True)
@@ -592,6 +678,47 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
     frame = pd.DataFrame(payload["hourly"])
     frame["start_utc"] = pd.to_datetime(frame.pop("time"), unit="s", utc=True)
     return frame.set_index("start_utc").sort_index(), received + ".json", stale
+
+
+def forecast_load(
+    bundle: LoadQuantileBundle,
+    audit: pd.DataFrame,
+    starts_plan: pd.DatetimeIndex,
+    issue: datetime,
+    weather: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Causal 48 h load quantiles: day 1 direct, day 2 recursive.
+
+    The model's 24 h features (load lag/rolling mean, temperature lag) for
+    day 2 read day-1 hours, which are still in the future at issue time.
+    Left as NaN — a value never seen in training — they degraded day 2 to a
+    calendar + lag-168 guess, and day 2 is what drives tonight's charging.
+    Day-1 P50 stands in for the missing load actuals, the weather forecast
+    for the missing temperatures.
+
+    Temperature gaps (no outdoor sensor, sensor outages) are filled from
+    Open-Meteo on the whole grid: the fetch carries past hours, so day 1's
+    temp lag reads the recent past too, matching training, which fills the
+    same gaps from the previous-runs archive. Observed values always win.
+    """
+    day1_index = starts_plan[:HORIZON_HOURS]
+    day2_index = starts_plan[HORIZON_HOURS:]
+    grid = audit.reindex(columns=["temp_air_observed_c", "load_kw"]).apply(
+        pd.to_numeric, errors="coerce"
+    )
+    grid = grid.reindex(grid.index.union(starts_plan))
+    if weather is not None and "temperature_2m" in weather:
+        grid["temp_air_observed_c"] = grid["temp_air_observed_c"].fillna(
+            pd.to_numeric(weather["temperature_2m"], errors="coerce").reindex(grid.index)
+        )
+    day1 = bundle.predict(grid.loc[: day1_index[-1]], issue_time=issue).loc[day1_index]
+    if not len(day2_index):
+        return day1
+    grid.loc[day1_index, "load_kw"] = day1["load_p50_kw"].to_numpy()
+    day2 = bundle.predict(
+        grid, issue_time=issue + pd.Timedelta(hours=HORIZON_HOURS)
+    ).loc[day2_index]
+    return pd.concat([day1, day2])
 
 
 def load_outage_events() -> list[OutageEvent]:
@@ -963,6 +1090,34 @@ def _entity_issue_note(checks: list[dict]) -> str | None:
     return f"• ⚠️ Проверь настройки сущностей: {items}"
 
 
+def recommend_zone_socs(
+    programs: list[dict],
+    floors: list[float],
+    reserve_floors: list[float],
+    starts: pd.DatetimeIndex,
+    tz: ZoneInfo,
+) -> None:
+    """Heuristic Batt% per TOU zone, stored as program["recommended_soc_pct"].
+
+    Each zone gets the floating floor of its own start hour (next occurrence
+    in the horizon), raised to the highest outage reserve inside the zone's
+    window. The start-hour floor alone is the daily low for a zone such as
+    09:00-17:00; the inverter holds that one value all afternoon, so on a
+    cloudy day the battery could drain below the reserve the evening hours
+    of the same zone need.
+    """
+    windows = optimize.zone_windows(programs, starts, tz)
+    for program in programs:
+        zone = windows[program["n"]]
+        if zone is None:
+            program["recommended_soc_pct"] = None
+            continue
+        match, window, _ = zone
+        program["recommended_soc_pct"] = max(
+            round(floors[match] * 100), optimize.reserve_floor_pct(reserve_floors, window)
+        )
+
+
 def run() -> dict:
     opts = options()
     ent = resolve_entities(opts)
@@ -975,7 +1130,9 @@ def run() -> dict:
     tz = ZoneInfo(site["time_zone"])
 
     audit, appended = update_audit(
-        site, ent, backfill_days=float(opts.get("history_backfill_days", 14))
+        dict(site, max_charge_kw=opts.get("max_charge_kw")),
+        ent,
+        backfill_days=float(opts.get("history_backfill_days", 14)),
     )
     new_transitions = update_outage_log(ent)
 
@@ -991,24 +1148,9 @@ def run() -> dict:
         weather, weather_name, weather_stale = archive_weather(site)
     except OSError:
         weather, weather_name, weather_stale = None, None, True
-    if weather is not None and "temp_air_observed_c" in audit:
-        audit = audit.assign(
-            temp_air_observed_c=audit["temp_air_observed_c"].fillna(
-                weather["temperature_2m"].reindex(audit.index)
-            )
-        )
-
     try:
         load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
-        grid = audit[["temp_air_observed_c", "load_kw"]].copy()
-        grid = grid.reindex(grid.index.union(starts_plan))
-        # Causal 48 h: two 24 h windows. For day 2 the issue time is shifted
-        # by 24 h, so lag-24 features read today's actuals — known at issue.
-        day1 = load_bundle.predict(grid.loc[: starts[-1]], issue_time=issue).loc[starts]
-        day2 = load_bundle.predict(
-            grid, issue_time=issue + pd.Timedelta(hours=HORIZON_HOURS)
-        ).loc[starts_plan[HORIZON_HOURS:]]
-        load_prediction = pd.concat([day1, day2])
+        load_prediction = forecast_load(load_bundle, audit, starts_plan, issue, weather)
     except (OSError, ValueError, KeyError):
         models_learning = True
         load_prediction = _fallback_load_prediction(audit, starts_plan, tz)
@@ -1152,6 +1294,9 @@ def run() -> dict:
     floors_plan = [math.ceil(step.floor_soc / 0.05 - 1e-9) * 0.05 for step in profile.steps]
     floors = floors_plan[:HORIZON_HOURS]  # advisory/report day; plan horizon is longer
     recommended_floor = floors[0]  # binding constraint is the current hour
+    # Outage reserve alone, as device SOC per hour: the hard lower bound of
+    # every TOU zone (see optimize.zone_targets / recommend_zone_socs).
+    reserve_floors_plan = [settings.floor_for_energy(kwh)[0] for kwh in reserve_by_hour]
 
     floor_entity = ent["floor_input"]
     floor_warning: str | None = None
@@ -1169,21 +1314,7 @@ def run() -> dict:
         soc = float(ha_get(f"/api/states/{soc_entity}")["state"])
         start = ha_get(f"/api/states/{time_entity}")["state"]
         programs.append({"n": n, "from": start, "soc_pct": soc})
-    # Each TOU zone gets the floor of its own start hour (next occurrence in
-    # the horizon), not a single all-day value.
-    for program in programs:
-        hour = int(program["from"][:2])
-        match = next(
-            (
-                i
-                for i in range(HORIZON_HOURS)
-                if starts[i].astimezone(tz).hour == hour and starts[i] >= issue
-            ),
-            None,
-        )
-        program["recommended_soc_pct"] = (
-            round(floors[match] * 100) if match is not None else None
-        )
+    recommend_zone_socs(programs, floors, reserve_floors_plan[:HORIZON_HOURS], starts, tz)
     would_raise = [
         p
         for p in programs
@@ -1201,8 +1332,6 @@ def run() -> dict:
     optimizer_plan = None
     if opts.get("optimizer_enabled", True):
         try:
-            import optimize
-
             load_p50 = [
                 float(load_prediction["load_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)
             ]
@@ -1210,6 +1339,7 @@ def run() -> dict:
             optimizer_plan = optimize.run_plan(
                 starts_plan, pv_p50, load_p50, floors_plan,
                 float(battery_now) / 100.0, programs, opt_opts,
+                reserve_floors=reserve_floors_plan,
             )
         except Exception:
             optimizer_plan = None

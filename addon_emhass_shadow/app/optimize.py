@@ -11,12 +11,14 @@ Shadow mode: results are advisory only, nothing is written to the inverter.
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
-from emhass.optimization import Optimization
+if TYPE_CHECKING:
+    from emhass.optimization import Optimization
 
 DAY_HOURS = 24  # applied/reporting day; the planning horizon may be longer (MPC)
 
@@ -79,7 +81,11 @@ def soc_bounds(opts: dict) -> tuple[float, float]:
 def _build_optimization(
     opts: dict, tz_name: str, battery_off: bool, soc_final_reward_factor: float = 0.0,
     horizon_hours: int = DAY_HOURS,
-) -> Optimization:
+) -> "Optimization":
+    # Lazy: the zone-window helpers below are shared with the heuristic floor
+    # path, which must keep working even when the solver stack fails to load.
+    from emhass.optimization import Optimization
+
     logger = logging.getLogger("emhass_shadow.optimize")
     logger.handlers = []
     logger.addHandler(logging.NullHandler())
@@ -158,7 +164,7 @@ def _build_optimization(
 
 
 def _solve(
-    optimizer: Optimization,
+    optimizer: "Optimization",
     starts: pd.DatetimeIndex,
     prices: list[float],
     pv_w: np.ndarray,
@@ -216,10 +222,55 @@ def _charge_target_kept(
     )
 
 
+def zone_windows(
+    programs: list[dict], starts: pd.DatetimeIndex, tz: ZoneInfo
+) -> dict[int, tuple[int, list[int], int] | None]:
+    """Per TOU zone: (start index, window indices, forward end) in the horizon.
+
+    The window runs from the zone's start to the next zone start in cyclic
+    horizon order; a zone crossing the horizon edge (e.g. 00:00-07:00 when
+    the horizon starts at 01:00) wraps around to the earliest one. The
+    forward end is the chronological end without that wrap. None when the
+    zone's start hour does not occur in the horizon.
+    """
+    matches = {}
+    for program in programs:
+        hour = int(program["from"][:2])
+        matches[program["n"]] = next(
+            (i for i in range(len(starts)) if starts[i].tz_convert(tz).hour == hour),
+            None,
+        )
+    starts_idx = sorted(i for i in matches.values() if i is not None)
+    windows: dict[int, tuple[int, list[int], int] | None] = {}
+    for n, match in matches.items():
+        if match is None:
+            windows[n] = None
+            continue
+        later = [i for i in starts_idx if i > match]
+        end = later[0] if later else (starts_idx[0] if starts_idx else len(starts))
+        if end > match:
+            window = list(range(match, end))
+        else:
+            window = list(range(match, len(starts))) + list(range(0, end))
+        windows[n] = (match, window or [match], later[0] if later else len(starts))
+    return windows
+
+
+def reserve_floor_pct(reserve_floors: list[float], window: list[int]) -> int:
+    """Highest outage-reserve floor inside a zone window, in % rounded UP to 5.
+
+    A TOU zone holds one Batt% for its whole window, so it must protect the
+    highest reserve any hour of that window needs — not the reserve at the
+    zone start or at the window's SOC minimum.
+    """
+    return math.ceil(max(reserve_floors[i] for i in window) * 100.0 / 5.0 - 1e-9) * 5
+
+
 def zone_targets(
     soc_opt: list[float], soc_init: float, programs: list[dict],
     starts: pd.DatetimeIndex, tz: ZoneInfo, min_soc: float, max_soc: float,
     strategy: str = "ladder", cheap_windows: list[tuple[int, int]] | None = None,
+    reserve_floors: list[float] | None = None,
 ) -> list[dict]:
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
@@ -249,16 +300,15 @@ def zone_targets(
     tariff_cheap_windows (the night charge zone); a charging window in the
     expensive period is pressed to the same flat floor, so the inverter
     cannot grid-charge at peak prices when PV falls short of the plan.
+
+    reserve_floors (outage-reserve SOC fraction per horizon step) put a hard
+    lower bound on every zone: the highest reserve inside its window. The
+    trajectory meets the floor only at step ends, and the inverter holds one
+    value for the whole zone, so without this bound a zone whose SOC minimum
+    falls on a low-reserve hour lets the battery drain below the reserve of
+    a later, riskier hour of the same zone whenever load exceeds forecast.
     """
-    matches = {}
-    for program in programs:
-        hour = int(program["from"][:2])
-        match = next(
-            (i for i in range(len(starts)) if starts[i].tz_convert(tz).hour == hour),
-            None,
-        )
-        matches[program["n"]] = match
-    starts_idx = sorted(i for i in matches.values() if i is not None)
+    windows = zone_windows(programs, starts, tz)
 
     def clamp_pct(soc: float) -> float:
         return min(max(soc, min_soc), max_soc) * 100.0
@@ -267,29 +317,18 @@ def zone_targets(
 
     targets = []
     for program in programs:
-        match = matches[program["n"]]
-        if match is None:
+        zone = windows[program["n"]]
+        if zone is None:
             targets.append({**program, "optimal_soc_pct": None})
             continue
-        # Window runs from this zone's start to the next zone start in cyclic
-        # horizon order; a zone crossing the horizon edge (e.g. 00:00-07:00
-        # when the horizon starts at 01:00) wraps around to the earliest one.
-        later = [i for i in starts_idx if i > match]
-        end = later[0] if later else (starts_idx[0] if starts_idx else len(soc_opt))
-        if end > match:
-            window = list(range(match, end))
-        else:
-            window = list(range(match, len(soc_opt))) + list(range(0, end))
+        match, window, forward_end = zone
         entry_soc = soc_init if match == 0 else soc_opt[match - 1]
         # Charge detection runs on the chronological forward part only:
         # [match, next zone start) without the cyclic wrap. The wrap part is
         # the horizon's beginning — earlier in real time — so its end_soc
         # would compare "today evening" against "tomorrow morning" and could
         # fake a rising window, pinning the zone to a bogus charge target.
-        forward_end = later[0] if later else len(soc_opt)
         end_soc = soc_opt[forward_end - 1]
-        if not window:
-            window = [match]
         if end_soc > entry_soc + 0.005 and _charge_target_kept(window, strategy, cheap_windows, starts, tz):
             pct = math.ceil(clamp_pct(end_soc) / 5.0 - 1e-9) * 5
         else:
@@ -298,6 +337,9 @@ def zone_targets(
                 floor_soc = min(floor_soc, horizon_min)
             # Round UP: rounding down would shave up to 5 pp off the reserve.
             pct = math.ceil(clamp_pct(floor_soc) / 5.0 - 1e-9) * 5
+        if reserve_floors is not None:
+            reserve_pct = reserve_floor_pct(reserve_floors, window)
+            pct = max(pct, min(reserve_pct, math.floor(max_soc * 100.0 + 1e-9)))
         targets.append({**program, "optimal_soc_pct": pct})
     return targets
 
@@ -310,6 +352,7 @@ def run_plan(
     soc_init: float,
     programs: list[dict],
     opts: dict,
+    reserve_floors: list[float] | None = None,
 ) -> dict | None:
     """Optimal plan over len(starts) hours (24 or 48); None when infeasible.
 
@@ -321,6 +364,8 @@ def run_plan(
     handed to the solver as a hard end-of-step floor profile. The baseline
     re-solve with a disabled battery prices the plan against doing nothing,
     giving the expected daily value of battery actions in tariff units.
+    reserve_floors are the per-hour outage-reserve SOC fractions; every zone
+    target is held at or above the highest reserve inside its window.
     """
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
@@ -427,5 +472,6 @@ def run_plan(
             soc_opt[:day1], soc_init, programs, starts[:day1], tz, min_soc, max_soc,
             strategy=str(opts.get("day_zone_strategy", "ladder")),
             cheap_windows=_cheap_windows(opts),
+            reserve_floors=reserve_floors[:day1] if reserve_floors is not None else None,
         ),
     }
