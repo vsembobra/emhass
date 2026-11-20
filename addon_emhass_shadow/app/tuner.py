@@ -140,8 +140,8 @@ def floor_at(
     starts = starts[index:]
     reserves = entry["reserve_kwh_by_hour"][index:]
     steps = [
-        ForecastStep(start.to_pydatetime(), 1.0, float(p), float(l))
-        for start, p, l in zip(starts, deficit_pv, deficit_load, strict=True)
+        ForecastStep(start.to_pydatetime(), 1.0, float(pv_kw), float(load_kw))
+        for start, pv_kw, load_kw in zip(starts, deficit_pv, deficit_load, strict=True)
     ]
     profile = floor_profile(steps, reserves, settings)
     reserve_floor = settings.floor_for_energy(float(reserves[0]))[0]
