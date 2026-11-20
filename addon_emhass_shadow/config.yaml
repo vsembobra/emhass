@@ -6,7 +6,7 @@ description: >-
   целевые SOC для шести зон TOU, ночная зарядка по дешёвому тарифу. Модели
   периодически переобучаются на накопленных данных объекта, точность
   прогнозов отслеживается в панели. В инвертор ничего не записывает.
-version: "0.8.3"
+version: "0.8.4"
 slug: emhass_shadow
 init: false
 arch:
@@ -63,7 +63,7 @@ options:
   tariff_cheap_windows: "23:00-07:00"
   reserve_cold_start_hours: 2.0
   reserve_pv_aware: true
-  entity_battery_soh: sensor.inverter_battery_soh
+  entity_battery_soh: ""
 schema:
   latitude: float(-90,90)
   longitude: float(-180,180)
@@ -227,7 +227,7 @@ translations:
         description: "ВКЛ: в часы, когда пессимистичный прогноз солнца перекрывает критическую нагрузку, резерв отключений на эти часы снижается (ночной резерв не меняется). ВЫКЛ: резерв одинаковый круглые сутки."
       entity_battery_soh:
         name: Сущность — износ батареи (SoH)
-        description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh. Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = считать батарею новой (100%)."
+        description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh, или просто число (99 = 99%). Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = считать батарею новой (100%)."
   en:
     configuration:
       latitude:
@@ -349,4 +349,4 @@ translations:
         description: "ON: during hours where the pessimistic solar forecast covers the critical load, the outage reserve for those hours is reduced (the night reserve is unchanged). OFF: the reserve is flat around the clock."
       entity_battery_soh:
         name: Entity — battery SoH
-        description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh. Used for reserve sizing and optimizer energy accounting. Empty = assume a new battery (100%)."
+        description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh, or a plain number (99 = 99%). Used for reserve sizing and optimizer energy accounting. Empty = assume a new battery (100%)."

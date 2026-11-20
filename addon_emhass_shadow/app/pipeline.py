@@ -593,9 +593,123 @@ def _soc_bounds(opts: dict) -> tuple[float, float]:
     return float(opts["min_soc"]), float(opts["max_soc"])
 
 
+def _clamp_soh(value: float) -> float:
+    """Percent or fraction in, fraction in [0.4, 1] out.
+
+    Clamped so a glitchy sensor (or a typo) cannot zero out the reserve.
+    """
+    return min(1.0, max(0.4, value / 100.0 if value > 1.5 else value))
+
+
+def _battery_soh(opts: dict) -> tuple[float, str]:
+    """State of health: the option accepts an entity id OR a plain number.
+
+    "99"/"0.95" are used as-is (manual), "sensor.inverter_battery_soh" is
+    read from Home Assistant, empty means "assume a fresh 100 % pack".
+    """
+    raw = str(opts.get("entity_battery_soh") or "").strip()
+    if not raw:
+        return 1.0, "default"
+    try:
+        return _clamp_soh(float(raw)), "manual"
+    except ValueError:
+        pass
+    try:
+        return _clamp_soh(float(ha_get(f"/api/states/{raw}")["state"])), "entity"
+    except Exception:
+        return 1.0, "unavailable"
+
+
+ENTITY_CHECK_LABELS = {
+    "load_kw": "Мощность нагрузки",
+    "critical_load_kw": "Критическая нагрузка",
+    "pv_measured_kw": "Мощность солнца",
+    "battery_power_kw_raw_sign": "Мощность батареи",
+    "grid_power_kw_raw_sign": "Мощность сети",
+    "temp_air_observed_c": "Уличная температура",
+}
+
+
+def validate_entities() -> list[dict]:
+    """Live-check every configured entity against the HA state machine.
+
+    Returns one row per parameter: label, entity id, current state and a
+    status — ok / ok_number (manual number) / skipped (empty optional) /
+    missing (404) / not_numeric / unexpected. Never raises.
+    """
+    opts = options()
+    ent = resolve_entities(opts)
+    specs: list[tuple[str, str, str]] = [
+        (ENTITY_CHECK_LABELS[field], str(entity or ""), "number")
+        for field, (entity, _scale) in ent["mean_sensors"].items()
+    ]
+    specs += [
+        ("SOC батареи", str(ent["soc"] or ""), "number"),
+        ("Счётчик экспорта", str(ent["export_counter"] or ""), "number"),
+        ("Статус сети", str(ent["grid_binary"] or ""), "binary"),
+    ]
+    specs += [
+        ("Напряжение сети", str(entity or ""), "number")
+        for entity in ent["voltages"].values()
+    ]
+    for n in range(TOU_ZONES):
+        specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number"))
+        specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time"))
+    specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number"))
+    specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh"))
+
+    results = []
+    for label, entity, kind in specs:
+        entity = entity.strip()
+        row = {"label": label, "entity": entity, "state": None, "status": "ok"}
+        if not entity:
+            row["status"] = "skipped"
+            results.append(row)
+            continue
+        if kind == "soh":
+            try:
+                float(entity)  # manual number, not an entity id
+                row.update(state=entity, status="ok_number")
+                results.append(row)
+                continue
+            except ValueError:
+                pass
+        try:
+            state = str(ha_get(f"/api/states/{entity}", timeout=10)["state"])
+        except Exception:
+            row["status"] = "missing"
+            results.append(row)
+            continue
+        row["state"] = state
+        if kind in ("number", "soh"):
+            try:
+                float(state)
+            except ValueError:
+                row["status"] = "not_numeric"
+        elif kind == "binary" and state not in ("on", "off"):
+            row["status"] = "unexpected"
+        elif kind == "time" and ":" not in state:
+            row["status"] = "unexpected"
+        results.append(row)
+    return results
+
+
+def _entity_issue_note(checks: list[dict]) -> str | None:
+    """One notification line listing broken entity bindings, if any."""
+    problems = [c for c in checks if c["status"] in ("missing", "not_numeric", "unexpected")]
+    if not problems:
+        return None
+    wording = {"missing": "не найдена", "not_numeric": "не число", "unexpected": "странное значение"}
+    items = "; ".join(
+        f"{c['label']} ({c['entity']}): {wording[c['status']]}" for c in problems
+    )
+    return f"• ⚠️ Проверь настройки сущностей: {items}"
+
+
 def run() -> dict:
     opts = options()
     ent = resolve_entities(opts)
+    entity_checks = validate_entities()
     site = {
         "latitude": opts["latitude"],
         "longitude": opts["longitude"],
@@ -675,17 +789,9 @@ def run() -> dict:
         pv_day = None
         pv_day2 = None
 
-    # State of health from the inverter sensor (percent or fraction); a
-    # missing/unparseable value keeps the nominal 100 %. Clamped to [0.4, 1]
-    # so a glitchy sensor cannot zero out the reserve.
-    soh = 1.0
-    soh_entity = str(opts.get("entity_battery_soh") or "").strip()
-    if soh_entity:
-        try:
-            raw_soh = float(ha_get(f"/api/states/{soh_entity}")["state"])
-            soh = min(1.0, max(0.4, raw_soh / 100.0 if raw_soh > 1.5 else raw_soh))
-        except Exception:
-            soh = 1.0
+    # State of health: entity id or a plain number ("99"); missing or
+    # unreadable values keep the nominal 100 % and are flagged in the report.
+    soh, soh_source = _battery_soh(opts)
 
     critical = audit["critical_load_kw"].dropna()
     settings = ReserveSettings(
@@ -1011,6 +1117,9 @@ def run() -> dict:
             "• Модели прогноза ещё обучаются на данных этого объекта — "
             "пока используется упрощённый прогноз; точность вырастет через несколько дней"
         )
+    entity_note = _entity_issue_note(entity_checks)
+    if entity_note is not None:
+        lines.append(entity_note)
     if weather_stale and weather_name is not None:
         lines.append(
             f"• Погода: интернет недоступен, взят архивный снапшот {weather_name}"
@@ -1034,6 +1143,8 @@ def run() -> dict:
             "weather_stale": weather_stale,
             "models_learning": models_learning,
             "battery_soh": round(soh, 4),
+            "battery_soh_source": soh_source,
+            "entity_checks": entity_checks,
             "plan_horizon_hours": PLAN_HOURS,
             "reserve_pv_aware": bool(opts.get("reserve_pv_aware", True)),
         },

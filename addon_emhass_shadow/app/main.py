@@ -169,6 +169,11 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 },
             )
+        elif path.endswith("/api/entities") or path == "/api/entities":
+            try:
+                self._json(200, {"checks": pipeline.validate_entities()})
+            except Exception:
+                self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/status") or path == "/api/status":
             audit_rows = None
             audit_path = DATA / "hourly_audit.jsonl"
