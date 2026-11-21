@@ -30,9 +30,7 @@
   .daylegend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 6px; }
   .daylegend i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
   .daylegend i.hatch { background: repeating-linear-gradient(45deg, #199e70 0 3px, transparent 3px 6px); }
-  .daylegend i.dash { height: 0; border-top: 2px dashed #3987e5; border-radius: 0; }
-  rect.daycol { text-decoration: none; }
-  rect.daycol:hover { fill: rgba(230,232,238,.06); }
+  .echart { width: 100%; }
   .dayhead { font-size: 14px; margin: 12px 0 4px; }
   .dayhead b { font-weight: 600; }
   .period b { color: var(--text); font-weight: 600; }
@@ -135,27 +133,26 @@
   <div class="card full" id="daycard" style="display:none">
     <h3>Солнце и батарея по часам</h3>
     <div class="sub daylegend">
-      <span><i style="background:#c98500"></i>прогноз выработки</span>
-      <span><i style="background:rgba(201,133,0,.22)"></i>коридор P10–P90</span>
-      <span><i style="background:#199e70"></i>факт</span>
-      <span><i class="hatch"></i>факт, урезано: батарея полная</span>
-      <span><i style="background:#3987e5;height:2px"></i>заряд, факт</span>
-      <span><i class="dash"></i>заряд, план</span>
+      <span><i class="hatch"></i>штриховка — урезано: батарея была полной, панели могли больше</span>
+      <span class="muted">легенда графика кликабельна · масштаб: Ctrl+колесо или щипок</span>
     </div>
     <div class="sub" id="daynote"></div>
-    <div id="daycharts"></div>
+    <div class="dayhead" id="dayhead0"></div>
+    <div class="echart" id="daychart0" style="height:350px"></div>
+    <div class="dayhead" id="dayhead1"></div>
+    <div class="echart" id="daychart1" style="height:350px"></div>
   </div>
 
   <div class="card full">
     <h3>Пол SOC по часам (плавающий)</h3>
     <div class="sub" id="floornote" style="margin-bottom:8px"></div>
-    <div id="floorbars" style="display:flex;align-items:flex-end;gap:2px;height:90px;margin-bottom:20px"></div>
+    <div class="echart" id="floorchart" style="height:190px"></div>
   </div>
 
   <div class="card full" id="optcard" style="display:none">
     <h3>Оптимальный план (MILP-оптимизатор)</h3>
     <div class="sub" id="optnote" style="margin-bottom:8px"></div>
-    <div id="optbars" style="display:flex;align-items:flex-end;gap:2px;height:90px;margin-bottom:20px"></div>
+    <div class="echart" id="optchart" style="height:210px"></div>
   </div>
 
   <div class="card full">
@@ -215,6 +212,7 @@
   </div>
 </div>
 
+<script src="vendor/echarts.min.js"></script>
 <script>
 const pct = v => Math.round(v * 100) + "%";
 const pp = v => (v > 0 ? "+" + v : v) + " п.п.";
@@ -540,7 +538,7 @@ function render(r) {
       optCell + "</td></tr>";
   }).join("");
   renderFloorProfile(a.floor_profile || [], r.outage_risk);
-  renderOptimizer(a.optimizer, a.floor_profile || []);
+  renderOptimizer(a.optimizer, a.floor_profile || [], r);
   renderLearning(r);
 }
 
@@ -623,7 +621,7 @@ function renderLearning(r) {
     esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? (g.desired ? "вкл" : "выкл")) + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
 }
 
-function renderOptimizer(opt, profile) {
+function renderOptimizer(opt, profile, r) {
   const card = document.getElementById("optcard");
   if (!opt) { card.style.display = "none"; return; }
   card.style.display = "block";
@@ -636,30 +634,46 @@ function renderOptimizer(opt, profile) {
       (opt.night_margin_kwh >= 0.3 ? " (запас на пасмурный день " + opt.night_margin_kwh + ")" : ""));
   if (opt.floor_relaxed) bits.push("⚠️ пол смягчён до минимума — прогноз не достигает резерва");
   document.getElementById("optnote").textContent = bits.join(" · ");
-  const starts = profile.map(s => s.start_local);
-  document.getElementById("optbars").innerHTML = opt.soc_opt.map((s, i) => {
-    const h = Math.round(s * 100);
-    const floor = profile[i] ? Math.round(profile[i].floor_soc * 100) : 0;
-    const below = h < floor - 1;
-    return '<div title="' + (starts[i] || "") + " — SOC " + h + '% (пол ' + floor + '%)" ' +
-      'style="flex:1;height:' + Math.max(6, h * 0.85) + 'px;background:' +
-      (below ? "var(--bad)" : "var(--good)") + ';border-radius:3px 3px 0 0;position:relative">' +
-      '<div class="muted" style="position:absolute;bottom:-16px;left:0;font-size:10px">' +
-      (starts[i] || "").slice(0, 2) + "</div></div>";
-  }).join("");
+  const tz = (r.site && r.site.time_zone) || undefined;
+  const start = Date.parse(r.issue_utc);
+  const labels = opt.soc_opt.map((_, i) => new Date(start + i * 3600e3).toLocaleString("ru-RU",
+    {timeZone: tz, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}));
+  const floor = opt.soc_opt.map((_, i) => profile[i] ? Math.round(profile[i].floor_soc * 100) : null);
+  chartOf("optchart").setOption({
+    animationDurationUpdate: 600,
+    grid: {left: 44, right: 16, top: 30, bottom: 28},
+    legend: legendStyle(["Заряд по плану", "Пол (резерв)"]),
+    tooltip: Object.assign({trigger: "axis"}, TOOLTIP, {valueFormatter: v => v == null ? "—" : v + "%"}),
+    xAxis: Object.assign(axisX(labels), {axisLabel: {color: EC.ink, interval: 5,
+      formatter: v => v.slice(-5)}}),
+    yAxis: axisY(0, 100, "%"),
+    series: [
+      {name: "Заряд по плану", type: "line", smooth: 0.3, showSymbol: false,
+       data: opt.soc_opt.map(v => Math.round(v * 100)),
+       lineStyle: {width: 2, color: EC.soc}, itemStyle: {color: EC.soc},
+       areaStyle: {color: new echarts.graphic.LinearGradient(0, 0, 0, 1,
+         [{offset: 0, color: "rgba(57,135,229,.35)"}, {offset: 1, color: "rgba(57,135,229,0)"}])}},
+      {name: "Пол (резерв)", type: "line", step: "middle", showSymbol: false, data: floor,
+       lineStyle: {width: 2, type: "dashed", color: EC.ink}, itemStyle: {color: EC.ink}},
+    ],
+  });
 }
 
 function renderFloorProfile(profile, risk) {
-  const bars = document.getElementById("floorbars");
-  if (!profile.length) { bars.innerHTML = '<span class="muted">нет данных</span>'; return; }
-  bars.innerHTML = profile.map(s => {
-    const h = Math.round(s.floor_soc * 100);
-    return '<div title="' + s.start_local + " — пол " + h + '%" style="flex:1;height:' +
-      Math.max(6, h * 0.85) + 'px;background:' + (h >= 60 ? "var(--warn)" : "var(--accent)") +
-      ';border-radius:3px 3px 0 0;position:relative">' +
-      '<div class="muted" style="position:absolute;bottom:-16px;left:0;font-size:10px">' +
-      s.start_local.slice(0, 2) + "</div></div>";
-  }).join("");
+  const el = document.getElementById("floorchart");
+  if (!profile.length) { el.innerHTML = '<span class="muted">нет данных</span>'; return; }
+  chartOf("floorchart").setOption({
+    animationDurationUpdate: 600,
+    grid: {left: 44, right: 16, top: 16, bottom: 28},
+    tooltip: Object.assign({trigger: "axis"}, TOOLTIP, {valueFormatter: v => v + "%"}),
+    xAxis: Object.assign(axisX(profile.map(s => s.start_local.slice(0, 5))),
+      {axisLabel: {color: EC.ink, interval: 2}}),
+    yAxis: axisY(0, 100, "%"),
+    series: [{name: "Пол SOC", type: "line", step: "middle", showSymbol: false,
+      data: profile.map(s => Math.round(s.floor_soc * 100)),
+      lineStyle: {width: 2, color: EC.soc}, itemStyle: {color: EC.soc},
+      areaStyle: {color: "rgba(57,135,229,.18)"}}],
+  });
   const note = document.getElementById("floornote");
   const maxF = Math.max(...profile.map(s => s.floor_soc));
   const minF = Math.min(...profile.map(s => s.floor_soc));
@@ -707,11 +721,6 @@ function periodLine(r) {
     fmt(end, true) + "</b>";
 }
 
-function niceMax(v) {
-  const p = Math.pow(10, Math.floor(Math.log10(v)));
-  return [1, 2, 2.5, 5, 10].map(m => m * p).find(m => m >= v);
-}
-
 const kw = v => v == null ? "—" : v.toFixed(2) + " кВт";
 
 function hourHint(h, next) {
@@ -726,90 +735,118 @@ function hourHint(h, next) {
   return t;
 }
 
-// One day as two aligned plots sharing the hour axis (never a second y-scale):
-// solar in kW — forecast bars with the P10-P90 band, measured bars inset with
-// a surface ring, hatched where a full battery throttled the panels — and
-// below it the battery in % (measured solid, planned dashed). Colors are the
+// Charts: Apache ECharts (bundled under vendor/, Apache-2.0). Colors are the
 // validated dark-surface slots: forecast #c98500, actual #199e70, SOC #3987e5.
-const DAY = {surface: "#1c1f26", grid: "#2c313c", ink: "#9aa3b2", text: "#e6e8ee",
-  forecast: "#c98500", band: "rgba(201,133,0,.22)", actual: "#199e70", soc: "#3987e5"};
+const EC = {ink: "#9aa3b2", grid: "#2c313c", text: "#e6e8ee", surface: "#1c1f26",
+  forecast: "#c98500", band: "rgba(201,133,0,.25)", actual: "#199e70", soc: "#3987e5"};
+const TOOLTIP = {backgroundColor: "#2a2f3a", borderColor: "#3a404c", confine: true,
+  textStyle: {color: EC.text, fontSize: 13}, extraCssText: "border-radius:8px;max-width:320px;white-space:normal"};
 
-function barPath(x, w, top, base, r) {
-  // Bar anchored on the baseline with a rounded data end (4 px).
-  r = Math.min(r, w / 2, Math.max(0, base - top));
-  return "M" + x + "," + base + "V" + (top + r) + "Q" + x + "," + top + " " + (x + r) + "," + top +
-    "H" + (x + w - r) + "Q" + (x + w) + "," + top + " " + (x + w) + "," + (top + r) + "V" + base + "Z";
+function chartOf(id) {
+  const el = document.getElementById(id);
+  return echarts.getInstanceByDom(el) || echarts.init(el, null, {renderer: "canvas"});
+}
+window.addEventListener("resize", () => document.querySelectorAll(".echart").forEach(el => {
+  const chart = echarts.getInstanceByDom(el);
+  if (chart) chart.resize();
+}));
+
+function legendStyle(names) {
+  // One row always: on a phone it scrolls instead of wrapping over the plot.
+  return {type: "scroll", data: names, top: 0, right: 8, itemWidth: 14, itemHeight: 8, itemGap: 14,
+    pageIconColor: EC.ink, pageTextStyle: {color: EC.ink},
+    textStyle: {color: EC.ink, fontSize: 12}, inactiveColor: "#4a505c"};
+}
+function axisX(labels) {
+  return {type: "category", data: labels, boundaryGap: true,
+    axisLine: {lineStyle: {color: EC.grid}}, axisTick: {show: false}, axisLabel: {color: EC.ink}};
+}
+function axisY(min, max, unit) {
+  return {type: "value", min, max, splitNumber: 2, name: unit, nameGap: 8,
+    nameTextStyle: {color: EC.ink, align: "right"}, axisLabel: {color: EC.ink},
+    splitLine: {lineStyle: {color: EC.grid}}};
 }
 
-function dayChartSvg(day, nowFraction, id) {
-  const W = 960, L = 44, R = 16, n = day.hours.length, cw = (W - L - R) / n;
-  const P = {top: 24, base: 186}, S = {top: 214, base: 284}, H = 306;
-  const values = [0.5];
-  day.hours.forEach(h => {
-    if (h.forecast) values.push(h.forecast.p90, h.forecast.p50);
-    if (h.actual_kw != null) values.push(h.actual_kw);
-  });
-  const top = niceMax(Math.max(...values));
-  const y = v => P.top + (P.base - P.top) * (1 - Math.max(0, v) / top);
-  const ys = v => S.top + (S.base - S.top) * (1 - Math.min(100, Math.max(0, v)) / 100);
-  const fw = cw - 4, aw = Math.max(4, fw * .46);  // 2 px surface gap each side
-  const text = (x, yy, t, extra) => '<text x="' + x + '" y="' + yy + '" fill="' + DAY.ink +
-    '" font-size="13" ' + (extra || "") + ">" + t + "</text>";
-  let s = '<svg viewBox="0 0 ' + W + " " + H + '" style="width:100%;min-width:720px;height:auto;display:block">' +
-    '<defs><pattern id="hatch' + id + '" patternUnits="userSpaceOnUse" width="6" height="6" ' +
-    'patternTransform="rotate(45)"><rect width="6" height="6" fill="' + DAY.surface + '"/>' +
-    '<rect width="3" height="6" fill="' + DAY.actual + '"/></pattern></defs>';
-  // recessive grid and axis labels
-  [0, top / 2, top].forEach(v => {
-    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="' + DAY.grid + '"/>';
-    s += text(L - 8, y(v) + 4, +v.toFixed(1), 'text-anchor="end"');
-  });
-  [0, 50, 100].forEach(v => {
-    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ys(v) + '" y2="' + ys(v) + '" stroke="' + DAY.grid + '"/>';
-    s += text(L - 8, ys(v) + 4, v, 'text-anchor="end"');
-  });
-  s += text(L, 14, "Солнце, кВт") + text(L, S.top - 10, "Батарея, %");
-  const socFact = [], socPlan = [];
-  let nowPoint = null;
-  day.hours.forEach((h, i) => {
-    const x = L + i * cw, cx = x + cw / 2, f = h.forecast;
-    if (f) {
-      s += '<rect x="' + (x + 2) + '" y="' + y(f.p90) + '" width="' + fw + '" height="' +
-        Math.max(0, y(f.p10) - y(f.p90)) + '" rx="3" fill="' + DAY.band + '"/>';
-      if (f.p50 > 0.005) s += '<path d="' + barPath(x + 2, fw, y(f.p50), P.base, 4) + '" fill="' + DAY.forecast + '"/>';
-    }
-    if (h.actual_kw != null && h.actual_kw > 0.005)
-      s += '<path d="' + barPath(cx - aw / 2, aw, y(h.actual_kw), P.base, 4) + '" fill="' +
-        (h.throttled ? "url(#hatch" + id + ")" : DAY.actual) + '" stroke="' + DAY.surface +
-        '" stroke-width="2"' + (h.current ? ' opacity=".75"' : "") + "/>";
-    if (h.soc_pct != null) socFact.push(cx + "," + ys(h.soc_pct));
-    if (h.current && h.soc_pct != null) nowPoint = [cx, ys(h.soc_pct)];
-    if (h.soc_plan_pct != null) socPlan.push(cx + "," + ys(h.soc_plan_pct));
-    if (i % 3 === 0) s += text(cx, H - 4, h.label + ":00", 'text-anchor="middle"');
-  });
-  s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + P.base + '" y2="' + P.base + '" stroke="' + DAY.ink + '" opacity=".5"/>';
-  if (socPlan.length > 1)
-    s += '<polyline points="' + socPlan.join(" ") + '" fill="none" stroke="' + DAY.soc +
-      '" stroke-width="2" stroke-dasharray="6 5" stroke-linecap="round"/>';
-  if (socFact.length > 1)
-    s += '<polyline points="' + socFact.join(" ") + '" fill="none" stroke="' + DAY.soc +
-      '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-  if (nowPoint)
-    s += '<circle cx="' + nowPoint[0] + '" cy="' + nowPoint[1] + '" r="5" fill="' + DAY.soc +
-      '" stroke="' + DAY.surface + '" stroke-width="2"/>';
+let HATCH = null;
+function hatch() {
+  if (HATCH) return HATCH;
+  const c = document.createElement("canvas");
+  c.width = c.height = 8;
+  const g = c.getContext("2d");
+  g.strokeStyle = EC.actual; g.lineWidth = 3;
+  g.beginPath(); g.moveTo(-2, 10); g.lineTo(10, -2); g.moveTo(-2, 2); g.lineTo(2, -2);
+  g.moveTo(6, 10); g.lineTo(10, 6); g.stroke();
+  HATCH = {image: c, repeat: "repeat"};
+  return HATCH;
+}
+
+// A bar from lo to hi (kW) centered on hour column i, rounded data end.
+function columnBar(widthShare, styleOf) {
+  return (params, api) => {
+    const i = api.value(0), lo = api.value(1), hi = api.value(2);
+    const width = api.size([1, 0])[0] * widthShare;
+    const top = api.coord([i, hi]), bottom = api.coord([i, lo]);
+    return {type: "rect", shape: {x: top[0] - width / 2, y: top[1], width,
+      height: Math.max(0, bottom[1] - top[1]), r: lo === 0 ? [4, 4, 0, 0] : 3},
+      style: styleOf(params.dataIndex, api)};
+  };
+}
+
+function dayOption(day, nowFraction, narrow) {
+  const labels = day.hours.map(h => h.label + ":00");
   const now = day.hours.findIndex(h => h.current);
-  if (now >= 0) {
-    const x = L + (now + nowFraction) * cw;
-    s += '<line x1="' + x + '" x2="' + x + '" y1="' + P.top + '" y2="' + S.base + '" stroke="' + DAY.text +
-      '" stroke-dasharray="2 4" opacity=".6"/>' +
-      '<text x="' + x + '" y="14" fill="' + DAY.text + '" font-size="13" text-anchor="middle">сейчас</text>';
-  }
-  day.hours.forEach((h, i) => {
-    const next = String((parseInt(h.label, 10) + 1) % 24).padStart(2, "0");
-    s += '<rect class="hint daycol" data-hint="' + esc(hourHint(h, next)) + '" x="' + (L + i * cw) +
-      '" y="' + P.top + '" width="' + cw + '" height="' + (S.base - P.top) + '" fill="transparent"/>';
-  });
-  return s + "</svg>";
+  const f = day.hours.map((h, i) => h.forecast ? [i, h.forecast.p10, h.forecast.p90, h.forecast.p50] : null)
+    .filter(Boolean);
+  const actual = day.hours.map((h, i) => h.actual_kw != null ? [i, 0, h.actual_kw, h.throttled ? 1 : 0, h.current ? 1 : 0] : null)
+    .filter(Boolean);
+  const nowLine = now < 0 ? undefined : {silent: true, symbol: "none", animation: false,
+    lineStyle: {color: EC.text, type: "dotted", opacity: .7},
+    label: {formatter: "сейчас", color: EC.text, position: "end"},
+    data: [{xAxis: now + nowFraction - 0.5}]};
+  const xAxis = (grid, show) => Object.assign(axisX(labels), {gridIndex: grid,
+    axisLabel: {show, color: EC.ink, interval: narrow ? 5 : 2}});
+  return {
+    animationDurationUpdate: 600,
+    axisPointer: {link: [{xAxisIndex: "all"}], lineStyle: {color: "rgba(230,232,238,.35)"}},
+    legend: legendStyle(["Прогноз", "Коридор P10–P90", "Факт", "Заряд, факт", "Заряд, план"]),
+    tooltip: Object.assign({trigger: "axis", axisPointer: {type: "shadow",
+      shadowStyle: {color: "rgba(230,232,238,.05)"}}}, TOOLTIP, {
+      formatter: params => {
+        const h = day.hours[labels.indexOf(params[0].axisValue)];
+        if (!h) return "";
+        const next = String((parseInt(h.label, 10) + 1) % 24).padStart(2, "0");
+        return esc(hourHint(h, next)).replace(/ · /g, "<br>");
+      }}),
+    grid: [{left: 44, right: 16, top: 48, height: 176}, {left: 44, right: 16, top: 256, height: 62}],
+    xAxis: [xAxis(0, false), xAxis(1, true)],
+    yAxis: [Object.assign(axisY(0, undefined, "кВт"), {gridIndex: 0}),
+            Object.assign(axisY(0, 100, "%"), {gridIndex: 1, interval: 50})],
+    dataZoom: [{type: "inside", xAxisIndex: [0, 1], zoomOnMouseWheel: "ctrl",
+      moveOnMouseWheel: false, preventDefaultMouseMove: false, minValueSpan: 4}],
+    series: [
+      {name: "Коридор P10–P90", type: "custom", xAxisIndex: 0, yAxisIndex: 0,
+       itemStyle: {color: EC.band}, encode: {x: 0, y: [1, 2]}, data: f,
+       renderItem: columnBar(.8, () => ({fill: EC.band}))},
+      {name: "Прогноз", type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.forecast},
+       encode: {x: 0, y: 3}, data: f.map(v => [v[0], 0, v[3]]),
+       renderItem: columnBar(.8, () => ({fill: EC.forecast})), markLine: nowLine},
+      {name: "Факт", type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.actual},
+       encode: {x: 0, y: 2}, data: actual, z: 3,
+       renderItem: columnBar(.38, i => ({fill: actual[i][3] ? hatch() : EC.actual,
+         stroke: EC.surface, lineWidth: 2, opacity: actual[i][4] ? .75 : 1}))},
+      {name: "Заряд, факт", type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
+       showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: EC.soc},
+       itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_pct),
+       areaStyle: {color: "rgba(57,135,229,.15)"},
+       markPoint: now < 0 || day.hours[now].soc_pct == null ? undefined : {symbol: "circle",
+         symbolSize: 10, itemStyle: {color: EC.soc, borderColor: EC.surface, borderWidth: 2},
+         label: {show: false}, data: [{coord: [now, day.hours[now].soc_pct]}]},
+       markLine: nowLine && Object.assign({}, nowLine, {label: {show: false}})},
+      {name: "Заряд, план", type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
+       showSymbol: false, lineStyle: {width: 2, type: "dashed", color: EC.soc},
+       itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_plan_pct)},
+    ],
+  };
 }
 
 function renderDayCharts(data) {
@@ -817,15 +854,15 @@ function renderDayCharts(data) {
   if (!data || !data.days || !data.days.length) { card.style.display = "none"; return; }
   card.style.display = "block";
   document.getElementById("daynote").textContent = data.plan_note || "";
-  document.getElementById("daycharts").innerHTML = data.days.map((day, i) => {
+  data.days.slice(0, 2).forEach((day, i) => {
     let head = "<b>" + day.label + ", " + day.date + "</b> · прогноз " +
       (day.forecast_kwh == null ? "—" : day.forecast_kwh + " кВт·ч");
     if (i === 0) head += " · выработано " + (day.actual_kwh == null ? "0" : day.actual_kwh) +
       " кВт·ч · ещё ожидается ~" + day.ahead_kwh + " кВт·ч";
-    // Phones: the chart keeps a readable size and scrolls inside the card.
-    return '<div class="dayhead">' + head + '</div><div style="overflow-x:auto">' +
-      dayChartSvg(day, data.now_fraction || 0, i) + "</div>";
-  }).join("");
+    document.getElementById("dayhead" + i).innerHTML = head;
+    const el = document.getElementById("daychart" + i);
+    chartOf("daychart" + i).setOption(dayOption(day, data.now_fraction || 0, el.offsetWidth < 520));
+  });
 }
 
 const HINTS = {

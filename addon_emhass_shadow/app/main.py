@@ -312,9 +312,11 @@ def scheduler() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, content_type: str) -> None:
+    def _send(self, code: int, body: bytes, content_type: str, cache_s: int = 0) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
+        if cache_s:
+            self.send_header("Cache-Control", f"public, max-age={cache_s}")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -326,6 +328,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/", "/index.html"):
             self._send(200, (APP / "panel.html").read_bytes(), "text/html; charset=utf-8")
+        elif path.endswith("/vendor/echarts.min.js"):
+            # Bundled, not from a CDN: the charts must open while an outage
+            # has taken the internet down with the grid.
+            self._send(
+                200,
+                (APP / "vendor" / "echarts.min.js").read_bytes(),
+                "application/javascript; charset=utf-8",
+                cache_s=86400,  # 1 MB, changes only with the add-on version
+            )
         elif path.endswith("/api/latest") or path == "/api/latest":
             report = latest_report()
             if report is None:
