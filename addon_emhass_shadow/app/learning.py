@@ -127,6 +127,39 @@ def log_entry(
     return entry
 
 
+# -- day-ahead lookup ---------------------------------------------------------
+
+DAY_AHEAD_LEAD = timedelta(hours=24)
+
+
+def day_ahead(entries: list[dict], hour: datetime) -> dict | None:
+    """What the latest run at least a day before ``hour`` forecast for it.
+
+    A forecast issued an hour ahead is nearly always close; the ones that
+    decide the night charge are a day old, so that is where errors show.
+    The plan's values (after self-correction) when logged, else the raw P50.
+    """
+    hour = pd.Timestamp(hour)
+    key = hour.isoformat()
+    best, index = None, None
+    for entry in entries:
+        issue = pd.Timestamp(entry["issue_utc"])
+        if issue > hour - DAY_AHEAD_LEAD:
+            continue
+        if best is not None and issue <= pd.Timestamp(best["issue_utc"]):
+            continue
+        if key in entry.get("starts_utc", []):
+            best, index = entry, entry["starts_utc"].index(key)
+    if best is None:
+        return None
+
+    def p50(target: str) -> float:
+        values = best.get(f"{target}_p50_used") or best[target]["p50"]
+        return float(values[index])
+
+    return {"issue_utc": best["issue_utc"], "pv_p50_kw": p50("pv"), "load_p50_kw": p50("load")}
+
+
 # -- load targets ------------------------------------------------------------
 
 WHOLE_HOUSE_RATIO = 0.95  # backup load / total load in normal operation

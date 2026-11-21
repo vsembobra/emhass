@@ -25,6 +25,10 @@
   .chip.up { background: rgba(239,83,80,.15); color: var(--bad); }
   .chip.down { background: rgba(102,187,106,.15); color: var(--good); }
   .chip.same { background: rgba(154,163,178,.15); color: var(--muted); }
+  .hint { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .period { color: var(--muted); font-size: 13px; margin: 0 2px 8px; }
+  .period b { color: var(--text); font-weight: 600; }
+  #tip { position: fixed; z-index: 10; max-width: 320px; background: #2a2f3a; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.4; display: none; }
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
@@ -96,6 +100,7 @@
 </details>
 <div id="content" style="display:none">
 
+  <div class="period" id="period"></div>
   <div class="grid">
     <div class="card">
       <h3>Рекомендуемый пол SOC</h3>
@@ -476,6 +481,7 @@ function render(r) {
   const n = document.getElementById("notice");
   n.style.display = "block"; n.textContent = r.notification;
   const a = r.advisory;
+  document.getElementById("period").innerHTML = periodLine(r);
   document.getElementById("rec").textContent = pct(a.recommended_floor_soc);
   const d = document.getElementById("delta");
   d.textContent = pp(a.delta_pp);
@@ -665,6 +671,69 @@ async function recalc() {
   }, 3000);
 }
 
+// When the summary tiles apply: the plan's first hour and its 24 h window,
+// in the site's time zone (the report's issue hour is UTC).
+function periodLine(r) {
+  const tz = (r.site && r.site.time_zone) || undefined;
+  const fmt = (ms, withDate) => new Date(ms).toLocaleString("ru-RU", Object.assign(
+    {timeZone: tz, hour: "2-digit", minute: "2-digit"},
+    withDate ? {day: "2-digit", month: "2-digit"} : {}));
+  const start = Date.parse(r.issue_utc);
+  const hour = start + 3600e3, end = start + 24 * 3600e3;
+  return "План от <b>" + fmt(start, true) + "</b> · пол и резерв — на <b>" + fmt(start) + "–" +
+    fmt(hour) + "</b> · нагрузка и солнце — за 24 ч: <b>" + fmt(start, true) + " → " +
+    fmt(end, true) + "</b>";
+}
+
+const HINTS = {
+  "Рекомендуемый пол SOC": "Ниже этого заряда батарею сейчас лучше не разряжать: минимальный SOC плюс резерв на случай, если свет выключат в этот час. Днём солнце покрывает часть отключения, поэтому днём пол ниже, чем вечером. Значок справа — разница с порогом, который стоит сейчас.",
+  "Нагрузка, 24 ч": "Сколько дом потребит за 24 часа от начала плана (медианный прогноз P50). P10…P90 — коридор: в 8 случаях из 10 факт попадает между ними.",
+  "Солнце, 24 ч": "Сколько дадут панели за 24 часа от начала плана (P50). P10 — пессимистичный вариант: хуже бывает в 1 случае из 10. По нему считается запас ночного заряда.",
+  "Резерв отключений": "Энергия, которую батарея держит на случай отключения: нагрузка дома во время отключений × длительность отключений текущей серии. Если 14 дней отключений не было, резерва нет (кроме минимальной автономии, если вы её задали).",
+  "Пол SOC по часам (плавающий)": "Резерв на отключение по часам: высота столбика — ниже какого заряда не опускаться в этот час. Наведите на столбик, чтобы увидеть час и значение.",
+  "Оптимальный план (MILP-оптимизатор)": "Заряд батареи по часам в оптимальном плане на 48 часов: когда заряжать из сети по дешёвому тарифу и когда тратить. Наведите на столбик — час и SOC.",
+  "Зоны TOU инвертора": "Программы инвертора по времени. Batt% зоны — это и нижний порог разряда, и цель заряда из сети, если в зоне включён заряд из сети.",
+  "Текущий SOC": "Batt% зоны, который сейчас стоит в инверторе.",
+  "Пол (эвристика)": "Минимум для зоны по резерву на отключения, без учёта цен.",
+  "Оптимизатор": "Что поставит оптимизатор: ночной зоне — цель заряда, дорогим зонам — нижний порог (минимальный SOC плюс резерв).",
+  "Самообучение и автонастройка": "Что аддон выучил по вашим данным: поправки прогнозов, ёмкость и лимиты батареи, подобранный запас.",
+  "Переносимые нагрузки — когда включать": "Лучшее время запуска нагрузок, которые можно сдвигать (бойлер, стирка): когда больше всего солнца.",
+  "Из усечения": "Сколько нагрузка взяла бы из солнца, которое иначе срезалось бы при полной батарее.",
+  "Заряд из сети по зонам": "Включать ли в зоне заряд батареи из сети: в дешёвые часы — да, в дорогие — только если батарея ниже резерва.",
+  "Суточные данные, 14 дней (кВт·ч)": "Что было на самом деле по дням, из истории Home Assistant.",
+  "Потери усечения": "Солнце, которое панели могли дать, но инвертор срезал: батарея была полной, а экспорта в сеть нет.",
+  "Мин. SOC": "Самый низкий заряд батареи за сутки.",
+  "Сеть вниз, ч": "Сколько часов за сутки не было сети.",
+  "Точность прогнозов (факт vs P50)": "Насколько медианный прогноз промахнулся по дням и попадал ли факт в коридор P10–P90.",
+  "История рекомендаций": "Какой пол аддон рекомендовал в прошлые дни и какой тогда стоял на инверторе.",
+};
+
+// Hover shows the browser tooltip; a tap (phones have no hover) opens a box.
+function applyHints() {
+  document.querySelectorAll("#content h3, #content th").forEach(el => {
+    const text = HINTS[el.textContent.trim()];
+    if (!text) return;
+    el.title = text;
+    el.classList.add("hint");
+  });
+  const tip = document.createElement("div");
+  tip.id = "tip";
+  document.body.appendChild(tip);
+  let timer = null;
+  document.addEventListener("click", e => {
+    const el = e.target.closest(".hint");
+    if (!el || window.matchMedia("(hover: hover)").matches) { tip.style.display = "none"; return; }
+    const box = el.getBoundingClientRect();
+    tip.textContent = el.title;
+    tip.style.display = "block";
+    tip.style.left = Math.max(8, Math.min(box.left, window.innerWidth - tip.offsetWidth - 8)) + "px";
+    tip.style.top = Math.min(box.bottom + 6, window.innerHeight - tip.offsetHeight - 8) + "px";
+    clearTimeout(timer);
+    timer = setTimeout(() => { tip.style.display = "none"; }, 6000);
+  });
+}
+
+applyHints();
 load();
 setInterval(load, 60000);
 </script>

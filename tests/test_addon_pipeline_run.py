@@ -174,7 +174,20 @@ def test_priority_flexible_loads_and_sensors(fake_site, monkeypatch):
         "sensor.emhass_shadow_floor_soc",
         "sensor.emhass_shadow_autonomy_hours",
         "sensor.emhass_shadow_boiler_start",
+        "sensor.emhass_shadow_pv_forecast",
+        "sensor.emhass_shadow_pv_forecast_p10",
+        "sensor.emhass_shadow_load_forecast",
+        "sensor.emhass_shadow_pv_forecast_day_ahead",
+        "sensor.emhass_shadow_load_forecast_day_ahead",
+        "sensor.emhass_shadow_weather_irradiance",
+        "sensor.emhass_shadow_weather_cloud_cover",
+        "sensor.emhass_shadow_weather_temperature",
     }
+    # This hour's forecast in W; the day-old one is unknown on a first run.
+    assert posted["sensor.emhass_shadow_load_forecast"] == round(
+        report["hourly"]["load_p50_kw"][0] * 1000
+    )
+    assert posted["sensor.emhass_shadow_load_forecast_day_ahead"] == "unknown"
     assert report["data"]["published_sensors"] == sorted(posted, key=list(posted).index)
 
 

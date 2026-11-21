@@ -1305,6 +1305,87 @@ def ha_post_state(entity_id: str, state, attributes: dict) -> None:
         pass
 
 
+def weather_hour(weather: pd.DataFrame | None, hour) -> dict | None:
+    """Weather API values for the hour [hour, hour+1h), as the PV model reads
+    them (pv_weather_frame): radiation stamped hour+1h, instants averaged."""
+    if weather is None:
+        return None
+    hour = pd.Timestamp(hour)
+    after = hour + pd.Timedelta(hours=1)
+
+    def at(name: str, stamp) -> float | None:
+        if name not in weather:
+            return None
+        value = pd.to_numeric(weather[name], errors="coerce").get(stamp)
+        return None if value is None or pd.isna(value) else float(value)
+
+    def mean_of_ends(name: str) -> float | None:
+        values = [v for v in (at(name, hour), at(name, after)) if v is not None]
+        return round(sum(values) / len(values), 1) if values else None
+
+    radiation = at("shortwave_radiation", after)
+    return {
+        "irradiance_wm2": None if radiation is None else round(radiation, 1),
+        "cloud_cover_pct": mean_of_ends("cloud_cover"),
+        "temperature_c": mean_of_ends("temperature_2m"),
+    }
+
+
+def _day_ahead_hour(issue) -> dict | None:
+    try:
+        return learning.day_ahead(learning.read_forecast_log(DATA / "forecast_log.jsonl"), issue)
+    except Exception:
+        return None
+
+
+def _forecast_sensors(report: dict) -> list[tuple[str, object, dict]]:
+    """This hour's forecast, the day-old forecast for it and the weather API
+    values, with state_class so HA keeps their hourly statistics for good:
+    compare them in a statistics graph with the inverter's own sensors.
+    The state changes at each replan (shortly after the hour starts)."""
+    hourly = report.get("hourly") or {}
+    hour = (hourly.get("starts_utc") or [None])[0]
+
+    def watts(kw) -> object:
+        return "unknown" if kw is None else round(float(kw) * 1000.0)
+
+    def first(key: str):
+        values = hourly.get(key) or []
+        return values[0] if values else None
+
+    def numeric(value) -> object:
+        return "unknown" if value is None else value
+
+    power = {"unit_of_measurement": "W", "device_class": "power", "state_class": "measurement"}
+    ahead = report.get("day_ahead_hour") or {}
+    weather = report.get("weather_hour") or {}
+    name = "EMHASS Shadow: "
+    return [
+        ("sensor.emhass_shadow_pv_forecast", watts(first("pv_p50_kw")),
+         {**power, "hour_start_utc": hour, "friendly_name": name + "солнце, прогноз на этот час"}),
+        ("sensor.emhass_shadow_pv_forecast_p10", watts(first("pv_p10_kw")),
+         {**power, "hour_start_utc": hour,
+          "friendly_name": name + "солнце, пессимистичный прогноз на этот час"}),
+        ("sensor.emhass_shadow_load_forecast", watts(first("load_p50_kw")),
+         {**power, "hour_start_utc": hour, "friendly_name": name + "нагрузка, прогноз на этот час"}),
+        ("sensor.emhass_shadow_pv_forecast_day_ahead", watts(ahead.get("pv_p50_kw")),
+         {**power, "issue_utc": ahead.get("issue_utc"),
+          "friendly_name": name + "солнце, прогноз на этот час за сутки"}),
+        ("sensor.emhass_shadow_load_forecast_day_ahead", watts(ahead.get("load_p50_kw")),
+         {**power, "issue_utc": ahead.get("issue_utc"),
+          "friendly_name": name + "нагрузка, прогноз на этот час за сутки"}),
+        ("sensor.emhass_shadow_weather_irradiance", numeric(weather.get("irradiance_wm2")),
+         {"unit_of_measurement": "W/m²", "device_class": "irradiance",
+          "state_class": "measurement", "friendly_name": name + "радиация по прогнозу погоды"}),
+        ("sensor.emhass_shadow_weather_cloud_cover", numeric(weather.get("cloud_cover_pct")),
+         {"unit_of_measurement": "%", "state_class": "measurement",
+          "friendly_name": name + "облачность по прогнозу погоды"}),
+        ("sensor.emhass_shadow_weather_temperature", numeric(weather.get("temperature_c")),
+         {"unit_of_measurement": "°C", "device_class": "temperature",
+          "state_class": "measurement", "friendly_name": name + "температура по прогнозу погоды"}),
+    ]
+
+
 def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
     """Expose the plan as sensors for the owner's automations; never raises."""
     advisory = report["advisory"]
@@ -1325,6 +1406,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             {"unit_of_measurement": "h", "friendly_name": "EMHASS Shadow: автономия батареи"},
         ),
     ]
+    sensors += _forecast_sensors(report)
     for item in flexible:
         sensors.append(
             (
@@ -2061,6 +2143,12 @@ def run(notify: str = "always") -> dict:
                     "outage_regime": bool(regime["active"]),
                     "critical_kw": round(float(plan.critical_load_kw), 4),
                     "margin_hours": margin_hours,
+                    # What the plan used (after self-correction), for the
+                    # day-ahead sensors.
+                    "pv_p50_used": [round(float(v), 3) for v in pv_p50],
+                    "load_p50_used": [
+                        round(float(v), 3) for v in load_prediction["load_p50_kw"].iloc[:PLAN_HOURS]
+                    ],
                 },
             ),
         )
@@ -2495,6 +2583,8 @@ def run(notify: str = "always") -> dict:
                 "drift": drift or None,
             },
         },
+        "weather_hour": weather_hour(weather, issue),
+        "day_ahead_hour": _day_ahead_hour(issue),
         "hourly": {
             "starts_utc": [s.isoformat() for s in starts],
             "load_p10_kw": [round(float(load_prediction["load_p10_kw"].iloc[i]), 4) for i in range(HORIZON_HOURS)],
