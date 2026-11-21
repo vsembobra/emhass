@@ -197,24 +197,21 @@
 const pct = v => Math.round(v * 100) + "%";
 const pp = v => (v > 0 ? "+" + v : v) + " п.п.";
 
+// The minute refresh reads only the add-on's own files. Entity checks and the
+// options ask Home Assistant / the Supervisor, so they load once (loadSetup)
+// and after a save; the full entity list only when the entities card opens.
 async function load() {
   try {
-    const [latest, history, status, metrics, dailyData, ents, ids, opts] = await Promise.all([
+    const [latest, history, status, metrics, dailyData] = await Promise.all([
       fetch("api/latest").then(r => r.ok ? r.json() : null),
       fetch("api/history").then(r => r.ok ? r.json() : []),
       fetch("api/status").then(r => r.json()),
       fetch("api/metrics").then(r => r.ok ? r.json() : {days: [], avg7: {}}),
       fetch("api/daily").then(r => r.ok ? r.json() : {days: []}),
-      fetch("api/entities").then(r => r.ok ? r.json() : {checks: []}),
-      fetch("api/entity_ids").then(r => r.ok ? r.json() : {entity_ids: []}),
-      fetch("api/options").then(r => r.ok ? r.json() : {groups: []}),
     ]);
     renderStatus(status);
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
-    renderEntities(ents.checks || []);
-    renderEntityIds(ids.entity_ids || []);
-    renderOptions(opts.groups || []);
     if (!latest) { document.getElementById("notice").style.display = "block";
       document.getElementById("notice").textContent = "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас»."; return; }
     render(latest);
@@ -322,6 +319,7 @@ async function saveEntities() {
     if (resp.error) alert("Не сохранилось: " + resp.error);
   } catch (e) { alert("Не сохранилось: " + e); }
   b.disabled = false; b.textContent = "Сохранить";
+  loadSetup();
   load();
 }
 
@@ -434,6 +432,7 @@ async function saveOptions() {
     }
   } catch (e) { alert("Не сохранилось: " + e); }
   b.disabled = false; b.textContent = "Сохранить";
+  loadSetup();
   load();
 }
 
@@ -708,33 +707,71 @@ const HINTS = {
   "История рекомендаций": "Какой пол аддон рекомендовал в прошлые дни и какой тогда стоял на инверторе.",
 };
 
-// Hover shows the browser tooltip; a tap (phones have no hover) opens a box.
+// Own tooltip, not the title attribute: the Home Assistant apps embed the
+// panel in a web view that never shows title tooltips. Hover shows it after a
+// short pause; a tap or click toggles it (phones have no hover).
 function applyHints() {
   document.querySelectorAll("#content h3, #content th").forEach(el => {
     const text = HINTS[el.textContent.trim()];
     if (!text) return;
-    el.title = text;
+    el.dataset.hint = text;
     el.classList.add("hint");
   });
   const tip = document.createElement("div");
   tip.id = "tip";
   document.body.appendChild(tip);
-  let timer = null;
+  let timer = null, current = null;
+  const show = el => {
+    current = el;
+    tip.textContent = el.dataset.hint;
+    tip.style.display = "block";
+    const box = el.getBoundingClientRect();
+    let top = box.bottom + 6;
+    if (top + tip.offsetHeight > window.innerHeight - 8) top = Math.max(8, box.top - tip.offsetHeight - 6);
+    tip.style.left = Math.max(8, Math.min(box.left, window.innerWidth - tip.offsetWidth - 8)) + "px";
+    tip.style.top = top + "px";
+  };
+  const hide = () => { clearTimeout(timer); tip.style.display = "none"; current = null; };
+  document.addEventListener("mouseover", e => {
+    const el = e.target.closest(".hint");
+    if (el === current) return;
+    clearTimeout(timer);
+    if (!el) { hide(); return; }
+    timer = setTimeout(() => show(el), 200);
+  });
   document.addEventListener("click", e => {
     const el = e.target.closest(".hint");
-    if (!el || window.matchMedia("(hover: hover)").matches) { tip.style.display = "none"; return; }
-    const box = el.getBoundingClientRect();
-    tip.textContent = el.title;
-    tip.style.display = "block";
-    tip.style.left = Math.max(8, Math.min(box.left, window.innerWidth - tip.offsetWidth - 8)) + "px";
-    tip.style.top = Math.min(box.bottom + 6, window.innerHeight - tip.offsetHeight - 8) + "px";
-    clearTimeout(timer);
-    timer = setTimeout(() => { tip.style.display = "none"; }, 6000);
+    if (!el) { hide(); return; }
+    if (current === el) hide();
+    else { clearTimeout(timer); show(el); }
   });
+  window.addEventListener("scroll", hide, {passive: true});
 }
+
+async function loadSetup() {
+  try {
+    const [ents, opts] = await Promise.all([
+      fetch("api/entities").then(r => r.ok ? r.json() : {checks: []}),
+      fetch("api/options").then(r => r.ok ? r.json() : {groups: []}),
+    ]);
+    renderEntities(ents.checks || []);
+    renderOptions(opts.groups || []);
+  } catch (e) { console.error(e); }
+}
+
+let entityIdsLoaded = false;
+document.getElementById("entscard").addEventListener("toggle", async e => {
+  if (!e.target.open || entityIdsLoaded) return;
+  entityIdsLoaded = true;
+  try {
+    const ids = await fetch("api/entity_ids").then(r => r.ok ? r.json() : {entity_ids: []});
+    renderEntityIds(ids.entity_ids || []);
+  } catch (err) { entityIdsLoaded = false; }
+});
 
 applyHints();
 load();
+loadSetup();
 setInterval(load, 60000);
 </script>
 </body>

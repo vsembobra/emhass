@@ -120,7 +120,43 @@ def _token() -> str:
     return os.environ["SUPERVISOR_TOKEN"]
 
 
+# One read of every HA state per planning run instead of one request per
+# entity (~50 in sequence: entity checks, zone SOC/time, grid-charge flags,
+# SOC, floor). Any service call that can change a state drops it, so the
+# read-backs after a write and everything later read live again; a stale
+# snapshot (a run that died midway) expires on its own.
+STATES_MAX_AGE_S = 300.0
+_STATES: dict[str, dict] | None = None
+_STATES_AT = 0.0
+
+
+def snapshot_states() -> None:
+    global _STATES, _STATES_AT
+    _STATES = None
+    try:
+        states = ha_get("/api/states", timeout=60)
+    except Exception:
+        return  # entity reads fall back to one request each
+    if isinstance(states, list):
+        _STATES = {s["entity_id"]: s for s in states if isinstance(s, dict) and "entity_id" in s}
+        _STATES_AT = time.monotonic()
+
+
+def drop_states() -> None:
+    global _STATES
+    _STATES = None
+
+
 def ha_get(path: str, timeout: float = 180):
+    states = _STATES
+    if (
+        states is not None
+        and path.startswith("/api/states/")
+        and time.monotonic() - _STATES_AT < STATES_MAX_AGE_S
+    ):
+        cached = states.get(path[len("/api/states/") :])
+        if cached is not None:
+            return cached
     request = urllib.request.Request(
         HA_BASE + path, headers={"Authorization": f"Bearer {_token()}"}
     )
@@ -129,6 +165,8 @@ def ha_get(path: str, timeout: float = 180):
 
 
 def ha_service(domain: str, service: str, payload: dict) -> None:
+    if domain != "persistent_notification":
+        drop_states()  # a write: what follows must read the device live
     request = urllib.request.Request(
         f"{HA_BASE}/api/services/{domain}/{service}",
         data=json.dumps(payload).encode(),
@@ -1884,6 +1922,7 @@ def recommend_zone_socs(
 def run(notify: str = "always") -> dict:
     """One planning run; notify "changes" sends the notification only when
     the run wrote to the inverter or hit a write error."""
+    snapshot_states()
     configured = options()
     learned_hardware = hardware.load(DATA)
     # autotune: learned capacity/efficiency/limits/geometry replace the
@@ -2720,4 +2759,5 @@ def run(notify: str = "always") -> dict:
         )
     else:
         notify_problem("entities", "", None)
+    drop_states()
     return report

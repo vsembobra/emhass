@@ -24,15 +24,6 @@ DATA = Path(os.environ.get("EMHASS_SHADOW_DATA", "/data"))
 WEATHER_HIST = DATA / "weather_previous_day1.jsonl"
 MODELS = DATA / "models"
 
-WEATHER_VARIABLES = {
-    "shortwave_radiation_previous_day1": "ghi",
-    "direct_normal_irradiance_previous_day1": "dni",
-    "diffuse_radiation_previous_day1": "dif",
-    "cloud_cover_previous_day1": "cloud",
-    "temperature_2m_previous_day1": "temp",
-}
-
-
 def _potential_pv(bundle, hours: pd.DatetimeIndex) -> pd.Series:
     """Model P50 for the given hours; NaN where as-of weather is missing."""
     if not WEATHER_HIST.exists():

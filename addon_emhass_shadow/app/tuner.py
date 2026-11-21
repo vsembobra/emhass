@@ -40,7 +40,6 @@ TUNING_FILE = "tuning.json"
 REPLAY_DAYS = 14
 MIN_WINDOWS = 3
 UNSERVED_TOLERANCE_KWH = 0.05
-HOUR = pd.Timedelta(hours=1)
 
 
 def _soc_bounds(opts: dict) -> tuple[float, float]:
