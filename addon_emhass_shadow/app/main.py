@@ -48,7 +48,7 @@ def _report_retrain_problems(status: dict) -> None:
 
 def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
     """One planning run. notify: "always" (daily, manual, grid change) or
-    "changes" (hourly replans: notify only when something was written)."""
+    "changes" (routine replans: notify only when something was written)."""
     with LOCK:
         if STATE["running"]:
             return
@@ -77,6 +77,7 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
                 pass
         pipeline.run(notify=notify)
         STATE["last_run"] = datetime.now(UTC).isoformat()
+        STATE["sensors_hour"] = _hour_now()  # the run published this hour
         pipeline.notify_problem("run", "", None)
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)
@@ -168,7 +169,26 @@ def latest_report() -> dict | None:
 
 
 TRIGGER_MIN_INTERVAL = timedelta(minutes=20)  # rate limit for event-driven runs
-DEFAULT_REPLAN_MINUTES = 60  # MPC cadence: replan when the last run is older
+DEFAULT_REPLAN_MINUTES = 120  # MPC cadence: replan when the last run is older
+
+
+def _hour_now() -> str:
+    return datetime.now(UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def publish_current_hour() -> None:
+    """Between replans, move the hour sensors on when a new hour starts."""
+    hour = _hour_now()
+    if STATE.get("sensors_hour") == hour or STATE["running"]:
+        return
+    try:
+        if not pipeline.options().get("publish_sensors", False):
+            return
+        report = latest_report()
+        if report and pipeline.publish_hour_sensors(report, hour):
+            STATE["sensors_hour"] = hour
+    except Exception:
+        pass  # the next tick tries again
 
 
 def replan_interval(opts) -> timedelta:
@@ -185,7 +205,7 @@ def _trigger_reason(opts) -> str | None:
     """Why an unscheduled recalculation is due; None when the plan stands.
 
     Triggers: the grid binary changed state (outage or restore), the plan
-    is older than the replan interval (hourly by default — the solve takes
+    is older than the replan interval (two hours by default — the solve takes
     milliseconds, and a fresh plan keeps the zone values on the measured
     SOC), or the battery SOC deviates from the current hour's optimizer plan
     by more than 10 pp. Triggered runs are rate-limited to one per 20
@@ -265,6 +285,7 @@ def scheduler() -> None:
                 time.sleep(max(5, min(TICK_SECONDS, remaining)))
                 if datetime.now(tz) >= target:
                     break
+                publish_current_hour()
                 if not STATE["running"]:
                     reason = _trigger_reason(opts)
                     if reason:

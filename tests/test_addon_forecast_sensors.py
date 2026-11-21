@@ -88,3 +88,27 @@ def test_forecast_sensors_in_watts_with_statistics():
     assert sensors["sensor.emhass_shadow_weather_cloud_cover"][0] == "unknown"
     assert sensors["sensor.emhass_shadow_weather_irradiance"][0] == pytest.approx(300.0)
     assert all(a["state_class"] == "measurement" for _, a in sensors.values())
+
+
+def test_hour_sensors_move_on_between_replans(monkeypatch):
+    # A plan issued at 10:00; at 11:00 the sensors take the 11:00 values.
+    starts = [(HOUR + pd.Timedelta(hours=i)).isoformat() for i in range(3)]
+    report = {
+        "hourly": {
+            "starts_utc": starts,
+            "pv_p50_kw": [1.0, 2.0, 3.0],
+            "pv_p10_kw": [0.5, 1.0, 1.5],
+            "load_p50_kw": [0.4, 0.5, 0.6],
+        }
+    }
+    posted = {}
+    monkeypatch.setattr(pipeline, "ha_post_state", lambda e, s, a: posted.update({e: (s, a)}))
+    monkeypatch.setattr(pipeline, "_day_ahead_hour", lambda hour: None)
+    monkeypatch.setattr(pipeline, "archived_weather", lambda: None)
+    published = pipeline.publish_hour_sensors(report, HOUR + pd.Timedelta(hours=1))
+    assert len(published) == 8
+    assert posted["sensor.emhass_shadow_pv_forecast"][0] == 2000
+    assert posted["sensor.emhass_shadow_load_forecast"][0] == 500
+    assert posted["sensor.emhass_shadow_pv_forecast"][1]["hour_start_utc"] == starts[1]
+    # An hour the plan does not cover publishes nothing.
+    assert pipeline.publish_hour_sensors(report, HOUR + pd.Timedelta(hours=5)) == []

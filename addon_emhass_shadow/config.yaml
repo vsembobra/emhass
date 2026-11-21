@@ -8,7 +8,7 @@ description: >-
   только если новая не хуже, определяет ёмкость батареи и ориентацию
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
-version: "0.15.4"
+version: "0.15.5"
 slug: emhass_shadow
 init: false
 arch:
@@ -77,7 +77,7 @@ options:
   tou_grid_charge_entity_template: ""
   outage_memory_days: 14
   history_statistics_days: 365
-  replan_minutes: 60
+  replan_minutes: 120
   tou_grid_charge_on_option: ""
   tou_grid_charge_off_option: ""
   calibration_charge_enabled: true
@@ -301,7 +301,7 @@ translations:
         description: "Сколько дней почасовой статистики Home Assistant подтянуть при первом запуске и по кнопке «Загрузить историю» — сверх подробной истории recorder (0–730, по умолчанию 365). HA хранит её месяцами для сенсоров с state_class; с ней модели сразу учатся на сезонах вашего дома. 0 = не использовать."
       replan_minutes:
         name: Пересчёт плана, минут
-        description: "Как часто пересчитывать план между ежедневными расчётами (15–240, по умолчанию 60). Частый пересчёт держит цели зон на реальном SOC и свежем прогнозе; в инвертор записываются только изменения не меньше шага SOC, а уведомление приходит только если что-то записано или не удалось записать."
+        description: "Как часто пересчитывать план между ежедневными расчётами (15–240, по умолчанию 120 — раз в два часа). Частый пересчёт держит цели зон на реальном SOC и свежем прогнозе; в инвертор записываются только изменения не меньше шага SOC, а уведомление приходит только если что-то записано или не удалось записать."
       tou_grid_charge_on_option:
         name: Вариант select «заряд из сети включён»
         description: "Только для select-флагов (например select.inverter_program_{n}_charging). Пусто = аддон сам выберет вариант со словом Grid (или Grid & Gen, если в зоне уже включён генератор). Укажите точное название, если варианты называются иначе."
@@ -471,7 +471,7 @@ translations:
         description: "How many days of Home Assistant hourly statistics to pull on first start and via 'Backfill history', beyond the detailed recorder history (0-730, default 365). HA keeps them for months for sensors with a state_class, so the models learn your home's seasons at once. 0 = off."
       replan_minutes:
         name: Replan interval, minutes
-        description: "How often to replan between the daily runs (15-240, default 60). Frequent replans keep zone values on the measured SOC and a fresh forecast; only changes of at least one SOC step are written, and a notification is sent only when something was written or failed."
+        description: "How often to replan between the daily runs (15-240, default 120 — every two hours). Frequent replans keep zone values on the measured SOC and a fresh forecast; only changes of at least one SOC step are written, and a notification is sent only when something was written or failed."
       tou_grid_charge_on_option:
         name: Select option for grid charge on
         description: "Only for select flags (e.g. select.inverter_program_{n}_charging). Empty = the add-on picks the option containing Grid (or Grid & Gen when the zone already charges from a generator). Set the exact name if your options are named differently."

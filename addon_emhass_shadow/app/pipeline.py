@@ -1001,9 +1001,24 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
         stale = True
         received = files[-1].stem
         payload = json.loads(files[-1].read_text(encoding="utf-8"))
+    return _weather_frame(payload), received + ".json", stale
+
+
+def _weather_frame(payload: dict) -> pd.DataFrame:
     frame = pd.DataFrame(payload["hourly"])
     frame["start_utc"] = pd.to_datetime(frame.pop("time"), unit="s", utc=True)
-    return frame.set_index("start_utc").sort_index(), received + ".json", stale
+    return frame.set_index("start_utc").sort_index()
+
+
+def archived_weather() -> pd.DataFrame | None:
+    """The newest stored Open-Meteo snapshot, without asking the internet."""
+    files = sorted((DATA / "weather_archive").glob("*.json"))
+    if not files:
+        return None
+    try:
+        return _weather_frame(json.loads(files[-1].read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def forecast_load(
@@ -1422,6 +1437,35 @@ def _forecast_sensors(report: dict) -> list[tuple[str, object, dict]]:
          {"unit_of_measurement": "°C", "device_class": "temperature",
           "state_class": "measurement", "friendly_name": name + "температура по прогнозу погоды"}),
     ]
+
+
+def publish_hour_sensors(report: dict, hour) -> list[str]:
+    """Move the forecast and weather sensors to ``hour`` between replans.
+
+    Replans run every two hours by default, but the sensors describe the
+    current hour: without this every second hour would carry the previous
+    hour's forecast into Home Assistant's statistics. Uses the latest plan,
+    the forecast log and the stored weather snapshot — nothing is recomputed.
+    """
+    hourly = report.get("hourly") or {}
+    key = pd.Timestamp(hour).isoformat()
+    starts = hourly.get("starts_utc") or []
+    if key not in starts:
+        return []
+    index = starts.index(key)
+    view = {
+        "hourly": {k: v[index:] for k, v in hourly.items() if isinstance(v, list)},
+        "day_ahead_hour": _day_ahead_hour(hour),
+        "weather_hour": weather_hour(archived_weather(), hour),
+    }
+    published = []
+    for entity_id, state, attributes in _forecast_sensors(view):
+        try:
+            ha_post_state(entity_id, state, attributes)
+            published.append(entity_id)
+        except Exception:
+            continue
+    return published
 
 
 def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:

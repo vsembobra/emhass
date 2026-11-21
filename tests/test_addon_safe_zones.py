@@ -143,16 +143,16 @@ def test_flag_state_and_service_by_domain():
 
 
 def test_replan_interval_and_trigger(monkeypatch):
-    assert main.replan_interval({}) == timedelta(minutes=60)
+    assert main.replan_interval({}) == timedelta(minutes=120)
     assert main.replan_interval({"replan_minutes": 5}) == timedelta(minutes=15)
     monkeypatch.setattr(pipeline, "resolve_entities", lambda opts: {"grid_binary": ""})
     monkeypatch.setattr(main, "latest_report", lambda: None)
     main.STATE.update(
-        last_trigger=None, last_run=(datetime.now(UTC) - timedelta(minutes=61)).isoformat()
+        last_trigger=None, last_run=(datetime.now(UTC) - timedelta(minutes=121)).isoformat()
     )
     assert main._trigger_reason({}) == "плановый пересчёт"
-    main.STATE["last_run"] = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
-    assert main._trigger_reason({}) is None
+    main.STATE["last_run"] = (datetime.now(UTC) - timedelta(minutes=90)).isoformat()
+    assert main._trigger_reason({}) is None  # within the two-hour default
 
 
 def test_weather_archive_is_pruned(tmp_path):
