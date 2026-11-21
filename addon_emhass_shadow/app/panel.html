@@ -27,6 +27,14 @@
   .chip.same { background: rgba(154,163,178,.15); color: var(--muted); }
   .hint { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
   .period { color: var(--muted); font-size: 13px; margin: 0 2px 8px; }
+  .daylegend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 6px; }
+  .daylegend i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  .daylegend i.hatch { background: repeating-linear-gradient(45deg, #199e70 0 3px, transparent 3px 6px); }
+  .daylegend i.dash { height: 0; border-top: 2px dashed #3987e5; border-radius: 0; }
+  rect.daycol { text-decoration: none; }
+  rect.daycol:hover { fill: rgba(230,232,238,.06); }
+  .dayhead { font-size: 14px; margin: 12px 0 4px; }
+  .dayhead b { font-weight: 600; }
   .period b { color: var(--text); font-weight: 600; }
   #tip { position: fixed; z-index: 10; max-width: 320px; background: #2a2f3a; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.4; display: none; }
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
@@ -124,6 +132,20 @@
     </div>
   </div>
 
+  <div class="card full" id="daycard" style="display:none">
+    <h3>Солнце и батарея по часам</h3>
+    <div class="sub daylegend">
+      <span><i style="background:#c98500"></i>прогноз выработки</span>
+      <span><i style="background:rgba(201,133,0,.22)"></i>коридор P10–P90</span>
+      <span><i style="background:#199e70"></i>факт</span>
+      <span><i class="hatch"></i>факт, урезано: батарея полная</span>
+      <span><i style="background:#3987e5;height:2px"></i>заряд, факт</span>
+      <span><i class="dash"></i>заряд, план</span>
+    </div>
+    <div class="sub" id="daynote"></div>
+    <div id="daycharts"></div>
+  </div>
+
   <div class="card full">
     <h3>Пол SOC по часам (плавающий)</h3>
     <div class="sub" id="floornote" style="margin-bottom:8px"></div>
@@ -209,6 +231,7 @@ async function load() {
       fetch("api/metrics").then(r => r.ok ? r.json() : {days: [], avg7: {}}),
       fetch("api/daily").then(r => r.ok ? r.json() : {days: []}),
     ]);
+    fetch("api/day_charts").then(r => r.ok ? r.json() : null).then(renderDayCharts).catch(() => {});
     renderStatus(status);
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
@@ -684,11 +707,133 @@ function periodLine(r) {
     fmt(end, true) + "</b>";
 }
 
+function niceMax(v) {
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  return [1, 2, 2.5, 5, 10].map(m => m * p).find(m => m >= v);
+}
+
+const kw = v => v == null ? "—" : v.toFixed(2) + " кВт";
+
+function hourHint(h, next) {
+  const f = h.forecast;
+  let t = h.label + ":00–" + next + ":00 · прогноз " +
+    (f ? kw(f.p50) + " (P10 " + f.p10.toFixed(2) + " … P90 " + f.p90.toFixed(2) + ")" : "нет");
+  if (h.actual_kw != null)
+    t += " · факт " + kw(h.actual_kw) + (h.current ? " сейчас" : "") +
+      (h.throttled ? " — урезано: батарея была полной, панели могли больше" : "");
+  if (h.soc_pct != null) t += " · SOC " + Math.round(h.soc_pct) + "%";
+  if (h.soc_plan_pct != null) t += " · план SOC " + Math.round(h.soc_plan_pct) + "%";
+  return t;
+}
+
+// One day as two aligned plots sharing the hour axis (never a second y-scale):
+// solar in kW — forecast bars with the P10-P90 band, measured bars inset with
+// a surface ring, hatched where a full battery throttled the panels — and
+// below it the battery in % (measured solid, planned dashed). Colors are the
+// validated dark-surface slots: forecast #c98500, actual #199e70, SOC #3987e5.
+const DAY = {surface: "#1c1f26", grid: "#2c313c", ink: "#9aa3b2", text: "#e6e8ee",
+  forecast: "#c98500", band: "rgba(201,133,0,.22)", actual: "#199e70", soc: "#3987e5"};
+
+function barPath(x, w, top, base, r) {
+  // Bar anchored on the baseline with a rounded data end (4 px).
+  r = Math.min(r, w / 2, Math.max(0, base - top));
+  return "M" + x + "," + base + "V" + (top + r) + "Q" + x + "," + top + " " + (x + r) + "," + top +
+    "H" + (x + w - r) + "Q" + (x + w) + "," + top + " " + (x + w) + "," + (top + r) + "V" + base + "Z";
+}
+
+function dayChartSvg(day, nowFraction, id) {
+  const W = 960, L = 44, R = 16, n = day.hours.length, cw = (W - L - R) / n;
+  const P = {top: 24, base: 186}, S = {top: 214, base: 284}, H = 306;
+  const values = [0.5];
+  day.hours.forEach(h => {
+    if (h.forecast) values.push(h.forecast.p90, h.forecast.p50);
+    if (h.actual_kw != null) values.push(h.actual_kw);
+  });
+  const top = niceMax(Math.max(...values));
+  const y = v => P.top + (P.base - P.top) * (1 - Math.max(0, v) / top);
+  const ys = v => S.top + (S.base - S.top) * (1 - Math.min(100, Math.max(0, v)) / 100);
+  const fw = cw - 4, aw = Math.max(4, fw * .46);  // 2 px surface gap each side
+  const text = (x, yy, t, extra) => '<text x="' + x + '" y="' + yy + '" fill="' + DAY.ink +
+    '" font-size="13" ' + (extra || "") + ">" + t + "</text>";
+  let s = '<svg viewBox="0 0 ' + W + " " + H + '" style="width:100%;min-width:720px;height:auto;display:block">' +
+    '<defs><pattern id="hatch' + id + '" patternUnits="userSpaceOnUse" width="6" height="6" ' +
+    'patternTransform="rotate(45)"><rect width="6" height="6" fill="' + DAY.surface + '"/>' +
+    '<rect width="3" height="6" fill="' + DAY.actual + '"/></pattern></defs>';
+  // recessive grid and axis labels
+  [0, top / 2, top].forEach(v => {
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="' + DAY.grid + '"/>';
+    s += text(L - 8, y(v) + 4, +v.toFixed(1), 'text-anchor="end"');
+  });
+  [0, 50, 100].forEach(v => {
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ys(v) + '" y2="' + ys(v) + '" stroke="' + DAY.grid + '"/>';
+    s += text(L - 8, ys(v) + 4, v, 'text-anchor="end"');
+  });
+  s += text(L, 14, "Солнце, кВт") + text(L, S.top - 10, "Батарея, %");
+  const socFact = [], socPlan = [];
+  let nowPoint = null;
+  day.hours.forEach((h, i) => {
+    const x = L + i * cw, cx = x + cw / 2, f = h.forecast;
+    if (f) {
+      s += '<rect x="' + (x + 2) + '" y="' + y(f.p90) + '" width="' + fw + '" height="' +
+        Math.max(0, y(f.p10) - y(f.p90)) + '" rx="3" fill="' + DAY.band + '"/>';
+      if (f.p50 > 0.005) s += '<path d="' + barPath(x + 2, fw, y(f.p50), P.base, 4) + '" fill="' + DAY.forecast + '"/>';
+    }
+    if (h.actual_kw != null && h.actual_kw > 0.005)
+      s += '<path d="' + barPath(cx - aw / 2, aw, y(h.actual_kw), P.base, 4) + '" fill="' +
+        (h.throttled ? "url(#hatch" + id + ")" : DAY.actual) + '" stroke="' + DAY.surface +
+        '" stroke-width="2"' + (h.current ? ' opacity=".75"' : "") + "/>";
+    if (h.soc_pct != null) socFact.push(cx + "," + ys(h.soc_pct));
+    if (h.current && h.soc_pct != null) nowPoint = [cx, ys(h.soc_pct)];
+    if (h.soc_plan_pct != null) socPlan.push(cx + "," + ys(h.soc_plan_pct));
+    if (i % 3 === 0) s += text(cx, H - 4, h.label + ":00", 'text-anchor="middle"');
+  });
+  s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + P.base + '" y2="' + P.base + '" stroke="' + DAY.ink + '" opacity=".5"/>';
+  if (socPlan.length > 1)
+    s += '<polyline points="' + socPlan.join(" ") + '" fill="none" stroke="' + DAY.soc +
+      '" stroke-width="2" stroke-dasharray="6 5" stroke-linecap="round"/>';
+  if (socFact.length > 1)
+    s += '<polyline points="' + socFact.join(" ") + '" fill="none" stroke="' + DAY.soc +
+      '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  if (nowPoint)
+    s += '<circle cx="' + nowPoint[0] + '" cy="' + nowPoint[1] + '" r="5" fill="' + DAY.soc +
+      '" stroke="' + DAY.surface + '" stroke-width="2"/>';
+  const now = day.hours.findIndex(h => h.current);
+  if (now >= 0) {
+    const x = L + (now + nowFraction) * cw;
+    s += '<line x1="' + x + '" x2="' + x + '" y1="' + P.top + '" y2="' + S.base + '" stroke="' + DAY.text +
+      '" stroke-dasharray="2 4" opacity=".6"/>' +
+      '<text x="' + x + '" y="14" fill="' + DAY.text + '" font-size="13" text-anchor="middle">сейчас</text>';
+  }
+  day.hours.forEach((h, i) => {
+    const next = String((parseInt(h.label, 10) + 1) % 24).padStart(2, "0");
+    s += '<rect class="hint daycol" data-hint="' + esc(hourHint(h, next)) + '" x="' + (L + i * cw) +
+      '" y="' + P.top + '" width="' + cw + '" height="' + (S.base - P.top) + '" fill="transparent"/>';
+  });
+  return s + "</svg>";
+}
+
+function renderDayCharts(data) {
+  const card = document.getElementById("daycard");
+  if (!data || !data.days || !data.days.length) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  document.getElementById("daynote").textContent = data.plan_note || "";
+  document.getElementById("daycharts").innerHTML = data.days.map((day, i) => {
+    let head = "<b>" + day.label + ", " + day.date + "</b> · прогноз " +
+      (day.forecast_kwh == null ? "—" : day.forecast_kwh + " кВт·ч");
+    if (i === 0) head += " · выработано " + (day.actual_kwh == null ? "0" : day.actual_kwh) +
+      " кВт·ч · ещё ожидается ~" + day.ahead_kwh + " кВт·ч";
+    // Phones: the chart keeps a readable size and scrolls inside the card.
+    return '<div class="dayhead">' + head + '</div><div style="overflow-x:auto">' +
+      dayChartSvg(day, data.now_fraction || 0, i) + "</div>";
+  }).join("");
+}
+
 const HINTS = {
   "Рекомендуемый пол SOC": "Ниже этого заряда батарею сейчас лучше не разряжать: минимальный SOC плюс резерв на случай, если свет выключат в этот час. Днём солнце покрывает часть отключения, поэтому днём пол ниже, чем вечером. Значок справа — разница с порогом, который стоит сейчас.",
   "Нагрузка, 24 ч": "Сколько дом потребит за 24 часа от начала плана (медианный прогноз P50). P10…P90 — коридор: в 8 случаях из 10 факт попадает между ними.",
   "Солнце, 24 ч": "Сколько дадут панели за 24 часа от начала плана (P50). P10 — пессимистичный вариант: хуже бывает в 1 случае из 10. По нему считается запас ночного заряда.",
   "Резерв отключений": "Энергия, которую батарея держит на случай отключения: нагрузка дома во время отключений × длительность отключений текущей серии. Если 14 дней отключений не было, резерва нет (кроме минимальной автономии, если вы её задали).",
+  "Солнце и батарея по часам": "Жёлтое — прогноз выработки панелей по часам, бледная полоса — коридор P10–P90. Зелёное — сколько панели дали на самом деле (в среднем за час; в текущем часу — мгновенная мощность). Штриховка — час, когда батарея была полной и инвертор урезал панели: там зелёное ниже жёлтого не из-за ошибки прогноза. Ниже — заряд батареи: сплошная линия — факт, пунктир — план оптимизатора. Наведите на час — подробности.",
   "Пол SOC по часам (плавающий)": "Резерв на отключение по часам: высота столбика — ниже какого заряда не опускаться в этот час. Наведите на столбик, чтобы увидеть час и значение.",
   "Оптимальный план (MILP-оптимизатор)": "Заряд батареи по часам в оптимальном плане на 48 часов: когда заряжать из сети по дешёвому тарифу и когда тратить. Наведите на столбик — час и SOC.",
   "Зоны TOU инвертора": "Программы инвертора по времени. Batt% зоны — это и нижний порог разряда, и цель заряда из сети, если в зоне включён заряд из сети.",

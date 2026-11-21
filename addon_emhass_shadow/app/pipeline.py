@@ -1330,6 +1330,29 @@ def autonomy(
     return max(0.0, soc - min_soc) * capacity_kwh * discharge_efficiency / critical_kw
 
 
+def outage_now_line(info: dict) -> str:
+    """Notification line for the outage in progress."""
+    if info["basis"] == "beyond":
+        outlook = "дольше всех отключений этой серии — смотрю на час вперёд и пересчитываю"
+    elif info["basis"] == "few":
+        outlook = f"по самым длинным отключениям серии — ещё до ~{info['remaining_h']:.1f} ч"
+    else:
+        outlook = (
+            f"по этой серии обычно ещё ~{info['remaining_typical_h']:.1f} ч "
+            f"(с запасом {info['remaining_h']:.1f} ч)"
+        )
+    line = (
+        f"• ⚠️ Сеть отключена {info['elapsed_h']:.1f} ч: {outlook}. "
+        f"Батареи хватит на ~{info['autonomy_h']:.1f} ч"
+    )
+    if info["enough"]:
+        return line + " — хватает."
+    return (
+        line + f" — не хватает ~{info['shortfall_kwh']:.1f} кВт·ч: снизьте нагрузку примерно "
+        f"на {info['cut_kw']:.2f} кВт до возврата сети."
+    )
+
+
 def _deferrable_line(item: dict) -> str:
     if not item.get("start_local"):
         return f"• {item['name']}: {item.get('reason', 'нет окна')}"
@@ -1471,6 +1494,7 @@ def publish_hour_sensors(report: dict, hour) -> list[str]:
 def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
     """Expose the plan as sensors for the owner's automations; never raises."""
     advisory = report["advisory"]
+    outage = advisory.get("outage_now")
     sensors = [
         (
             "sensor.emhass_shadow_floor_soc",
@@ -1486,6 +1510,27 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             "sensor.emhass_shadow_autonomy_hours",
             advisory["autonomy_hours"] if advisory["autonomy_hours"] is not None else "unknown",
             {"unit_of_measurement": "h", "friendly_name": "EMHASS Shadow: автономия батареи"},
+        ),
+        # For the owner's automations during an outage: "on" = the battery
+        # will not last the likely rest of it, shed the loads you can.
+        (
+            "binary_sensor.emhass_shadow_save_battery",
+            "on" if outage and not outage["enough"] else "off",
+            {
+                "friendly_name": "EMHASS Shadow: экономить батарею",
+                "cut_kw": outage["cut_kw"] if outage else 0.0,
+                "autonomy_h": outage["autonomy_h"] if outage else None,
+            },
+        ),
+        (
+            "sensor.emhass_shadow_outage_remaining_hours",
+            outage["remaining_h"] if outage else 0.0,
+            {
+                "unit_of_measurement": "h",
+                "friendly_name": "EMHASS Shadow: отключение, осталось с запасом",
+                "elapsed_h": outage["elapsed_h"] if outage else 0.0,
+                "typical_h": outage["remaining_typical_h"] if outage else 0.0,
+            },
         ),
     ]
     sensors += _forecast_sensors(report)
@@ -2229,6 +2274,8 @@ def run(notify: str = "always") -> dict:
                     # What the plan used (after self-correction), for the
                     # day-ahead sensors.
                     "pv_p50_used": [round(float(v), 3) for v in pv_p50],
+                    "pv_p10_used": [round(float(v), 3) for v in pv_p10],
+                    "pv_p90_used": [round(float(v), 3) for v in pv_p90],
                     "load_p50_used": [
                         round(float(v), 3) for v in load_prediction["load_p50_kw"].iloc[:PLAN_HOURS]
                     ],
@@ -2327,6 +2374,18 @@ def run(notify: str = "always") -> dict:
         float(opts["capacity_kwh"]) * soh,
         settings.discharge_efficiency,
         plan.critical_load_kw,
+    )
+    outage_now = policy.outage_in_progress(
+        events,
+        datetime.now(UTC),
+        memory,
+        policy.priority(opts)["reserve_quantile"],
+        soc=float(battery_now) / 100.0,
+        min_soc=_soc_bounds(opts)[0],
+        capacity_kwh=float(opts["capacity_kwh"]) * soh,
+        discharge_efficiency=settings.discharge_efficiency,
+        critical_kw=plan.critical_load_kw,
+        pv_kw=list(pv_p10),
     )
 
     # Apply mode (off by default): write the plan into the inverter through
@@ -2486,6 +2545,7 @@ def run(notify: str = "always") -> dict:
         head = f"Теневой план на {issue.astimezone(tz):%d.%m} (без записи в инвертор):"
     lines = [
         head,
+        *([outage_now_line(outage_now)] if outage_now else []),
         f"• Нагрузка 24 ч, кВт·ч: P50 {load_day['p50']} (P10 {load_day['p10']} … P90 {load_day['p90']})",
         pv_line,
         _reserve_line(regime, plan, margin_hours, hold_until, settings.cold_start_hours)
@@ -2720,6 +2780,7 @@ def run(notify: str = "always") -> dict:
             "deferrable": flexible,
             "grid_charge": grid_charge,
             "autonomy_hours": None if autonomy_hours is None else round(autonomy_hours, 2),
+            "outage_now": outage_now,
             "optimizer": optimizer_plan,
             "applied": applied,
             "apply_errors": apply_errors,

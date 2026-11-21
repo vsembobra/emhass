@@ -173,6 +173,8 @@ def test_priority_flexible_loads_and_sensors(fake_site, monkeypatch):
     assert set(posted) == {
         "sensor.emhass_shadow_floor_soc",
         "sensor.emhass_shadow_autonomy_hours",
+        "binary_sensor.emhass_shadow_save_battery",
+        "sensor.emhass_shadow_outage_remaining_hours",
         "sensor.emhass_shadow_boiler_start",
         "sensor.emhass_shadow_pv_forecast",
         "sensor.emhass_shadow_pv_forecast_p10",
@@ -417,3 +419,20 @@ def test_a_full_battery_resets_the_calibration(fake_site):
 def test_calibration_switched_off(fake_site):
     report = pipeline.run()
     assert not report["data"]["calibration"]["due"]
+
+
+def test_outage_in_progress_is_reported(fake_site, monkeypatch):
+    from emhass.outage_log import OutageEvent
+
+    now = datetime.now(UTC)
+    events = [
+        OutageEvent(now - timedelta(days=d, hours=3), now - timedelta(days=d), "measured", False)
+        for d in (1, 2, 3, 4)
+    ]
+    events.append(OutageEvent(now - timedelta(hours=1), None, "measured", False))
+    monkeypatch.setattr(pipeline, "load_outage_events", lambda: events)
+    report = pipeline.run()
+    outage = report["advisory"]["outage_now"]
+    assert outage["elapsed_h"] == pytest.approx(1.0, abs=0.05)
+    assert outage["remaining_typical_h"] == pytest.approx(2.0, abs=0.05)
+    assert "Сеть отключена 1.0 ч" in report["notification"]

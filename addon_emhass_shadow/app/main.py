@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import charts
 import daily
 import options_meta
 import pipeline
@@ -169,6 +170,7 @@ def latest_report() -> dict | None:
 
 
 TRIGGER_MIN_INTERVAL = timedelta(minutes=20)  # rate limit for event-driven runs
+OUTAGE_REPLAN = timedelta(minutes=30)  # remaining time and autonomy during an outage
 DEFAULT_REPLAN_MINUTES = 120  # MPC cadence: replan when the last run is older
 
 
@@ -233,6 +235,10 @@ def _trigger_reason(opts) -> str | None:
     if datetime.now(UTC) - datetime.fromisoformat(last_run) >= replan_interval(opts):
         return "плановый пересчёт"
     report = latest_report()
+    if ((report or {}).get("advisory") or {}).get("outage_now") and (
+        datetime.now(UTC) - datetime.fromisoformat(last_run) >= OUTAGE_REPLAN
+    ):
+        return "отключение идёт — обновляю оценку"
     optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
     soc_opt = optimizer.get("soc_opt")
     starts = ((report or {}).get("hourly") or {}).get("starts_utc") or []
@@ -344,6 +350,11 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError, KeyError):
                     continue
             self._json(200, items)
+        elif path.endswith("/api/day_charts") or path == "/api/day_charts":
+            try:
+                self._json(200, charts.day_charts(latest_report()))
+            except Exception:
+                self._json(200, {"days": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/daily") or path == "/api/daily":
             try:
                 self._json(200, {"days": daily.daily_stats(14)})
@@ -453,8 +464,95 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# Grid status pushed by Home Assistant: an outage or a grid return replans
+# within seconds instead of at the next 10-minute poll (which stays as the
+# fallback while the WebSocket is down).
+GRID_EVENT_DELAY_S = 15.0  # let the recorder commit the transition first
+GRID_EVENT_MIN_GAP = timedelta(minutes=2)  # a flapping grid cannot spin runs
+WATCH_RECONNECT_S = 3600.0  # resubscribe hourly: picks up option edits
+
+
+async def _watch_grid(entity: str, on_change) -> None:
+    """Subscribe to state changes of the grid binary until the hour is up."""
+
+    import aiohttp
+
+    deadline = time.monotonic() + WATCH_RECONNECT_S
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(pipeline.SUPERVISOR_WS, heartbeat=30) as ws:
+            await ws.receive_json(timeout=30)  # auth_required
+            await ws.send_json({"type": "auth", "access_token": pipeline._token()})
+            if (await ws.receive_json(timeout=30)).get("type") != "auth_ok":
+                raise PermissionError("Home Assistant WebSocket auth failed")
+            await ws.send_json(
+                {
+                    "id": 1,
+                    "type": "subscribe_trigger",
+                    "trigger": {"platform": "state", "entity_id": entity},
+                }
+            )
+            while (left := deadline - time.monotonic()) > 0:
+                try:
+                    message = await ws.receive_json(timeout=left)
+                except TimeoutError:
+                    return
+                if message.get("type") == "result" and not message.get("success"):
+                    raise RuntimeError(f"subscribe_trigger failed: {message.get('error')}")
+                if message.get("type") != "event":
+                    continue
+                trigger = ((message.get("event") or {}).get("variables") or {}).get("trigger") or {}
+                on_change(
+                    (trigger.get("from_state") or {}).get("state"),
+                    (trigger.get("to_state") or {}).get("state"),
+                )
+
+
+def on_grid_change(old, new) -> bool:
+    """A real on/off transition schedules a replan; returns whether it did."""
+    if old not in ("on", "off") or new not in ("on", "off") or old == new:
+        return False
+    STATE["grid_state"] = new  # the 10-minute poll must not fire for it again
+    STATE["grid_event_reason"] = f"сеть {old} -> {new}"
+    threading.Timer(GRID_EVENT_DELAY_S, _run_for_grid_event).start()
+    return True
+
+
+def _run_for_grid_event() -> None:
+    last = STATE.get("last_grid_run")
+    if STATE["running"] or (
+        last is not None and datetime.now(UTC) - datetime.fromisoformat(last) < GRID_EVENT_MIN_GAP
+    ):
+        threading.Timer(30.0, _run_for_grid_event).start()  # coalesce, try again
+        return
+    now = datetime.now(UTC).isoformat()
+    STATE["last_grid_run"] = now
+    STATE["last_trigger"] = {"reason": STATE.get("grid_event_reason") or "сеть", "at": now}
+    run_pipeline(notify="always")
+
+
+def grid_watcher() -> None:
+    import asyncio
+
+    backoff = 5.0
+    while True:
+        entity = ""
+        try:
+            entity = str(
+                pipeline.resolve_entities(pipeline.options()).get("grid_binary") or ""
+            ).strip()
+            if entity:
+                asyncio.run(_watch_grid(entity, on_grid_change))
+                backoff = 5.0
+                continue  # the hourly resubscribe
+        except Exception:
+            pass
+        time.sleep(backoff if entity else 600.0)  # no grid entity: look again later
+        backoff = min(300.0, backoff * 2)
+
+
 def main() -> None:
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=grid_watcher, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"panel listening on :{PORT}", flush=True)
     server.serve_forever()
