@@ -30,6 +30,20 @@ def test_priority_maps_reserve_quantile_and_margins():
     assert policy.default_margin({"priority_mode": "economy"}) == 0.0
 
 
+def test_priority_moves_only_the_sun_scenario():
+    # The load scenario stays the median in every mode: its spread is too
+    # narrow to swing the night charge the way the sun's does.
+    assert policy.priority({"priority_mode": "economy"})["forecast"] == {
+        "pv": "p90",
+        "load": "p50",
+    }
+    assert policy.priority({"priority_mode": "resilience"})["forecast"] == {
+        "pv": "p10",
+        "load": "p50",
+    }
+    assert policy.priority({})["forecast"] == {"pv": "p50", "load": "p50"}
+
+
 class Event:
     def __init__(self, start, end, source="measured"):
         self.start, self.end, self.source, self.interrupted = start, end, source, False

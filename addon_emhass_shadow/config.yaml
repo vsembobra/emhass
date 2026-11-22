@@ -9,7 +9,7 @@ description: >-
   хуже, определяет ёмкость батареи и ориентацию панелей. По умолчанию
   только советует; с «Применять план к инвертору» пишет цели в инвертор.
 
-version: "0.17.4"
+version: "0.17.5"
 slug: emhass_shadow
 init: false
 arch:
@@ -234,7 +234,7 @@ translations:
         description: "Применять то, что аддон выучил сам: реальную ёмкость и КПД батареи, ориентацию панелей, профиль критической нагрузки по часам и подобранные на вашей истории настройки плана. Лимиты мощности только повышаются, если данные доказывают, что инвертор может больше. Выключено = выученное показывается в панели как совет."
       priority_mode:
         name: Приоритет
-        description: "Насколько осторожно считать план. economy — оптимистичный день: ночной заряд рассчитан на солнце P90 и нагрузку P10, резерв под 80% отключений серии; balanced — средний день (P50 для обоих), резерв под 90%; resilience — пессимистичный день (солнце P10, нагрузка P90), резерв под 95% и запас 1–2 ч. Автонастройка выбирает только среди вариантов, которые разрешает приоритет."
+        description: "Насколько осторожно считать план. economy — на солнечный день: ночной заряд рассчитан на солнце P90, резерв под 80% отключений серии; balanced — среднее солнце (P50), резерв под 90%; resilience — на пасмурный день (солнце P10), резерв под 95% и запас 1–2 ч. Нагрузка во всех режимах — медианная (P50). Автонастройка выбирает только среди вариантов, которые разрешает приоритет."
       publish_sensors:
         name: Публиковать сенсоры
         description: "Создавать в Home Assistant сенсоры sensor.emhass_shadow_*: рекомендуемый пол SOC, автономия батареи в часах и время старта каждой переносимой нагрузки — для ваших автоматизаций. Это не запись в инвертор. Выключено = только уведомление."
@@ -404,7 +404,7 @@ translations:
         description: "Apply what the add-on learned by itself: real battery capacity and efficiency, panel orientation, hourly critical-load profile and plan settings tuned on your history. Power limits are only raised when the data proves the inverter can do more. Off = learned values are shown in the panel as advice."
       priority_mode:
         name: Priority
-        description: "How cautious the plan is. economy: an optimistic day, the night charge is sized for sun P90 and load P10, reserve for 80% of the series' outages; balanced: the median day (P50 for both), reserve for 90%; resilience: a pessimistic day (sun P10, load P90), reserve for 95% plus 1-2 h. Autotune only picks among the options the priority allows."
+        description: "How cautious the plan is. economy: a sunny day, the night charge is sized for sun P90, reserve for 80% of the series' outages; balanced: median sun (P50), reserve for 90%; resilience: a gloomy day (sun P10), reserve for 95% plus 1-2 h. The load scenario is the median (P50) in every mode. Autotune only picks among the options the priority allows."
       publish_sensors:
         name: Publish sensors
         description: "Create sensor.emhass_shadow_* in Home Assistant: recommended SOC floor, battery autonomy in hours and the start time of every flexible load, for your automations. This is not an inverter write. Off = notification only."

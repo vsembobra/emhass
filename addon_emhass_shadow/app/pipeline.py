@@ -2454,8 +2454,9 @@ def run(notify: str = "always") -> dict:
                 float(load_prediction["load_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)
             ]
             opt_opts = dict(opts, capacity_kwh=float(opts["capacity_kwh"]) * soh)
-            # The night charge is sized for the owner's forecast scenario:
-            # optimistic, median or pessimistic sun and load (priority_mode).
+            # The night charge is sized for the owner's sun scenario:
+            # optimistic, median or pessimistic (priority_mode); the load
+            # scenario is always the median.
             scenario = policy.priority(opts)["forecast"]
             pv_by_q = {"p10": pv_p10, "p50": pv_p50, "p90": pv_p90}
             optimizer_plan = optimize.run_plan(
