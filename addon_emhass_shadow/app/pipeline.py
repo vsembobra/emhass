@@ -1722,16 +1722,29 @@ def _plan_vs_fact_note() -> str | None:
 def _fallback_load_prediction(audit: pd.DataFrame, starts: pd.DatetimeIndex, tz) -> pd.DataFrame:
     """Persistence forecast for fresh installs before the models exist.
 
-    Same-local-hour mean of clean audit history; a flat 0.5 kW when there is
+    Same-local-hour mean of clean audit history of the SAME weekday — a
+    commercial object's weekend dip must not dilute the weekday average.
+    A weekday+hour seen fewer than two times falls back to the all-days
+    same-hour mean, then to the overall mean; a flat 0.5 kW when there is
     no history at all. Bands are deliberately wide (±40/50 %) so downstream
     planning stays conservative until LightGBM takes over.
     """
     hist = audit["load_kw"].where(learning.load_target_mask(audit)).dropna()
     if len(hist):
-        by_hour = hist.groupby(hist.index.tz_convert(tz).hour).mean()
-        p50 = np.array(
-            [float(by_hour.get(s.tz_convert(tz).hour, np.nan)) for s in starts]
-        )
+        local = hist.index.tz_convert(tz)
+        groups = [local.day_of_week, local.hour]
+        by_weekday_hour = hist.groupby(groups).mean()
+        weekday_seen = hist.groupby(groups).count()
+        by_hour = hist.groupby(local.hour).mean()
+
+        def expected(stamp) -> float:
+            here = stamp.tz_convert(tz)
+            key = (here.day_of_week, here.hour)
+            if weekday_seen.get(key, 0) >= 2:
+                return float(by_weekday_hour[key])
+            return float(by_hour.get(here.hour, np.nan))
+
+        p50 = np.array([expected(s) for s in starts])
         p50 = np.where(np.isnan(p50), float(hist.mean()), p50)
     else:
         p50 = np.full(len(starts), 0.5)
