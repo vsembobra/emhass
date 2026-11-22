@@ -12,23 +12,101 @@ does not fit a flat input row.
 
 import re
 
+# Every option's built-in value. The add-on settings list only VISIBLE (the
+# owner's decisions); the rest stay optional in the schema, are applied from
+# here, and AUTO_KEYS are first looked up in Home Assistant (discovery.py).
+DEFAULTS = {
+    "latitude": 44.94892,
+    "longitude": 34.10887,
+    "time_zone": "Europe/Istanbul",
+    "capacity_kwh": 32.0,
+    "panel_kwp": 7.0,
+    "panel_tilt_deg": 26.0,
+    "panel_azimuth_deg": 195.0,
+    "min_soc_pct": 10.0,
+    "max_soc_pct": 100.0,
+    "discharge_efficiency": 0.95,
+    "charge_efficiency": 0.95,
+    "max_charge_kw": 5.0,
+    "max_discharge_kw": 5.0,
+    "floor_input_entity": "input_number.deye_soc_backup",
+    "entity_load_power": "sensor.inverter_load_power",
+    "entity_critical_load_power": "sensor.inverter_load_ups_power",
+    "entity_pv_power": "sensor.inverter_pv_power",
+    "entity_battery_power": "sensor.inverter_battery_power",
+    "entity_grid_power": "sensor.inverter_grid_power",
+    "entity_battery_soc": "sensor.inverter_battery",
+    "entity_outdoor_temperature": "",
+    "entity_grid_status": "binary_sensor.inverter_grid",
+    "entity_grid_voltage": "sensor.inverter_grid_l1_voltage",
+    "entity_export_counter": "sensor.inverter_total_energy_export",
+    "tou_soc_entity_template": "number.inverter_program_{n}_soc",
+    "tou_time_entity_template": "time.inverter_program_{n}_time",
+    "run_time": "06:47",
+    "notifications": True,
+    "apply_mode": False,
+    "retrain_enabled": True,
+    "retrain_interval_days": 7,
+    "optimizer_enabled": True,
+    "day_zone_strategy": "flat",
+    "tariff_enabled": False,
+    "tariff_normal_price": 2.0,
+    "tariff_cheap_price": 1.0,
+    "tariff_cheap_windows": "23:00-07:00",
+    "reserve_cold_start_hours": 0.0,
+    "reserve_pv_aware": True,
+    "history_backfill_days": 14,
+    "entity_battery_soh": "",
+    "load_holidays": "",
+    "autotune": False,
+    "priority_mode": "balanced",
+    "publish_sensors": False,
+    "deferrable_loads": [],
+    "tou_zones": 6,
+    "tou_soc_step_pct": 5,
+    "tou_grid_charge_entity_template": "",
+    "outage_memory_days": 14,
+    "history_statistics_days": 365,
+    "replan_minutes": 120,
+    "tou_grid_charge_on_option": "",
+    "tou_grid_charge_off_option": "",
+    "calibration_charge_enabled": True,
+    "calibration_interval_days": 14,
+}
+
+# Shown in the add-on settings by default: only what the owner decides.
+VISIBLE = (
+    "apply_mode",
+    "notifications",
+    "publish_sensors",
+    "min_soc_pct",
+    "tariff_enabled",
+    "tariff_normal_price",
+    "tariff_cheap_price",
+    "tariff_cheap_windows",
+    "priority_mode",
+    "autotune",
+    "panel_kwp",
+    "deferrable_loads",
+)
+
 # key -> metadata. Types: float, int, bool, str, select, time (HH:MM str).
 OPTION_META = {
     # --- Site -------------------------------------------------------------
     "latitude": {
         "type": "float", "min": -90, "max": 90, "step": 0.00001,
         "label": "Широта",
-        "hint": "Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды.",
+        "hint": "Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды. Пусто = из настроек Home Assistant.",
     },
     "longitude": {
         "type": "float", "min": -180, "max": 180, "step": 0.00001,
         "label": "Долгота",
-        "hint": "Координата объекта, например 34.10887.",
+        "hint": "Координата объекта, например 34.10887. Пусто = из настроек Home Assistant.",
     },
     "time_zone": {
         "type": "str",
         "label": "Часовой пояс",
-        "hint": "Имя из базы IANA, например Europe/Istanbul. Все окна и зоны считаются по местному времени.",
+        "hint": "Имя из базы IANA, например Europe/Istanbul. Все окна и зоны считаются по местному времени. Пусто = из настроек Home Assistant.",
     },
     "history_backfill_days": {
         "type": "int", "min": 0, "max": 60, "unit": "дн.",
@@ -44,7 +122,7 @@ OPTION_META = {
     "capacity_kwh": {
         "type": "float", "min": 1, "max": 200, "step": 0.5, "unit": "кВт·ч",
         "label": "Ёмкость батареи",
-        "hint": "Полная номинальная ёмкость АКБ, например 32.",
+        "hint": "Полная номинальная ёмкость АКБ, например 32. Пусто = из настроек инвертора: Battery Capacity (А·ч) × 51,2 В.",
     },
     "min_soc_pct": {
         "type": "float", "min": 0, "max": 50, "step": 1, "unit": "%",
@@ -69,12 +147,12 @@ OPTION_META = {
     "max_charge_kw": {
         "type": "float", "min": 0.5, "max": 50, "step": 0.5, "unit": "кВт",
         "label": "Макс. мощность заряда",
-        "hint": "Ограничение инвертора на заряд АКБ, например 5.",
+        "hint": "Ограничение инвертора на заряд АКБ, например 5. Пусто = из настроек инвертора: ток заряда АКБ из сети × напряжение, не больше номинала инвертора.",
     },
     "max_discharge_kw": {
         "type": "float", "min": 0.5, "max": 50, "step": 0.5, "unit": "кВт",
         "label": "Макс. мощность разряда",
-        "hint": "Ограничение инвертора на разряд АКБ, например 5.",
+        "hint": "Ограничение инвертора на разряд АКБ, например 5. Пусто = из настроек инвертора: максимальный ток разряда АКБ × напряжение, не больше номинала инвертора.",
     },
     "panel_kwp": {
         "type": "float", "min": 0.5, "max": 100, "step": 0.1, "unit": "кВтп",
@@ -178,7 +256,7 @@ OPTION_META = {
     "tou_zones": {
         "type": "int", "min": 1, "max": 12,
         "label": "Число зон TOU",
-        "hint": "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей подставляют номер зоны вместо {n}.",
+        "hint": "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей подставляют номер зоны вместо {n}. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "tou_soc_step_pct": {
         "type": "int", "min": 1, "max": 10, "unit": "%",
@@ -188,17 +266,17 @@ OPTION_META = {
     "tou_soc_entity_template": {
         "type": "str",
         "label": "Шаблон сущностей SOC зон",
-        "hint": "Шаблон с {n} вместо номера зоны. number.inverter_program_{n}_soc разворачивается в number.inverter_program_1_soc … 6_soc.",
+        "hint": "Шаблон с {n} вместо номера зоны. number.inverter_program_{n}_soc разворачивается в number.inverter_program_1_soc … 6_soc. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "tou_time_entity_template": {
         "type": "str",
         "label": "Шаблон сущностей времени зон",
-        "hint": "Шаблон с {n} вместо номера зоны. time.inverter_program_{n}_time разворачивается в time.inverter_program_1_time … 6_time.",
+        "hint": "Шаблон с {n} вместо номера зоны. time.inverter_program_{n}_time разворачивается в time.inverter_program_1_time … 6_time. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "tou_grid_charge_entity_template": {
         "type": "str",
         "label": "Шаблон флага «заряд из сети»",
-        "hint": "Сущность switch или input_boolean, включающая заряд из сети в зоне, с {n} вместо номера. Задано + применение плана = аддон разрешает заряд из сети только там, где он нужен. Пусто = флаги не трогать.",
+        "hint": "Сущность switch или input_boolean, включающая заряд из сети в зоне, с {n} вместо номера. Задано + применение плана = аддон разрешает заряд из сети только там, где он нужен. Пусто = Program N Charging из ha-solarman, если он есть; none = флаги не трогать.",
     },
     "tou_grid_charge_on_option": {
         "type": "str",
@@ -245,32 +323,32 @@ OPTION_META = {
     "entity_load_power": {
         "type": "str", "entity": True,
         "label": "Мощность нагрузки",
-        "hint": "Мощность всех потребителей дома, ватты. Пример: sensor.inverter_load_power. Основной ряд для прогноза нагрузки.",
+        "hint": "Мощность всех потребителей дома, ватты. Пример: sensor.inverter_load_power. Основной ряд для прогноза нагрузки. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_critical_load_power": {
         "type": "str", "entity": True,
         "label": "Критическая нагрузка",
-        "hint": "Мощность резервируемых (UPS) потребителей, ватты. По ней считается резерв на случай отключения сети.",
+        "hint": "Мощность резервируемых (UPS) потребителей, ватты. По ней считается резерв на случай отключения сети. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_pv_power": {
         "type": "str", "entity": True,
         "label": "Мощность солнца",
-        "hint": "Мощность солнечных панелей, ватты. Ряд для обучения модели солнечной генерации.",
+        "hint": "Мощность солнечных панелей, ватты. Ряд для обучения модели солнечной генерации. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_battery_power": {
         "type": "str", "entity": True,
         "label": "Мощность батареи",
-        "hint": "Мощность заряда/разряда АКБ, ватты; знак по конвенции вашей интеграции (у Deye: минус = заряд).",
+        "hint": "Мощность заряда/разряда АКБ, ватты; знак по конвенции вашей интеграции (у Deye: минус = заряд). Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_grid_power": {
         "type": "str", "entity": True,
         "label": "Мощность сети",
-        "hint": "Обмен с сетью, ватты; плюс = потребление из сети.",
+        "hint": "Обмен с сетью, ватты; плюс = потребление из сети. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_battery_soc": {
         "type": "str", "entity": True,
         "label": "Заряд батареи",
-        "hint": "Текущий уровень заряда АКБ, проценты (0–100). Пример: sensor.inverter_battery.",
+        "hint": "Текущий уровень заряда АКБ, проценты (0–100). Пример: sensor.inverter_battery. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_outdoor_temperature": {
         "type": "str", "entity": True,
@@ -280,22 +358,22 @@ OPTION_META = {
     "entity_grid_status": {
         "type": "str", "entity": True,
         "label": "Статус сети",
-        "hint": "binary_sensor наличия сети: on = сеть есть, off = отключение. По нему ведётся журнал отключений.",
+        "hint": "binary_sensor наличия сети: on = сеть есть, off = отключение. По нему ведётся журнал отключений. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_grid_voltage": {
         "type": "str", "entity": True,
         "label": "Напряжение сети",
-        "hint": "Необязательно. Напряжение любой фазы в вольтах — помогает распознать отключение в часах, где у binary_sensor нет истории.",
+        "hint": "Необязательно. Напряжение любой фазы в вольтах — помогает распознать отключение в часах, где у binary_sensor нет истории. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_export_counter": {
         "type": "str", "entity": True,
         "label": "Счётчик отдачи в сеть",
-        "hint": "Суммарная отданная в сеть энергия, кВт·ч (нарастающий счётчик). Нет продажи в сеть — оставьте как есть, покажет ноль.",
+        "hint": "Суммарная отданная в сеть энергия, кВт·ч (нарастающий счётчик). Нет продажи в сеть — оставьте как есть, покажет ноль. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать.",
     },
     "entity_battery_soh": {
         "type": "str", "entity": True,
         "label": "Износ батареи (SoH)",
-        "hint": "Датчик состояния батареи в процентах или просто число (99 = 99%). Учитывается в резерве и оптимизаторе. Пусто = батарея новая (100%).",
+        "hint": "Датчик состояния батареи в процентах или просто число (99 = 99%). Учитывается в резерве и оптимизаторе. Пусто = Battery SOH из ha-solarman, если он есть, иначе батарея новая (100%); none = не учитывать.",
     },
 }
 
@@ -380,8 +458,8 @@ def coerce_option(key: str, value):
     return str(value).strip()
 
 
-def options_view(opts: dict) -> list[dict]:
-    """Settings card payload: groups of inputs with current values."""
+def options_view(opts: dict, sources: dict | None = None) -> list[dict]:
+    """Settings card payload: groups of inputs with current values and their source."""
     groups = []
     for group in OPTION_GROUPS:
         items = []
@@ -393,6 +471,7 @@ def options_view(opts: dict) -> list[dict]:
                 "label": meta["label"],
                 "hint": meta["hint"],
                 "value": opts.get(key),
+                "source": (sources or {}).get(key),
             }
             for extra in ("unit", "min", "max", "step", "choices"):
                 if extra in meta:

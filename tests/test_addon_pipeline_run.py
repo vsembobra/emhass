@@ -20,8 +20,9 @@ ZONE_TIMES = ["00:00:00", "06:00:00", "10:00:00", "14:00:00", "18:00:00", "22:00
 
 
 def default_options() -> dict:
+    """Every option at its built-in value (the add-on settings list only the visible ones)."""
     config = yaml.safe_load((ADDON / "config.yaml").read_text(encoding="utf-8"))
-    return dict(config["options"])
+    return {**pipeline.options_meta.DEFAULTS, **config["options"]}
 
 
 @pytest.fixture

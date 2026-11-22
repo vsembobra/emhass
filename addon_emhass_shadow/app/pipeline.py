@@ -27,6 +27,7 @@ import adapter
 import calibration
 import certifi
 import deferrable
+import discovery
 import hardware
 import learning
 import numpy as np
@@ -68,8 +69,18 @@ MEAN_SENSOR_FIELDS = {
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
-def options() -> dict:
+def stored_options() -> dict:
+    """The options as saved (only what the owner set, plus older versions' leftovers)."""
     return json.loads((DATA / "options.json").read_text())
+
+
+def options() -> dict:
+    """What a run uses: built-in defaults < found in Home Assistant < the owner's values."""
+    return discovery.load_options(DATA)
+
+
+def option_sources() -> dict[str, str]:
+    return discovery.sources(stored_options(), discovery.load(DATA))
 
 
 def _plain_number(value) -> float | None:
@@ -632,8 +643,8 @@ STATISTICS_CHUNK_DAYS = 30
 STATISTICS_UNITS = {"power": "W", "energy": "kWh", "temperature": "°C", "voltage": "V"}
 
 
-async def _ws_statistics(start: datetime, end: datetime, ids: list[str]) -> dict:
-    """recorder/statistics_during_period over the Supervisor WebSocket proxy."""
+async def _ws_request(command: dict, timeout: float = 180):
+    """One command over the Supervisor WebSocket proxy; its result."""
     import aiohttp
 
     async with aiohttp.ClientSession() as session:
@@ -643,25 +654,78 @@ async def _ws_statistics(start: datetime, end: datetime, ids: list[str]) -> dict
             auth = await ws.receive_json(timeout=30)
             if auth.get("type") != "auth_ok":
                 raise PermissionError(f"Home Assistant WebSocket auth failed: {auth.get('type')}")
-            await ws.send_json(
-                {
-                    "id": 1,
-                    "type": "recorder/statistics_during_period",
-                    "start_time": start.isoformat(),
-                    "end_time": end.isoformat(),
-                    "statistic_ids": ids,
-                    "period": "hour",
-                    "types": ["mean", "min", "max", "change"],
-                    "units": STATISTICS_UNITS,
-                }
-            )
+            await ws.send_json({"id": 1, **command})
             while True:
-                message = await ws.receive_json(timeout=180)
+                message = await ws.receive_json(timeout=timeout)
                 if message.get("id") != 1 or message.get("type") != "result":
                     continue
                 if not message.get("success"):
-                    raise RuntimeError(f"statistics query failed: {message.get('error')}")
-                return message.get("result") or {}
+                    raise RuntimeError(f"{command['type']} failed: {message.get('error')}")
+                return message.get("result")
+
+
+async def _ws_statistics(start: datetime, end: datetime, ids: list[str]) -> dict:
+    """recorder/statistics_during_period over the Supervisor WebSocket proxy."""
+    result = await _ws_request(
+        {
+            "type": "recorder/statistics_during_period",
+            "start_time": start.isoformat(),
+            "end_time": end.isoformat(),
+            "statistic_ids": ids,
+            "period": "hour",
+            "types": ["mean", "min", "max", "change"],
+            "units": STATISTICS_UNITS,
+        }
+    )
+    return result or {}
+
+
+def refresh_discovery(force: bool = False) -> dict | None:
+    """Look up ha-solarman entities, inverter settings and the HA location.
+
+    Cached for discovery.REFRESH_EVERY; a failure keeps the last result, so
+    a Home Assistant restart never empties the options a run uses.
+    """
+    import asyncio
+
+    cached = discovery.load(DATA)
+    if not force and not discovery.stale(cached):
+        return cached
+    try:
+        registry = asyncio.run(_ws_request({"type": "config/entity_registry/list"}, timeout=60))
+        states = {s["entity_id"]: s for s in ha_get("/api/states", timeout=30) if "entity_id" in s}
+        try:
+            core = ha_get("/api/config", timeout=30)
+        except Exception:
+            core = None
+    except Exception:
+        return cached
+    result = discovery.discover(registry or [], states, core)
+    result["compacted"] = (cached or {}).get("compacted")
+    discovery.save(DATA, result)
+    return result
+
+
+def compact_options() -> list[str]:
+    """Once per discovery version: drop saved values that only repeat the automatic ones.
+
+    Settings saved by an older version hold every option, so nothing could
+    be found automatically and the add-on settings stayed long. Needs a
+    discovery that reached Home Assistant and the Supervisor's stored options.
+    """
+    found = discovery.load(DATA)
+    if not found or found.get("compacted") == discovery.VERSION:
+        return []
+    stored = supervisor_options()
+    if stored is None:
+        return []
+    kept, dropped = discovery.compact(stored, found)
+    if dropped or kept != stored:
+        _post_options(kept)
+        _write_options(kept)
+    found["compacted"] = discovery.VERSION
+    discovery.save(DATA, found)
+    return dropped
 
 
 def fetch_statistics(start: datetime, end: datetime, ids: list[str]) -> dict[str, list[dict]]:
@@ -1836,14 +1900,25 @@ def sync_options() -> dict:
     edit applies at the next run without restarting the add-on. Without the
     Supervisor (tests, a local run) the file stays as it is.
     """
-    current = options()
+    current = stored_options()
     stored = supervisor_options()
     if stored is None:
         return current
-    merged = {**current, **stored}
-    if merged != current:
-        _write_options(merged)
-    return merged
+    # The Supervisor's options replace the file: an option cleared in the
+    # settings must disappear here too, or it would never turn automatic.
+    if stored != current:
+        _write_options(stored)
+    return stored
+
+
+def _post_options(opts: dict) -> None:
+    request = urllib.request.Request(
+        SUPERVISOR_BASE + "/addons/self/options",
+        data=json.dumps({"options": opts}).encode(),
+        headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        json.load(response)
 
 
 def update_options(changes: dict) -> dict:
@@ -1859,27 +1934,27 @@ def update_options(changes: dict) -> dict:
     and the local file is updated at once, so the next run uses them.
     """
     filtered: dict = {}
+    automatic: list[str] = []  # cleared: found in Home Assistant again
     rejected: list[str] = []
     for key, value in changes.items():
-        if key in ENTITY_OPTION_KEYS:
+        if key in discovery.AUTO_KEYS and not str(value if value is not None else "").strip():
+            automatic.append(key)
+        elif key in ENTITY_OPTION_KEYS:
             filtered[key] = str(value).strip()
         elif key in options_meta.OPTION_META and not options_meta.OPTION_META[key].get("entity"):
             filtered[key] = options_meta.coerce_option(key, value)
         else:
             rejected.append(key)
-    if not filtered:
+    if not filtered and not automatic:
         return {"saved": {}, "rejected": rejected}
-    local = options()
-    opts = {**(supervisor_options() or local), **filtered}
-    request = urllib.request.Request(
-        SUPERVISOR_BASE + "/addons/self/options",
-        data=json.dumps({"options": opts}).encode(),
-        headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        json.load(response)
-    _write_options({**local, **opts})
-    return {"saved": filtered, "rejected": rejected}
+    # Only the owner's own values are saved: never the defaults or what
+    # was found, or those would stop following Home Assistant.
+    opts = {**(supervisor_options() or stored_options()), **filtered}
+    for key in automatic:
+        opts.pop(key, None)
+    _post_options(opts)
+    _write_options(opts)
+    return {"saved": filtered, "automatic": automatic, "rejected": rejected}
 
 
 ENTITY_CHECK_LABELS = {
@@ -1915,15 +1990,24 @@ def validate_entities() -> list[dict]:
         ("Напряжение сети", str(entity or ""), "number", "entity_grid_voltage")
         for entity in ent["voltages"].values()
     ]
+    # Zone rows are not edited one by one; their source is the template's.
+    zone_source: dict[str, str] = {}
     for n in range(len(ent["tou_soc"])):
         specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
+        zone_source[specs[-1][0]] = "tou_soc_entity_template"
         specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
+        zone_source[specs[-1][0]] = "tou_time_entity_template"
     for n, entity in enumerate(ent.get("tou_grid_charge", []), start=1):
         kind = "select" if entity.startswith("select.") else "binary"
         specs.append((f"Зона {n}: заряд из сети", entity, kind, None))
+        zone_source[specs[-1][0]] = "tou_grid_charge_entity_template"
     specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
     specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
+    try:
+        sources = option_sources()
+    except Exception:
+        sources = {}
     results = []
     for label, entity, kind, key in specs:
         entity = entity.strip()
@@ -1934,6 +2018,7 @@ def validate_entities() -> list[dict]:
             "status": "ok",
             "key": key,
             "hint": options_meta.entity_hint(key) if key else None,
+            "source": sources.get(key or zone_source.get(label, "")),
         }
         if not entity:
             row["status"] = "skipped"

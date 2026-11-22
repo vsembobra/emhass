@@ -9,11 +9,11 @@ curtailment. Sign conventions verified against the site data: battery power
 is negative while charging, grid power is positive while importing.
 """
 
-import json
 import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import discovery
 import numpy as np
 import pandas as pd
 import pipeline
@@ -45,7 +45,7 @@ def daily_stats(days: int = 14) -> list[dict]:
     audit_path = DATA / "hourly_audit.jsonl"
     if not audit_path.exists():
         return []
-    opts = json.loads((DATA / "options.json").read_text())
+    opts = discovery.load_options(DATA)
     tz = ZoneInfo(opts.get("time_zone", "UTC"))
     audit = pd.read_json(audit_path, lines=True)
     # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.

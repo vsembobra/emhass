@@ -26,6 +26,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import discovery
 import hardware
 import learning
 import numpy as np
@@ -98,7 +99,7 @@ def retrain_status() -> dict:
 
 def _interval_days() -> int:
     try:
-        opts = json.loads((DATA / "options.json").read_text())
+        opts = discovery.load_options(DATA)
         return max(1, int(opts.get("retrain_interval_days", 7)))
     except (OSError, json.JSONDecodeError, ValueError):
         return 7
@@ -106,7 +107,7 @@ def _interval_days() -> int:
 
 def _enabled() -> bool:
     try:
-        opts = json.loads((DATA / "options.json").read_text())
+        opts = discovery.load_options(DATA)
         return bool(opts.get("retrain_enabled", True))
     except (OSError, json.JSONDecodeError):
         return True
@@ -516,7 +517,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         # Results of an older hardware estimator (a 60-day blend of two
         # batteries, say) are replaced now, whatever the retrain schedule.
         try:
-            opts = json.loads((DATA / "options.json").read_text())
+            opts = discovery.load_options(DATA)
             hardware.save(DATA, hardware.identify(_audit_frame(), opts))
         except Exception:
             pass  # advisory; the next run tries again
@@ -541,7 +542,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             return retrain_status()
     if site is None:
         opts, _ = hardware.effective_options(
-            json.loads((DATA / "options.json").read_text()), hardware.load(DATA)
+            discovery.load_options(DATA), hardware.load(DATA)
         )
         site = {
             "latitude": opts["latitude"],
@@ -579,7 +580,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         result["models"]["pv"] = {"status": "failed", "error": str(error)[:300]}
     try:
         if force or hardware.due(DATA):
-            opts = json.loads((DATA / "options.json").read_text())
+            opts = discovery.load_options(DATA)
             hardware.save(DATA, hardware.identify(audit, opts))
     except Exception:
         pass  # hardware learning is advisory; never fail the retrain on it

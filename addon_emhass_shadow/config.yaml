@@ -9,7 +9,7 @@ description: >-
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
 
-version: "0.16.3"
+version: "0.17.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -27,138 +27,94 @@ panel_admin: false
 panel_icon: mdi:battery-sync-outline
 panel_title: Теневой план
 options:
-  latitude: 44.94892
-  longitude: 34.10887
-  time_zone: Europe/Istanbul
-  capacity_kwh: 32.0
-  panel_kwp: 7.0
-  panel_tilt_deg: 26.0
-  panel_azimuth_deg: 195.0
-  min_soc_pct: 10.0
-  max_soc_pct: 100.0
-  discharge_efficiency: 0.95
-  charge_efficiency: 0.95
-  max_charge_kw: 5.0
-  max_discharge_kw: 5.0
-  floor_input_entity: input_number.deye_soc_backup
-  entity_load_power: sensor.inverter_load_power
-  entity_critical_load_power: sensor.inverter_load_ups_power
-  entity_pv_power: sensor.inverter_pv_power
-  entity_battery_power: sensor.inverter_battery_power
-  entity_grid_power: sensor.inverter_grid_power
-  entity_battery_soc: sensor.inverter_battery
-  entity_outdoor_temperature: ""
-  entity_grid_status: binary_sensor.inverter_grid
-  entity_grid_voltage: sensor.inverter_grid_l1_voltage
-  entity_export_counter: sensor.inverter_total_energy_export
-  tou_soc_entity_template: number.inverter_program_{n}_soc
-  tou_time_entity_template: time.inverter_program_{n}_time
-  run_time: "06:47"
-  notifications: true
   apply_mode: false
-  retrain_enabled: true
-  retrain_interval_days: 7
-  optimizer_enabled: true
-  day_zone_strategy: flat
+  notifications: true
+  publish_sensors: false
+  min_soc_pct: 10.0
   tariff_enabled: false
   tariff_normal_price: 2.0
   tariff_cheap_price: 1.0
   tariff_cheap_windows: "23:00-07:00"
-  reserve_cold_start_hours: 0.0
-  reserve_pv_aware: true
-  history_backfill_days: 14
-  entity_battery_soh: ""
-  load_holidays: ""
-  autotune: false
   priority_mode: balanced
-  publish_sensors: false
+  autotune: false
+  panel_kwp: 7.0
   deferrable_loads: []
-  tou_zones: 6
-  tou_soc_step_pct: 5
-  tou_grid_charge_entity_template: ""
-  outage_memory_days: 14
-  history_statistics_days: 365
-  replan_minutes: 120
-  tou_grid_charge_on_option: ""
-  tou_grid_charge_off_option: ""
-  calibration_charge_enabled: true
-  calibration_interval_days: 14
 schema:
-  latitude: float(-90,90)
-  longitude: float(-180,180)
-  time_zone: str
-  capacity_kwh: float(1,200)
-  panel_kwp: float(0.5,100)
-  panel_tilt_deg: float(0,90)
-  panel_azimuth_deg: float(0,360)
-  min_soc_pct: float(0,50)
-  max_soc_pct: float(50,100)
-  discharge_efficiency: float(0.5,1)
-  charge_efficiency: float(0.5,1)
-  max_charge_kw: float(0.5,50)
-  max_discharge_kw: float(0.5,50)
-  floor_input_entity: str
-  entity_load_power: str
-  entity_critical_load_power: str
-  entity_pv_power: str
-  entity_battery_power: str
-  entity_grid_power: str
-  entity_battery_soc: str
-  entity_outdoor_temperature: str?
-  entity_grid_status: str
-  entity_grid_voltage: str?
-  entity_export_counter: str
-  tou_soc_entity_template: str
-  tou_time_entity_template: str
-  run_time: match(^([01]\d|2[0-3]):[0-5]\d$)
-  notifications: bool
   apply_mode: bool
-  retrain_enabled: bool
-  retrain_interval_days: int(1,30)
-  optimizer_enabled: bool
-  day_zone_strategy: list(ladder|flat)
+  notifications: bool
+  publish_sensors: bool
+  min_soc_pct: float(0,50)
   tariff_enabled: bool
   tariff_normal_price: float(0,1000)
   tariff_cheap_price: float(0,1000)
   tariff_cheap_windows: str
-  reserve_cold_start_hours: float(0,20)
-  reserve_pv_aware: bool
-  history_backfill_days: int(0,60)
-  entity_battery_soh: str?
-  load_holidays: str?
-  autotune: bool
   priority_mode: list(resilience|balanced|economy)
-  publish_sensors: bool
+  autotune: bool
+  panel_kwp: float(0.5,100)
   deferrable_loads:
     - name: str
       power_kw: float(0.1,30)
       hours: float(0.5,12)
       window: str?
-  tou_zones: int(1,12)
-  tou_soc_step_pct: int(1,10)
+  latitude: float(-90,90)?
+  longitude: float(-180,180)?
+  time_zone: str?
+  capacity_kwh: float(1,200)?
+  panel_tilt_deg: float(0,90)?
+  panel_azimuth_deg: float(0,360)?
+  max_soc_pct: float(50,100)?
+  discharge_efficiency: float(0.5,1)?
+  charge_efficiency: float(0.5,1)?
+  max_charge_kw: float(0.5,50)?
+  max_discharge_kw: float(0.5,50)?
+  floor_input_entity: str?
+  entity_load_power: str?
+  entity_critical_load_power: str?
+  entity_pv_power: str?
+  entity_battery_power: str?
+  entity_grid_power: str?
+  entity_battery_soc: str?
+  entity_outdoor_temperature: str?
+  entity_grid_status: str?
+  entity_grid_voltage: str?
+  entity_export_counter: str?
+  tou_soc_entity_template: str?
+  tou_time_entity_template: str?
+  run_time: match(^([01]\d|2[0-3]):[0-5]\d$)?
+  retrain_enabled: bool?
+  retrain_interval_days: int(1,30)?
+  optimizer_enabled: bool?
+  day_zone_strategy: list(ladder|flat)?
+  reserve_cold_start_hours: float(0,20)?
+  reserve_pv_aware: bool?
+  history_backfill_days: int(0,60)?
+  entity_battery_soh: str?
+  load_holidays: str?
+  tou_zones: int(1,12)?
+  tou_soc_step_pct: int(1,10)?
   tou_grid_charge_entity_template: str?
-  outage_memory_days: int(3,60)
-  history_statistics_days: int(0,730)
-  replan_minutes: int(15,240)
+  outage_memory_days: int(3,60)?
+  history_statistics_days: int(0,730)?
+  replan_minutes: int(15,240)?
   tou_grid_charge_on_option: str?
   tou_grid_charge_off_option: str?
-  calibration_charge_enabled: bool
-  calibration_interval_days: int(3,60)
+  calibration_charge_enabled: bool?
+  calibration_interval_days: int(3,60)?
 translations:
   ru:
     configuration:
       latitude:
         name: Широта
-        description: Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды.
+        description: Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды. Пусто = из настроек Home Assistant.
       longitude:
         name: Долгота
-        description: Координата объекта, например 34.10887.
+        description: Координата объекта, например 34.10887. Пусто = из настроек Home Assistant.
       time_zone:
         name: Часовой пояс
-        description: Имя из базы IANA, например Europe/Istanbul. Все окна и зоны считаются по местному времени.
+        description: Имя из базы IANA, например Europe/Istanbul. Все окна и зоны считаются по местному времени. Пусто = из настроек Home Assistant.
       capacity_kwh:
         name: Ёмкость батареи, кВт·ч
-        description: Полная номинальная ёмкость АКБ. Например 32 для 32 кВт·ч.
+        description: "Полная номинальная ёмкость АКБ. Например 32 для 32 кВт·ч. Пусто = из настроек инвертора: Battery Capacity (А·ч) × 51,2 В."
       panel_kwp:
         name: Мощность панелей, кВтп
         description: Суммарная паспортная мощность солнечных панелей, например 7. Используется для прогноза солнца, пока модель не переобучилась на ваших данных.
@@ -182,49 +138,49 @@ translations:
         description: Доля энергии, доходящая до батареи при заряде (0.95 = 95%).
       max_charge_kw:
         name: Макс. мощность заряда, кВт
-        description: Ограничение инвертора на заряд АКБ. Например 5.
+        description: "Ограничение инвертора на заряд АКБ. Например 5. Пусто = из настроек инвертора: ток заряда АКБ из сети × напряжение, не больше номинала инвертора."
       max_discharge_kw:
         name: Макс. мощность разряда, кВт
-        description: Ограничение инвертора на разряд АКБ. Например 5.
+        description: "Ограничение инвертора на разряд АКБ. Например 5. Пусто = из настроек инвертора: максимальный ток разряда АКБ × напряжение, не больше номинала инвертора."
       floor_input_entity:
         name: Сущность текущего порога SOC
         description: input_number или number, где хранится нижний порог SOC инвертора в процентах, например input_number.deye_soc_backup или number.inverter_battery_low_soc.
       entity_load_power:
         name: Сущность — мощность нагрузки
-        description: "Что: мощность всех потребителей дома. Единицы: ватты. Пример: sensor.inverter_load_power. Основной ряд для прогноза нагрузки."
+        description: "Что: мощность всех потребителей дома. Единицы: ватты. Пример: sensor.inverter_load_power. Основной ряд для прогноза нагрузки. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_critical_load_power:
         name: Сущность — критическая нагрузка
-        description: "Что: мощность резервируемых (UPS) потребителей. Единицы: ватты. Пример: sensor.inverter_load_ups_power. По ней считается резерв на случай отключения сети."
+        description: "Что: мощность резервируемых (UPS) потребителей. Единицы: ватты. Пример: sensor.inverter_load_ups_power. По ней считается резерв на случай отключения сети. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_pv_power:
         name: Сущность — мощность солнца
-        description: "Что: мощность солнечных панелей. Единицы: ватты. Пример: sensor.inverter_pv_power. Ряд для обучения модели солнечной генерации."
+        description: "Что: мощность солнечных панелей. Единицы: ватты. Пример: sensor.inverter_pv_power. Ряд для обучения модели солнечной генерации. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_battery_power:
         name: Сущность — мощность батареи
-        description: "Что: мощность заряда/разряда АКБ. Единицы: ватты; знак по конвенции вашей интеграции (у Deye: минус = заряд). Пример: sensor.inverter_battery_power."
+        description: "Что: мощность заряда/разряда АКБ. Единицы: ватты; знак по конвенции вашей интеграции (у Deye: минус = заряд). Пример: sensor.inverter_battery_power. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_grid_power:
         name: Сущность — мощность сети
-        description: "Что: обмен с сетью. Единицы: ватты; плюс = потребление из сети. Пример: sensor.inverter_grid_power."
+        description: "Что: обмен с сетью. Единицы: ватты; плюс = потребление из сети. Пример: sensor.inverter_grid_power. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_battery_soc:
         name: Сущность — заряд батареи
-        description: "Что: текущий уровень заряда АКБ. Единицы: проценты (0–100). Пример: sensor.inverter_battery."
+        description: "Что: текущий уровень заряда АКБ. Единицы: проценты (0–100). Пример: sensor.inverter_battery. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_outdoor_temperature:
         name: Сущность — уличная температура
         description: "Что: температура на улице. Единицы: °C. Подойдёт любой уличный датчик. Пример: sensor.home_temperature. Улучшает прогноз нагрузки. Пусто = аддон сам подставляет температуру из Open-Meteo."
       entity_grid_status:
         name: Сущность — статус сети
-        description: "Что: наличие сети. Тип: binary_sensor (on = сеть есть, off = отключение). Пример: binary_sensor.inverter_grid. По нему ведётся журнал отключений."
+        description: "Что: наличие сети. Тип: binary_sensor (on = сеть есть, off = отключение). Пример: binary_sensor.inverter_grid. По нему ведётся журнал отключений. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_grid_voltage:
         name: Сущность — напряжение сети
-        description: "Необязательно, можно оставить пустым. Что: напряжение любой фазы. Единицы: вольты. Пример: sensor.inverter_grid_l1_voltage. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории."
+        description: "Необязательно, можно оставить пустым. Что: напряжение любой фазы. Единицы: вольты. Пример: sensor.inverter_grid_l1_voltage. Дополнение к binary_sensor статуса сети — помогает распознать отключение в часах, где у binary_sensor нет истории. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       entity_export_counter:
         name: Сущность — счётчик отдачи в сеть
-        description: "Что: суммарная отданная в сеть энергия. Единицы: кВт·ч (нарастающий счётчик). Пример: sensor.inverter_total_energy_export. Нет продажи в сеть — оставьте как есть, покажет ноль."
+        description: "Что: суммарная отданная в сеть энергия. Единицы: кВт·ч (нарастающий счётчик). Пример: sensor.inverter_total_energy_export. Нет продажи в сеть — оставьте как есть, покажет ноль. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       tou_soc_entity_template:
         name: Шаблон сущностей SOC зон TOU
-        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: number.inverter_program_{n}_soc разворачивается в number.inverter_program_1_soc … number.inverter_program_6_soc."
+        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: number.inverter_program_{n}_soc разворачивается в number.inverter_program_1_soc … number.inverter_program_6_soc. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       tou_time_entity_template:
         name: Шаблон сущностей времени зон TOU
-        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: time.inverter_program_{n}_time разворачивается в time.inverter_program_1_time … time.inverter_program_6_time."
+        description: "Шаблон с {n} вместо номера зоны (1–6). Пример: time.inverter_program_{n}_time разворачивается в time.inverter_program_1_time … time.inverter_program_6_time. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       run_time:
         name: Время ежедневного расчёта
         description: ЧЧ:ММ по местному времени. Расчёт и уведомление выполняются раз в день в этот момент.
@@ -266,7 +222,7 @@ translations:
         description: "ВКЛ: в часы, когда пессимистичный прогноз солнца перекрывает критическую нагрузку, резерв отключений на эти часы снижается (ночной резерв не меняется). ВЫКЛ: резерв одинаковый круглые сутки."
       entity_battery_soh:
         name: Сущность — износ батареи (SoH)
-        description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh, или просто число (99 = 99%). Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = считать батарею новой (100%)."
+        description: "Датчик состояния батареи в процентах, например sensor.inverter_battery_soh, или просто число (99 = 99%). Учитывается при расчёте резерва и энергии в оптимизаторе. Пусто = Battery SOH из ha-solarman, если он есть, иначе батарея новая (100%); none = не учитывать."
       history_backfill_days:
         name: Глубина загрузки истории, дней
         description: "Сколько дней прошлого аддон забирает из истории Home Assistant при первом запуске и по кнопке «Загрузить историю» (0–60, по умолчанию 14). Реальная глубина ограничена сроком хранения рекордера HA (обычно 10 дней). Эти данные сразу идут в обучение моделей прогноза."
@@ -287,13 +243,13 @@ translations:
         description: "Приборы, которые можно включать в любое время в своём окне: бойлер, стиральная машина, насос. Для каждого: name — название, power_kw — мощность, hours — сколько часов в сутки работать, window — допустимое окно ЧЧ:ММ-ЧЧ:ММ (пусто = весь день). Аддон подберёт время, когда они будут работать на солнце, которое иначе ушло бы в усечение."
       tou_zones:
         name: Число зон TOU
-        description: "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей ниже подставляют номер зоны вместо {n}."
+        description: "Сколько программ (зон) времени использования у инвертора. У Deye — 6. Шаблоны сущностей ниже подставляют номер зоны вместо {n}. Пусто = найти в ha-solarman (Deye) автоматически; none = не использовать."
       tou_soc_step_pct:
         name: Шаг SOC зон, %
         description: "С каким шагом инвертор принимает SOC зоны (у Deye — 5). Цели всегда округляются вверх до этого шага, чтобы не срезать резерв."
       tou_grid_charge_entity_template:
         name: Шаблон флага «заряд из сети» зоны
-        description: "Сущность switch или input_boolean, которая включает заряд из сети в зоне, с {n} вместо номера, например switch.inverter_program_{n}_charging. Если задано и включено применение плана, аддон разрешает заряд из сети только там, где он нужен для резерва, в дешёвые часы, а без тарифа — в зонах без солнца. Пусто = флаги не трогать."
+        description: "Сущность switch или input_boolean, которая включает заряд из сети в зоне, с {n} вместо номера, например switch.inverter_program_{n}_charging. Если задано и включено применение плана, аддон разрешает заряд из сети только там, где он нужен для резерва, в дешёвые часы, а без тарифа — в зонах без солнца. Пусто = Program N Charging из ha-solarman, если он есть; none = флаги не трогать."
       outage_memory_days:
         name: Память серии отключений, дней
         description: "Отключения идут сериями. Пока последнее отключение было не больше этого числа дней назад, серия считается идущей: аддон держит резерв по реальной длительности её отключений и поднимает его в часы, когда отключали. Дольше тишины — серия закончилась, резерв не держится (3–60, по умолчанию 14)."
@@ -319,16 +275,16 @@ translations:
     configuration:
       latitude:
         name: Latitude
-        description: Site coordinate, e.g. 44.94892. Used for solar geometry and weather.
+        description: Site coordinate, e.g. 44.94892. Used for solar geometry and weather. Empty = from the Home Assistant settings.
       longitude:
         name: Longitude
-        description: Site coordinate, e.g. 34.10887.
+        description: Site coordinate, e.g. 34.10887. Empty = from the Home Assistant settings.
       time_zone:
         name: Time zone
-        description: IANA name, e.g. Europe/Istanbul. All windows and zones use local time.
+        description: IANA name, e.g. Europe/Istanbul. All windows and zones use local time. Empty = from the Home Assistant settings.
       capacity_kwh:
         name: Battery capacity, kWh
-        description: Full nominal battery capacity, e.g. 32.
+        description: "Full nominal battery capacity, e.g. 32. Empty = from the inverter settings: Battery Capacity (Ah) × 51.2 V."
       panel_kwp:
         name: Panel capacity, kWp
         description: Total nameplate power of the solar array, e.g. 7. Used for the PV forecast until the model has retrained on your data.
@@ -352,49 +308,49 @@ translations:
         description: Share of input energy stored in the battery (0.95 = 95%).
       max_charge_kw:
         name: Max charge power, kW
-        description: Inverter charge limit for the battery, e.g. 5.
+        description: "Inverter charge limit for the battery, e.g. 5. Empty = from the inverter settings: battery grid charging current × voltage, capped by the inverter rating."
       max_discharge_kw:
         name: Max discharge power, kW
-        description: Inverter discharge limit for the battery, e.g. 5.
+        description: "Inverter discharge limit for the battery, e.g. 5. Empty = from the inverter settings: battery max discharging current × voltage, capped by the inverter rating."
       floor_input_entity:
         name: Current floor SOC entity
         description: input_number or number holding the inverter's lower SOC threshold in percent, e.g. input_number.deye_soc_backup or number.inverter_battery_low_soc.
       entity_load_power:
         name: Entity — load power
-        description: "What: total house consumption power. Units: watts. Example: sensor.inverter_load_power. The main series for the load forecast."
+        description: "What: total house consumption power. Units: watts. Example: sensor.inverter_load_power. The main series for the load forecast. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_critical_load_power:
         name: Entity — critical load power
-        description: "What: backup/UPS loads power. Units: watts. Example: sensor.inverter_load_ups_power. Drives the outage reserve sizing."
+        description: "What: backup/UPS loads power. Units: watts. Example: sensor.inverter_load_ups_power. Drives the outage reserve sizing. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_pv_power:
         name: Entity — PV power
-        description: "What: solar array power. Units: watts. Example: sensor.inverter_pv_power. Training series for the solar forecast model."
+        description: "What: solar array power. Units: watts. Example: sensor.inverter_pv_power. Training series for the solar forecast model. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_battery_power:
         name: Entity — battery power
-        description: "What: battery charge/discharge power. Units: watts; sign follows your integration's convention (Deye: negative = charging). Example: sensor.inverter_battery_power."
+        description: "What: battery charge/discharge power. Units: watts; sign follows your integration's convention (Deye: negative = charging). Example: sensor.inverter_battery_power. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_grid_power:
         name: Entity — grid power
-        description: "What: grid exchange. Units: watts; positive = importing. Example: sensor.inverter_grid_power."
+        description: "What: grid exchange. Units: watts; positive = importing. Example: sensor.inverter_grid_power. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_battery_soc:
         name: Entity — battery SOC
-        description: "What: current battery state of charge. Units: percent (0-100). Example: sensor.inverter_battery."
+        description: "What: current battery state of charge. Units: percent (0-100). Example: sensor.inverter_battery. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_outdoor_temperature:
         name: Entity — outdoor temperature
         description: "What: outdoor temperature. Units: °C. Any outdoor sensor works. Example: sensor.home_temperature. Improves the load forecast. Empty = the add-on falls back to Open-Meteo temperature."
       entity_grid_status:
         name: Entity — grid status
-        description: "What: grid availability. Type: binary_sensor (on = grid up, off = outage). Example: binary_sensor.inverter_grid. Feeds the outage log."
+        description: "What: grid availability. Type: binary_sensor (on = grid up, off = outage). Example: binary_sensor.inverter_grid. Feeds the outage log. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_grid_voltage:
         name: Entity — grid voltage
-        description: "Optional, may be left empty. What: any phase voltage. Units: volts. Example: sensor.inverter_grid_l1_voltage. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history."
+        description: "Optional, may be left empty. What: any phase voltage. Units: volts. Example: sensor.inverter_grid_l1_voltage. Complements the grid binary_sensor — helps detect outages in hours where the binary sensor has no history. Empty = found in ha-solarman (Deye) automatically; none = not used."
       entity_export_counter:
         name: Entity — grid export counter
-        description: "What: total energy exported to the grid. Units: kWh (cumulative counter). Example: sensor.inverter_total_energy_export. No feed-in? Keep the default, it will read zero."
+        description: "What: total energy exported to the grid. Units: kWh (cumulative counter). Example: sensor.inverter_total_energy_export. No feed-in? Keep the default, it will read zero. Empty = found in ha-solarman (Deye) automatically; none = not used."
       tou_soc_entity_template:
         name: TOU zone SOC entity template
-        description: "Template with {n} for the zone number (1-6). Example: number.inverter_program_{n}_soc expands to number.inverter_program_1_soc … number.inverter_program_6_soc."
+        description: "Template with {n} for the zone number (1-6). Example: number.inverter_program_{n}_soc expands to number.inverter_program_1_soc … number.inverter_program_6_soc. Empty = found in ha-solarman (Deye) automatically; none = not used."
       tou_time_entity_template:
         name: TOU zone time entity template
-        description: "Template with {n} for the zone number (1-6). Example: time.inverter_program_{n}_time expands to time.inverter_program_1_time … time.inverter_program_6_time."
+        description: "Template with {n} for the zone number (1-6). Example: time.inverter_program_{n}_time expands to time.inverter_program_1_time … time.inverter_program_6_time. Empty = found in ha-solarman (Deye) automatically; none = not used."
       run_time:
         name: Daily run time
         description: HH:MM local. The plan and notification are produced once a day at this time.
@@ -436,7 +392,7 @@ translations:
         description: "ON: during hours where the pessimistic solar forecast covers the critical load, the outage reserve for those hours is reduced (the night reserve is unchanged). OFF: the reserve is flat around the clock."
       entity_battery_soh:
         name: Entity — battery SoH
-        description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh, or a plain number (99 = 99%). Used for reserve sizing and optimizer energy accounting. Empty = assume a new battery (100%)."
+        description: "Battery state-of-health sensor in percent, e.g. sensor.inverter_battery_soh, or a plain number (99 = 99%). Used for reserve sizing and optimizer energy accounting. Empty = Battery SOH from ha-solarman when present, else a new battery (100%); none = ignore."
       history_backfill_days:
         name: History backfill depth, days
         description: "How many past days the add-on pulls from Home Assistant history on first run and via the 'Backfill history' button (0-60, default 14). Actual depth is limited by the HA recorder retention (usually 10 days). This data feeds the forecast model training immediately."
@@ -457,13 +413,13 @@ translations:
         description: "Appliances that may run at any time inside their window: water heater, washer, pump. For each: name, power_kw, hours per day, window HH:MM-HH:MM (empty = all day). The add-on picks the time they run on sun that would otherwise be curtailed."
       tou_zones:
         name: TOU zones
-        description: "How many time-of-use programs (zones) the inverter has. Deye has 6. The entity templates below substitute the zone number for {n}."
+        description: "How many time-of-use programs (zones) the inverter has. Deye has 6. The entity templates below substitute the zone number for {n}. Empty = found in ha-solarman (Deye) automatically; none = not used."
       tou_soc_step_pct:
         name: Zone SOC step, %
         description: "The SOC granularity the inverter accepts for a zone (Deye: 5). Targets are always rounded up to this step so the reserve is never shaved."
       tou_grid_charge_entity_template:
         name: Zone grid-charge flag template
-        description: "switch or input_boolean entity that enables grid charging in a zone, with {n} for the zone number, e.g. switch.inverter_program_{n}_charging. When set and apply mode is on, the add-on allows grid charging only where the reserve needs it, in cheap hours, or (without a tariff) in zones with no sun. Empty = leave the flags alone."
+        description: "switch or input_boolean entity that enables grid charging in a zone, with {n} for the zone number, e.g. switch.inverter_program_{n}_charging. When set and apply mode is on, the add-on allows grid charging only where the reserve needs it, in cheap hours, or (without a tariff) in zones with no sun. Empty = Program N Charging from ha-solarman when present; none = leave the flags alone."
       outage_memory_days:
         name: Outage series memory, days
         description: "Outages come in series. While the last outage is at most this many days old the series is live: the add-on holds a reserve sized on its real outage durations and raises it in the hours it hit. Longer quiet means the series is over and no reserve is held (3-60, default 14)."

@@ -61,6 +61,13 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
             pipeline.sync_options()
         except Exception:
             pass
+        try:
+            # Empty options are filled from ha-solarman and the HA config;
+            # settings saved by an older version are shortened once.
+            pipeline.refresh_discovery()
+            pipeline.compact_options()
+        except Exception:
+            pass
         if not (DATA / "hourly_audit.jsonl").exists():
             # Fresh install: learn from what Home Assistant already holds
             # (recorder detail + months of long-term statistics + outages),
@@ -270,7 +277,7 @@ def scheduler() -> None:
     time.sleep(60)  # let Home Assistant settle after add-on start
     while True:
         try:
-            opts = json.loads((DATA / "options.json").read_text())
+            opts = pipeline.options()
             tz = ZoneInfo(opts["time_zone"])
             hour, minute = (int(part) for part in opts["run_time"].split(":"))
             now = datetime.now(tz)
@@ -406,7 +413,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/options") or path == "/api/options":
             try:
-                self._json(200, {"groups": options_meta.options_view(pipeline.sync_options())})
+                pipeline.sync_options()
+                self._json(
+                    200,
+                    {
+                        "groups": options_meta.options_view(
+                            pipeline.options(), pipeline.option_sources()
+                        )
+                    },
+                )
             except Exception:
                 self._json(500, {"error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/entity_ids") or path == "/api/entity_ids":

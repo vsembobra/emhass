@@ -181,7 +181,8 @@ def test_a_panel_save_keeps_edits_made_in_the_addon_settings(monkeypatch, tmp_pa
     pipeline.update_options({"capacity_kwh": "30"})
     # Merged into what the Supervisor holds, not into the stale file.
     assert posted["body"]["options"] == {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
-    assert pipeline.options() == {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
+    assert pipeline.stored_options() == {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
+    assert pipeline.options()["capacity_kwh"] == 30.0  # what a run uses
 
 
 def test_without_the_supervisor_the_file_stays(monkeypatch, tmp_path):
