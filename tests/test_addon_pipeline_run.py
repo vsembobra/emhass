@@ -16,6 +16,8 @@ sys.path.insert(0, str(ADDON / "app"))
 
 import pipeline  # noqa: E402
 
+from tests.fixture_clock import fixture_clock  # noqa: E402
+
 ZONE_TIMES = ["00:00:00", "06:00:00", "10:00:00", "14:00:00", "18:00:00", "22:00:00"]
 
 
@@ -66,19 +68,22 @@ def fake_site(monkeypatch, tmp_path):
         elif service == "select_option":
             states[payload["entity_id"]] = payload["option"]
 
-    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    index = pd.date_range(now - timedelta(hours=48), periods=96, freq="h")
-    elevation = np.clip(np.sin((index.hour - 6) / 12 * np.pi), 0, None)
-    weather = pd.DataFrame(
-        {
-            "temperature_2m": 8.0,
-            "shortwave_radiation": 700 * elevation,
-            "direct_normal_irradiance": 500 * elevation,
-            "diffuse_radiation": 120 * elevation,
-            "cloud_cover": 20.0,
-        },
-        index=index,
-    )
+    def archive_weather(site):
+        # Built around the clock of the run, so a test may freeze it after setup.
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        index = pd.date_range(now - timedelta(hours=48), periods=96, freq="h")
+        elevation = np.clip(np.sin((index.hour - 6) / 12 * np.pi), 0, None)
+        weather = pd.DataFrame(
+            {
+                "temperature_2m": 8.0,
+                "shortwave_radiation": 700 * elevation,
+                "direct_normal_irradiance": 500 * elevation,
+                "diffuse_radiation": 120 * elevation,
+                "cloud_cover": 20.0,
+            },
+            index=index,
+        )
+        return weather, "fake.json", False
 
     monkeypatch.setattr(pipeline, "DATA", tmp_path)
     monkeypatch.setattr(pipeline, "SHARE", tmp_path / "share")
@@ -86,7 +91,7 @@ def fake_site(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "ha_get", ha_get)
     monkeypatch.setattr(pipeline, "ha_service", ha_service)
     monkeypatch.setattr(pipeline, "fetch_history", lambda start, end, entities: {})
-    monkeypatch.setattr(pipeline, "archive_weather", lambda site: (weather, "fake.json", False))
+    monkeypatch.setattr(pipeline, "archive_weather", archive_weather)
     setup()
     return {
         "setup": setup,
@@ -317,7 +322,10 @@ def test_apply_mode_drives_deye_select_flags(fake_site):
         tariff_cheap_windows="23:00-07:00",
         tou_grid_charge_entity_template="select.inverter_program_{n}_charging",
     )
-    report = pipeline.run()
+    # Fixed clock: 15:00 Europe/Istanbul. From 23:00 the 22:00 zone in effect
+    # lies wholly in the cheap window and rightly turns grid charging on.
+    with fixture_clock():
+        report = pipeline.run()
     plan = {item["n"]: item for item in report["advisory"]["grid_charge"]}
     assert plan[1]["target_state"] == "Grid"  # 00:00-06:00, cheap
     assert plan[3]["target_state"] == "Disabled"  # 10:00, expensive
@@ -395,7 +403,10 @@ def test_bms_calibration_charges_the_night_zone_to_full(fake_site):
         calibration_charge_enabled=True,
         tou_grid_charge_entity_template="select.inverter_program_{n}_charging",
     )
-    report = pipeline.run()
+    # Fixed clock: 15:00 Europe/Istanbul, the whole night window ahead. Between
+    # 06:00 and 07:00 only its last hour is left, in zone 2, too short for 100 %.
+    with fixture_clock():
+        report = pipeline.run()
     calib = report["data"]["calibration"]
     assert calib["due"] and calib["days_since_full"] is None  # no full charge in history
     assert 1 in calib["zones"]  # 00:00-06:00 covers the default night window
