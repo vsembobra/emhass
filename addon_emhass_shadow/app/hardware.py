@@ -44,6 +44,7 @@ MAX_GEOMETRY_REL_ERROR = 0.15  # fit MAE relative to the measured peak
 MAX_AZIMUTH_CHANGE_DEG = 45.0  # beyond this vs the configured roof: confirm by hand
 MAX_TILT_CHANGE_DEG = 20.0
 POWER_EPS_KW = 0.05
+MAX_CAPACITY_CHANGE = 0.25  # a learned capacity further from the setting is a mixed history (battery swap), not evidence
 SOC_BANDS = ((0.0, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01))
 RAISE_LIMIT_MARGIN = 1.1  # observed must beat the setting by 10 % to raise it
 PROFILE_FACTOR_BOUNDS = (0.5, 1.5)
@@ -257,15 +258,28 @@ def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str
         return effective, notes
     battery = hardware.get("battery") or {}
     if battery.get("status") == "ok" and battery.get("capacity_kwh"):
-        effective["capacity_kwh"] = float(battery["capacity_kwh"])
-        # The identified capacity already reflects ageing: no extra SoH.
-        effective["_soh_identified"] = True
-        notes.append(f"ёмкость {opts['capacity_kwh']}→{effective['capacity_kwh']:.1f} кВт·ч")
-        eta = battery.get("eta_one_way")
-        if eta:
-            effective["charge_efficiency"] = float(eta)
-            effective["discharge_efficiency"] = float(eta)
-            notes.append(f"КПД в одну сторону {float(eta):.3f}")
+        learned_cap = float(battery["capacity_kwh"])
+        configured_cap = float(opts["capacity_kwh"])
+        deviation = abs(learned_cap - configured_cap) / configured_cap if configured_cap else 0.0
+        if deviation <= MAX_CAPACITY_CHANGE:
+            effective["capacity_kwh"] = learned_cap
+            # The identified capacity already reflects ageing: no extra SoH.
+            effective["_soh_identified"] = True
+            notes.append(f"ёмкость {opts['capacity_kwh']}→{effective['capacity_kwh']:.1f} кВт·ч")
+            eta = battery.get("eta_one_way")
+            if eta:
+                effective["charge_efficiency"] = float(eta)
+                effective["discharge_efficiency"] = float(eta)
+                notes.append(f"КПД в одну сторону {float(eta):.3f}")
+        else:
+            # A battery swap leaves both batteries' segments in the 60-day
+            # window; the pooled estimate then sits between the two real
+            # capacities. Refuse it until the old battery ages out.
+            notes.append(
+                f"выученная ёмкость {learned_cap:.1f} кВт·ч на {deviation:.0%} расходится "
+                f"с настроенной {configured_cap:.0f} — не применяю; если батарею меняли, "
+                f"поправьте настройку или дождитесь переобучения"
+            )
     limits = hardware.get("limits") or {}
     for key, label in (("max_charge_kw", "заряд"), ("max_discharge_kw", "разряд")):
         observed = limits.get(key)

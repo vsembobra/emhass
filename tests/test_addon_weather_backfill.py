@@ -51,7 +51,10 @@ def test_backfills_earlier_range(tmp_path, monkeypatch):
 
 def test_no_refetch_when_complete(tmp_path, monkeypatch):
     monkeypatch.setattr(retrain, "WEATHER_HIST", tmp_path / "weather.jsonl")
-    full = _chunk(pd.Timestamp("2026-11-06", tz="UTC"), pd.Timestamp("2026-11-19 23:00", tz="UTC"))
+    # The history is complete when it reaches "now minus a day" (the archive
+    # publishes with a delay), so the end must follow the clock.
+    fetch_end = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(days=1)
+    full = _chunk(pd.Timestamp("2026-11-06", tz="UTC"), fetch_end)
     full.reset_index(names="start_utc").to_json(
         tmp_path / "weather.jsonl", orient="records", lines=True, date_format="iso"
     )

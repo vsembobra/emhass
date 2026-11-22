@@ -180,6 +180,21 @@ def test_effective_options_ignore_unconfirmed_battery():
     assert effective["capacity_kwh"] == 32.0 and "_soh_identified" not in effective
 
 
+def test_effective_options_reject_capacity_from_a_mixed_history():
+    # After a battery swap the 60-day window holds both batteries' segments;
+    # the pooled estimate (40.9 between 32 and 48) must not move the setting.
+    learned = _learned()
+    learned["battery"]["capacity_kwh"] = 40.9
+    effective, notes = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    assert effective["capacity_kwh"] == 32.0 and "_soh_identified" not in effective
+    assert effective["charge_efficiency"] == 0.95  # eta travels with the capacity
+    assert any("расходится" in note for note in notes)
+    # A learned value within the tolerance still applies.
+    learned["battery"]["capacity_kwh"] = 38.0
+    effective, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    assert effective["capacity_kwh"] == 38.0
+
+
 def test_reshape_reserve_follows_profile_and_keeps_autonomy():
     starts = pd.date_range("2026-11-20 00:00", periods=24, freq="h", tz="UTC")
     profile = [0.3] * 18 + [1.2] * 6
