@@ -11,6 +11,7 @@ the live PV power and SOC.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -36,18 +37,32 @@ def _forecast(entries: list[dict], hour: pd.Timestamp) -> dict | None:
     return None
 
 
-def _soc_plan(report: dict | None) -> dict[str, float]:
-    """Planned SOC (%) per hour start: the mean of the hour's two ends."""
-    optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
-    soc = optimizer.get("soc_opt") or []
-    if not soc or not report.get("issue_utc"):
-        return {}
-    issue = pd.Timestamp(report["issue_utc"])
-    plan = {}
-    for i, end in enumerate(soc):
-        start = soc[i - 1] if i else end
-        hour = (issue + pd.Timedelta(hours=i)).isoformat()
-        plan[hour] = round((float(start) + float(end)) / 2 * 100, 1)
+def _soc_plan(reports: list[dict]) -> dict[str, float]:
+    """Planned SOC (%) per hour start: the mean of the hour's two ends.
+
+    Every hour takes the newest plan issued at or before it, so past hours
+    show what was actually planned for them and can be compared against the
+    measured SOC. Reports older than any plan covering an hour leave None.
+    """
+    issued = []
+    seen = set()
+    for report in reports:
+        optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
+        soc = [float(v) for v in optimizer.get("soc_opt") or []]
+        issue_text = (report or {}).get("issue_utc")
+        if soc and issue_text and issue_text not in seen:
+            seen.add(issue_text)
+            issued.append((pd.Timestamp(issue_text), soc))
+    issued.sort(key=lambda item: item[0])
+    plan: dict[str, float] = {}
+    for k, (issue, soc) in enumerate(issued):
+        stop = issued[k + 1][0] if k + 1 < len(issued) else None
+        for i, end in enumerate(soc):
+            hour = issue + pd.Timedelta(hours=i)
+            if stop is not None and hour >= stop:
+                break
+            start = soc[i - 1] if i else end
+            plan[hour.isoformat()] = round((start + end) / 2 * 100, 1)
     return plan
 
 
@@ -86,7 +101,18 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
         if "pv_filter" in audit
         else pd.Series(dtype=bool)
     )
-    plan = _soc_plan(report)
+    # The latest plan covers only the hours since its issue; earlier hours of
+    # the day get their plan from the archived reports of previous runs.
+    reports = [report] if report else []
+    try:
+        for path in sorted((pipeline.DATA / "shadow_reports").glob("*.json"))[-3:]:
+            try:
+                reports.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+    except OSError:
+        pass
+    plan = _soc_plan(reports)
     live_pv, live_soc = _live(opts) if live else (None, None)
 
     def number(row, column) -> float | None:
@@ -117,7 +143,7 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
                     "actual_kw": None if actual is None else round(actual, 3),
                     "throttled": bool(stamp in throttled.index and throttled.loc[stamp]),
                     "soc_pct": None if soc is None else round(soc * 100, 1),
-                    "soc_plan_pct": plan.get(key) if stamp >= current else None,
+                    "soc_plan_pct": plan.get(key),
                     "past": stamp < current,
                     "current": is_current,
                 }

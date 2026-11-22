@@ -70,7 +70,8 @@ def test_today_shows_the_forecast_in_effect_and_the_measurements(site):
     assert hours[9]["actual_kw"] == 1.0 and not hours[9]["throttled"]
     assert hours[11]["throttled"]  # a full battery throttled the panels
     assert hours[13]["actual_kw"] is None
-    # SOC: measured before now, planned from the current hour on.
+    # SOC: measured before now; planned wherever a plan covered the hour
+    # (no archived plans here, so past hours have none yet).
     assert hours[10]["soc_pct"] == 50.0 and hours[10]["soc_plan_pct"] is None
     assert hours[12]["soc_plan_pct"] == 60.0 and hours[13]["soc_plan_pct"] == 65.0
     assert today["actual_kwh"] == 13.0  # 11 h x 1 kW + 2 kW
@@ -90,3 +91,28 @@ def test_without_a_plan_the_chart_says_so(site):
     assert data["plan_note"] and all(
         h["soc_plan_pct"] is None for day in data["days"] for h in day["hours"]
     )
+
+
+def test_past_hours_show_the_plan_that_covered_them(site, tmp_path):
+    # Yesterday's evening plan covered today's early hours: the chart must
+    # show it next to the measured SOC instead of hiding it in the past.
+    archive = tmp_path / "shadow_reports"
+    archive.mkdir()
+    (archive / "2026-11-20.json").write_text(
+        json.dumps(
+            {
+                "issue_utc": "2026-11-20T20:00:00+00:00",
+                "advisory": {"optimizer": {"soc_opt": [0.4] * 48}},
+            }
+        )
+    )
+    hours = charts.day_charts(site, now=NOW, live=False)["days"][0]["hours"]
+    assert hours[5]["soc_plan_pct"] == 40.0  # from the archived plan
+    assert hours[10]["soc_pct"] == 50.0 and hours[10]["soc_plan_pct"] == 40.0
+    # Since the live report's issue (12:00) its own plan wins again.
+    assert hours[12]["soc_plan_pct"] == 60.0
+    # A duplicated archive of the live report changes nothing.
+    (archive / "2026-11-21.json").write_text(json.dumps(site))
+    assert charts.day_charts(site, now=NOW, live=False)["days"][0]["hours"][12][
+        "soc_plan_pct"
+    ] == 60.0
