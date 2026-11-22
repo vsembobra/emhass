@@ -70,6 +70,28 @@ def tariff_prices(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[fl
     return prices
 
 
+TIE_BREAK = 0.002  # price tilt over the whole horizon: decides ties, never a tariff gap
+
+
+def later_is_cheaper(prices: list[float]) -> list[float]:
+    """Prices the solver sees: each hour a hair dearer than the next.
+
+    Two cheap nights cost the same, so buying tomorrow's energy tonight is a
+    tie, and the solver often settles it by buying early. The battery then
+    carries energy the day does not need, and every replan treats that
+    carry-over as the plan's own and puts the cloudy-day margin on top of it
+    again, so the night target creeps up (55 % needed, 90 % charged). With
+    later hours marginally cheaper the plan buys as late as it can and spends
+    what the battery already holds first. The tilt (0.2 % from the first hour
+    to the last) is far below any tariff gap or charging loss, so it decides
+    ties only; costs are reported at the real prices.
+    """
+    n = len(prices)
+    if n < 2:
+        return list(prices)
+    return [p * (1.0 + TIE_BREAK * (n - 1 - i) / (n - 1)) for i, p in enumerate(prices)]
+
+
 def soc_bounds(opts: dict) -> tuple[float, float]:
     """SOC bounds as fractions; accepts percent keys (min_soc_pct) and the
     pre-0.7 fraction keys (min_soc) so existing configs keep working."""
@@ -497,6 +519,7 @@ def run_plan(
     horizon = len(starts)
     day1 = min(DAY_HOURS, horizon)
     prices = tariff_prices(starts, tz, opts)
+    solver_prices = later_is_cheaper(prices)
     pv_w = np.maximum(np.asarray(pv_p50_kw, dtype=float), 0.0) * 1000.0
     load_w = np.maximum(np.asarray(load_p50_kw, dtype=float), 0.0) * 1000.0
     soc_init = min(max(soc_init, min_soc), max_soc)
@@ -514,14 +537,14 @@ def run_plan(
         opts, tz_name, battery_off=False, soc_final_reward_factor=reward_factor,
         horizon_hours=horizon,
     )
-    result = _solve(optimizer, starts, prices, pv_w, load_w, soc_init, floor_profile)
+    result = _solve(optimizer, starts, solver_prices, pv_w, load_w, soc_init, floor_profile)
     status = str(optimizer.optim_status)
     relaxed = False
     if status.lower() != "optimal":
         # A hard floor the forecasts cannot reach must not kill the plan:
         # retry with the flat configured minimum and mark the fallback.
         result = _solve(
-            optimizer, starts, prices, pv_w, load_w, soc_init, [min_soc] * horizon
+            optimizer, starts, solver_prices, pv_w, load_w, soc_init, [min_soc] * horizon
         )
         status = str(optimizer.optim_status)
         relaxed = True
@@ -536,8 +559,12 @@ def run_plan(
         if "P_PV_curtailment" in result
         else None
     )
-    # cost_profit is revenue minus spend, so money spent is its negation.
-    spent_plan = -float(result["cost_profit"].sum())
+    # Money spent at the real prices (the solver saw the tie-break tilt); the
+    # site cannot sell, so it is the import bill. cost_profit is the fallback.
+    spent_plan = (
+        float(sum(p_grid[i] / 1000.0 * prices[i] for i in range(horizon)))
+        if p_grid is not None else -float(result["cost_profit"].sum())
+    )
 
     # Night charge on the pessimistic sun: re-solve with PV P10 and keep the
     # extra end-of-night SOC that fits under the median plan's headroom. The
@@ -547,7 +574,9 @@ def run_plan(
     margin: dict[int, float] = {}
     if runs and pv_p10_kw is not None and not relaxed:
         pv10_w = np.maximum(np.asarray(pv_p10_kw, dtype=float), 0.0) * 1000.0
-        pessimistic = _solve(optimizer, starts, prices, pv10_w, load_w, soc_init, floor_profile)
+        pessimistic = _solve(
+            optimizer, starts, solver_prices, pv10_w, load_w, soc_init, floor_profile
+        )
         if str(optimizer.optim_status).lower() == "optimal":
             soc_p10 = [float(v) for v in pessimistic["SOC_opt"]]
             margin = night_charge_margin(soc_opt, soc_p10, runs, max_soc)
