@@ -39,16 +39,31 @@ def interval_days(opts: dict) -> float:
         return float(DEFAULT_INTERVAL_DAYS)
 
 
-def last_full_charge(audit: pd.DataFrame, live_soc: float | None, now: datetime) -> datetime | None:
+def full_soc(opts: dict) -> float:
+    """SOC that counts as full: 99 %, or just under max SOC when it is capped lower.
+
+    The calibration charges to max SOC; with max SOC at 95 % a fixed 99 % was
+    never reached, so the charge came due again every night.
+    """
+    if "max_soc_pct" in opts:
+        max_soc = float(opts["max_soc_pct"]) / 100.0
+    else:
+        max_soc = float(opts.get("max_soc", 1.0))
+    return min(FULL_SOC, max_soc - 0.01)
+
+
+def last_full_charge(
+    audit: pd.DataFrame, live_soc: float | None, now: datetime, full: float = FULL_SOC
+) -> datetime | None:
     """Most recent hour the battery was full (audit soc_max or the live SOC)."""
-    if live_soc is not None and live_soc >= FULL_SOC:
+    if live_soc is not None and live_soc >= full:
         return now
     if "soc_max" not in audit or audit.empty:
         return None
-    full = pd.to_numeric(audit["soc_max"], errors="coerce") >= FULL_SOC
-    if not full.any():
+    reached = pd.to_numeric(audit["soc_max"], errors="coerce") >= full
+    if not reached.any():
         return None
-    return audit.index[full.to_numpy()][-1].to_pydatetime()
+    return audit.index[reached.to_numpy()][-1].to_pydatetime()
 
 
 def night_window(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[int]:
@@ -69,7 +84,7 @@ def night_window(starts: pd.DatetimeIndex, tz: ZoneInfo, opts: dict) -> list[int
 def status(audit: pd.DataFrame, live_soc: float | None, now: datetime, opts: dict) -> dict:
     """Is a calibration charge due? With the facts behind the answer."""
     days = interval_days(opts)
-    last = last_full_charge(audit, live_soc, now)
+    last = last_full_charge(audit, live_soc, now, full_soc(opts))
     since = None if last is None else (now - last).total_seconds() / 86400
     info = {
         "enabled": enabled(opts),

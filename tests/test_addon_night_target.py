@@ -61,7 +61,7 @@ def _plan(issue: str, soc: float) -> tuple[dict, pd.DatetimeIndex]:
         [dict(z) for z in ZONES],
         OPTS,
         reserve_floors=[FLOOR] * 48,
-        pv_p10_kw=_sun(starts.hour, 4.0),
+        pv_scenario_kw=_sun(starts.hour, 4.0),
     )
     assert result is not None and not result["floor_relaxed"]
     return result, starts
@@ -152,7 +152,7 @@ def test_a_battery_that_covers_a_dull_day_is_not_held_full_overnight():
             tariff_cheap_windows="23:00-07:00",  # as the report's prices show
         ),
         reserve_floors=floors,
-        pv_p10_kw=[0.0] * 24 + list(np.array(REPORT_SUN) * 2.92 / 4.32),
+        pv_scenario_kw=[0.0] * 24 + list(np.array(REPORT_SUN) * 2.92 / 4.32),
     )
     assert sum(result["p_grid_kw"]) == pytest.approx(0.0, abs=0.05)  # nothing to buy
     assert result["night_margin_kwh"] == 0.0  # a dull day is covered anyway
@@ -160,3 +160,55 @@ def test_a_battery_that_covers_a_dull_day_is_not_held_full_overnight():
     # own 88 % at 07:00: the house runs on the battery at night, whatever it draws.
     # It was held at 95 % before.
     assert _night_zone(result) == 70
+
+
+def test_dawn_sun_in_the_cheap_window_is_not_a_grid_charge_target():
+    # Summer: the battery at its 20 % floor at 23:00, a big sunny day ahead
+    # whose first sun (05:00-07:00) falls inside the cheap window. The plan buys
+    # nothing; the sun lifts the SOC at dawn. A charge target there made the
+    # inverter buy at 00:00 what the sun brings for free.
+    starts = pd.date_range("2026-06-20 23:00", periods=48, freq="h", tz="UTC")
+    hours = np.asarray(starts.hour, dtype=float)
+    sun = np.where((hours >= 5) & (hours < 20), np.sin((hours - 4.5) / 15 * np.pi), 0.0)
+    sun = sun / sun[:24].sum() * 40.0
+    floors = [0.2] * 48
+    result = optimize.run_plan(
+        starts, list(sun), [15.0 / 24] * 48, floors, 0.2, [dict(z) for z in ZONES],
+        OPTS, reserve_floors=floors,  # no P10: the zone logic alone, no night adjustment
+    )  # fmt: skip
+    assert result["grid_charge_kwh_cheap"] == pytest.approx(0.0, abs=0.05)
+    assert _night_zone(result) == 20
+
+
+def test_a_replan_in_the_last_calibration_hour_keeps_a_sane_horizon_end():
+    # 06:00, the calibration window's last hour: the pipeline lifts floor[0] to
+    # 100 %. That floor must not become the end-of-horizon target as well.
+    starts = pd.date_range("2026-11-24 06:00", periods=48, freq="h", tz="UTC")
+    floors = [1.0] + [FLOOR] * 47
+    result = optimize.run_plan(
+        starts, _sun(starts.hour, 8.0), [15.0 / 24] * 48, floors, 0.85,
+        [dict(z) for z in ZONES], OPTS, reserve_floors=[FLOOR] * 48,
+        pv_scenario_kw=_sun(starts.hour, 4.0),
+    )  # fmt: skip
+    assert not result["floor_relaxed"]
+    assert result["soc_opt"][-1] < 0.9  # not held high for two days to refill to 100 %
+
+
+def _night_for(pv_q: float, load_q: float) -> int:
+    """Night zone for the owner's example with the scenario sun and load scaled."""
+    starts = pd.date_range("2026-11-23 23:00", periods=48, freq="h", tz="UTC")
+    result = optimize.run_plan(
+        starts, _sun(starts.hour, 8.0), [15.0 / 24] * 48, [FLOOR] * 48, 0.40,
+        [dict(z) for z in ZONES], OPTS, reserve_floors=[FLOOR] * 48,
+        pv_scenario_kw=_sun(starts.hour, 8.0 * pv_q),
+        load_scenario_kw=[15.0 / 24 * load_q] * 48,
+    )  # fmt: skip
+    return _night_zone(result)
+
+
+def test_the_priority_scenario_moves_the_night_charge():
+    economy = _night_for(1.5, 0.8)  # sun P90, load P10: an optimistic day
+    balanced = _night_for(1.0, 1.0)  # the median day: the plan's own need
+    resilience = _night_for(0.5, 1.2)  # sun P10, load P90: a pessimistic day
+    assert economy < balanced < resilience
+    assert balanced == 50  # ~45 % by hand on the median day, the 5 % step up

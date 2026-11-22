@@ -216,7 +216,11 @@ def calculate_reserve(
     measured = []
     announced = []
     for event in events:
-        if event.end is None or event.interrupted:
+        # An interrupted outage lost its observation midway (the logger went
+        # dark, often because the battery ran out): its recorded span is a
+        # lower bound on the duration, so it counts. Dropping it let a reserve
+        # that was too small hide the very outages it failed to cover.
+        if event.end is None:
             continue
         start, end = utc_time(event.start), utc_time(event.end)
         if event.source == "measured" and cutoff < end <= now:

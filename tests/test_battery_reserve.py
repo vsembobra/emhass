@@ -34,10 +34,9 @@ def test_reserve_quantile_maps_to_full_effective_capacity():
     assert plan.shortfall_kwh == 0
 
 
-def test_cold_start_excludes_open_interrupted_old_and_future_events():
+def test_cold_start_excludes_open_old_and_future_events():
     events = [
         measured(NOW - timedelta(days=15), 15),
-        measured(NOW, 12, interrupted=True),
         measured(NOW + timedelta(hours=1), 3),
         OutageEvent(NOW - timedelta(hours=2), None, "measured"),
     ]
@@ -46,6 +45,16 @@ def test_cold_start_excludes_open_interrupted_old_and_future_events():
     assert plan.critical_load_kw == 1
     assert plan.reserve_kwh == pytest.approx(2.17391304)
     assert plan.floor_soc == pytest.approx(0.27391304)
+
+
+def test_an_outage_the_battery_did_not_survive_still_counts():
+    # Four 2 h outages the battery rode through; the fifth ran it flat after 3 h,
+    # the logger went dark and the event was closed "interrupted". Its recorded
+    # span is a lower bound: dropping it kept the reserve at the 2 h it failed with.
+    events = [measured(NOW - timedelta(days=d), 2) for d in (1, 2, 3, 4)]
+    events.append(measured(NOW - timedelta(days=5), 3, interrupted=True))
+    plan = calculate_reserve(NOW, events, [], settings())
+    assert plan.duration_hours > 2
 
 
 def test_one_event_and_overlapping_duplicates_use_the_longest_combined_event():

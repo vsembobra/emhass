@@ -348,8 +348,12 @@ class Calibration:
 
 def fit_calibration(pairs: pd.DataFrame, target: str, tz: ZoneInfo) -> Calibration:
     """Fit the per-hour correction and band scales from recent pairs."""
-    calibration = Calibration(target=target, pairs=len(pairs))
-    if len(pairs) < MIN_PAIRS:
+    # Evidence is counted in distinct actual hours: with a replan every two
+    # hours the same hour is paired with ~12 forecasts, and counting rows made
+    # one unusual day look like a week of evidence.
+    starts = pd.DatetimeIndex(pairs["start"]) if len(pairs) else pd.DatetimeIndex([])
+    calibration = Calibration(target=target, pairs=int(starts.nunique()))
+    if calibration.pairs < MIN_PAIRS:
         return calibration
     actual = pairs["actual"].to_numpy(dtype=float)
     p10 = pairs["p10"].to_numpy(dtype=float)
@@ -362,16 +366,17 @@ def fit_calibration(pairs: pd.DataFrame, target: str, tz: ZoneInfo) -> Calibrati
     for hour in range(24):
         mask = hours == hour
         count = int(mask.sum())
+        seen = int(starts[mask].nunique()) if count else 0
         if target == "load":
             value = float(np.median(actual[mask] - p50[mask])) if count else 0.0
-            hourly.append(_shrink(value, 0.0, count, HOUR_SHRINK))
+            hourly.append(_shrink(value, 0.0, seen, HOUR_SHRINK))
         else:
             forecast_kwh = float(p50[mask].sum()) if count else 0.0
             if forecast_kwh > 0.5:
                 factor = float(np.clip(actual[mask].sum() / forecast_kwh, *PV_FACTOR_BOUNDS))
             else:
                 factor = 1.0
-            hourly.append(_shrink(factor, 1.0, count, HOUR_SHRINK))
+            hourly.append(_shrink(factor, 1.0, seen, HOUR_SHRINK))
     calibration.hourly = hourly
 
     shift = np.asarray(hourly)[hours]
@@ -381,7 +386,7 @@ def fit_calibration(pairs: pd.DataFrame, target: str, tz: ZoneInfo) -> Calibrati
         mid, lo, hi = p50 * shift, (p50 - p10) * shift, (p90 - p50) * shift
     z_lo = (mid - actual) / np.maximum(lo, EPS)
     z_hi = (actual - mid) / np.maximum(hi, EPS)
-    count = float(len(pairs))
+    count = float(calibration.pairs)
     for side, z in (("scale_lo", z_lo), ("scale_hi", z_hi)):
         raw = float(np.clip(np.quantile(z, TARGET_ONE_SIDED), *SCALE_BOUNDS))
         setattr(calibration, side, _shrink(raw, 1.0, count, SCALE_SHRINK))
@@ -400,8 +405,9 @@ def drift_status(pairs_by_target: dict[str, pd.DataFrame], now: datetime) -> dic
     status: dict = {"checked_utc": pd.Timestamp(now).isoformat(), "drift": False, "reasons": []}
     for target, pairs in pairs_by_target.items():
         recent = pairs[pd.DatetimeIndex(pairs["start"]) >= since] if len(pairs) else pairs
-        info: dict = {"pairs": int(len(recent))}
-        if len(recent) >= DRIFT_MIN_PAIRS:
+        hours = int(pd.DatetimeIndex(recent["start"]).nunique()) if len(recent) else 0
+        info: dict = {"pairs": hours}  # distinct actual hours, as in fit_calibration
+        if hours >= DRIFT_MIN_PAIRS:
             actual = recent["actual"].to_numpy(dtype=float)
             p50 = recent["p50"].to_numpy(dtype=float)
             rel_bias = float((p50.mean() - actual.mean()) / max(actual.mean(), EPS))

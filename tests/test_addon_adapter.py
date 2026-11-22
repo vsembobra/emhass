@@ -115,6 +115,25 @@ def test_active_zone_grid_charge_uses_measured_soc():
     (zone1, zone2) = adapter.grid_charge_plan(
         programs, starts, UTC, opts, reserve, [0.0] * 24, soc_opt, 0.5
     )
-    # Was off as "дорогой тариф": compared against tomorrow's planned 70 %.
+    # Was off as the expensive-tariff case: compared against tomorrow's planned 70 %.
     assert zone1["desired"] and zone1["reason"].startswith("резерв 70%")
     assert not zone2["desired"]
+
+
+def _at_floor(reserve, soc):
+    opts = {"tariff_enabled": False, "min_soc_pct": 20, "max_soc_pct": 100}
+    return {
+        item["n"]: item["desired"]
+        for item in adapter.grid_charge_plan(
+            PROGRAMS, STARTS, UTC, opts, [reserve] * 24, [0.0] * 24, [soc] * 24, soc
+        )
+    }
+
+
+def test_grid_charge_does_not_flip_on_bms_jitter_at_the_floor():
+    # Quiet regime: the reserve is min SOC, which the inverter holds by itself.
+    assert not any(_at_floor(0.20, 0.19).values())
+    # A reserve above min SOC, the reading a point under it: no flip either.
+    assert not any(_at_floor(0.30, 0.29).values())
+    # Clearly below the reserve: restore it from the grid.
+    assert all(_at_floor(0.35, 0.30).values())

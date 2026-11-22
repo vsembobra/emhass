@@ -1,15 +1,15 @@
 name: "EMHASS Shadow — теневой план батареи"
 description: >-
-  Теневой режим EMHASS: ежедневный сбор данных из Recorder, квантильные
-  прогнозы нагрузки и солнечной генерации, расчёт резерва отключений и
-  MILP-оптимизатор (CVXPY/HiGHS) суточного плана батареи: плавающий пол SOC,
-  целевые SOC для зон TOU, ночная зарядка по дешёвому тарифу. Аддон учится
-  на данных объекта: ежедневно поправляет прогнозы, переобучает модели
-  только если новая не хуже, определяет ёмкость батареи и ориентацию
-  панелей, подбирает настройки на своей истории. По умолчанию в инвертор
-  ничего не записывает.
+  План батареи на 48 ч на EMHASS: квантильные прогнозы нагрузки и солнца по
+  данным Recorder, резерв на время серии отключений и MILP-оптимизатор
+  (CVXPY/HiGHS) — плавающий пол SOC, цели зон TOU и ночной заряд по дешёвому
+  тарифу ровно под то, что нужно до следующей ночи в выбранном сценарии
+  (оптимистичный, средний или пессимистичный день). Аддон учится на данных
+  объекта: поправляет прогнозы, переобучает модели, только если новая не
+  хуже, определяет ёмкость батареи и ориентацию панелей. По умолчанию
+  только советует; с «Применять план к инвертору» пишет цели в инвертор.
 
-version: "0.17.3"
+version: "0.17.4"
 slug: emhass_shadow
 init: false
 arch:
@@ -234,7 +234,7 @@ translations:
         description: "Применять то, что аддон выучил сам: реальную ёмкость и КПД батареи, ориентацию панелей, профиль критической нагрузки по часам и подобранные на вашей истории настройки плана. Лимиты мощности только повышаются, если данные доказывают, что инвертор может больше. Выключено = выученное показывается в панели как совет."
       priority_mode:
         name: Приоритет
-        description: "Насколько важна защита от отключений по сравнению с экономией. resilience — максимум надёжности (резерв под 95% отключений, запас до утра по пессимистичному прогнозу); balanced — как раньше (90%); economy — больше солнца и экономии (80%, запас до утра может считаться по ожидаемому прогнозу). Автонастройка выбирает только среди вариантов, которые разрешает приоритет."
+        description: "Насколько осторожно считать план. economy — оптимистичный день: ночной заряд рассчитан на солнце P90 и нагрузку P10, резерв под 80% отключений серии; balanced — средний день (P50 для обоих), резерв под 90%; resilience — пессимистичный день (солнце P10, нагрузка P90), резерв под 95% и запас 1–2 ч. Автонастройка выбирает только среди вариантов, которые разрешает приоритет."
       publish_sensors:
         name: Публиковать сенсоры
         description: "Создавать в Home Assistant сенсоры sensor.emhass_shadow_*: рекомендуемый пол SOC, автономия батареи в часах и время старта каждой переносимой нагрузки — для ваших автоматизаций. Это не запись в инвертор. Выключено = только уведомление."
@@ -404,7 +404,7 @@ translations:
         description: "Apply what the add-on learned by itself: real battery capacity and efficiency, panel orientation, hourly critical-load profile and plan settings tuned on your history. Power limits are only raised when the data proves the inverter can do more. Off = learned values are shown in the panel as advice."
       priority_mode:
         name: Priority
-        description: "How outage protection weighs against savings. resilience: maximum safety (reserve for 95% of outages, overnight deficit on the pessimistic forecast); balanced: previous behaviour (90%); economy: more sun and savings (80%, the overnight deficit may use the expected forecast). Autotune only picks among the options the priority allows."
+        description: "How cautious the plan is. economy: an optimistic day, the night charge is sized for sun P90 and load P10, reserve for 80% of the series' outages; balanced: the median day (P50 for both), reserve for 90%; resilience: a pessimistic day (sun P10, load P90), reserve for 95% plus 1-2 h. Autotune only picks among the options the priority allows."
       publish_sensors:
         name: Publish sensors
         description: "Create sensor.emhass_shadow_* in Home Assistant: recommended SOC floor, battery autonomy in hours and the start time of every flexible load, for your automations. This is not an inverter write. Off = notification only."

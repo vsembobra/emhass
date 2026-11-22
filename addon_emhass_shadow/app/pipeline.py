@@ -1193,6 +1193,11 @@ def hindsight_import(
     and floors. planned -> hindsight is the cost of forecast error,
     hindsight -> metered is the cost of execution (the inverter or the
     zone translation not following the plan).
+
+    The plan looked 48 h ahead, so the re-solve does too, with the report's
+    own forecast standing in for the next day: a 24 h re-solve ends the
+    horizon at the day's end, spends the battery differently and showed
+    1-3 kWh of "forecast error" even with a perfect forecast.
     """
     load = pd.to_numeric(audit["load_kw"], errors="coerce").reindex(starts)
     pv = pd.to_numeric(audit["pv_measured_kw"], errors="coerce").reindex(starts)
@@ -1203,12 +1208,19 @@ def hindsight_import(
     load = load.fillna(pd.Series(hourly["load_p50_kw"], index=starts))
     pv = pv.fillna(pd.Series(hourly["pv_p50_kw"], index=starts))
     floors = [step["floor_soc"] for step in report["advisory"]["floor_profile"]]
+    horizon = starts.append(starts + pd.Timedelta(hours=len(starts)))
     plan = optimize.run_plan(
-        starts, list(pv), list(load), floors, float(soc.iloc[0]), [], opts
+        horizon,
+        list(pv) + list(hourly["pv_p50_kw"]),
+        list(load) + list(hourly["load_p50_kw"]),
+        floors * 2,
+        float(soc.iloc[0]),
+        [],
+        opts,
     )
     if plan is None or not plan.get("p_grid_kw"):
         return None
-    return round(sum(max(0.0, float(v)) for v in plan["p_grid_kw"]), 2)
+    return round(sum(max(0.0, float(v)) for v in plan["p_grid_kw"][: len(starts)]), 2)
 
 
 def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) -> int:
@@ -1255,7 +1267,15 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) 
         if plan_grid and len(plan_grid) >= HORIZON_HOURS:
             actual_import = audit["grid_power_kw_raw_sign"].reindex(starts).clip(lower=0.0)
             if actual_import.notna().sum() >= 20:
-                planned = round(sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS]), 2)
+                # The night margin is bought on top of the median plan's import.
+                margin = ((report.get("advisory") or {}).get("optimizer") or {}).get(
+                    "night_margin_kwh", 0.0
+                )
+                planned = round(
+                    sum(max(0.0, float(v)) for v in plan_grid[:HORIZON_HOURS])
+                    + float(margin or 0.0),
+                    2,
+                )
                 actual = round(float(actual_import.sum()), 2)
                 entry["plan_vs_fact"] = {"planned_grid_kwh": planned, "actual_grid_kwh": actual}
                 hindsight = None
@@ -2356,6 +2376,9 @@ def run(notify: str = "always") -> dict:
                     "outage_regime": bool(regime["active"]),
                     "critical_kw": round(float(plan.critical_load_kw), 4),
                     "margin_hours": margin_hours,
+                    # Already inside reserve_kwh_by_hour; the tuner takes it out
+                    # before it replays its own margin candidates.
+                    "margin_kwh": round(float(margin_kwh), 4),
                     # What the plan used (after self-correction), for the
                     # day-ahead sensors.
                     "pv_p50_used": [round(float(v), 3) for v in pv_p50],
@@ -2431,11 +2454,22 @@ def run(notify: str = "always") -> dict:
                 float(load_prediction["load_p50_kw"].iloc[i]) for i in range(PLAN_HOURS)
             ]
             opt_opts = dict(opts, capacity_kwh=float(opts["capacity_kwh"]) * soh)
+            # The night charge is sized for the owner's forecast scenario:
+            # optimistic, median or pessimistic sun and load (priority_mode).
+            scenario = policy.priority(opts)["forecast"]
+            pv_by_q = {"p10": pv_p10, "p50": pv_p50, "p90": pv_p90}
             optimizer_plan = optimize.run_plan(
                 starts_plan, pv_p50, load_p50, floors_plan,
                 float(battery_now) / 100.0, programs, opt_opts,
-                reserve_floors=reserve_floors_plan, pv_p10_kw=pv_p10,
+                reserve_floors=reserve_floors_plan,
+                pv_scenario_kw=list(pv_by_q[scenario["pv"]]),
+                load_scenario_kw=[
+                    float(load_prediction[f"load_{scenario['load']}_kw"].iloc[i])
+                    for i in range(PLAN_HOURS)
+                ],
             )
+            if optimizer_plan is not None:
+                optimizer_plan["night_scenario"] = dict(scenario)
         except Exception:
             optimizer_plan = None
     if optimizer_plan is not None and calib_zones:
@@ -2690,13 +2724,21 @@ def run(notify: str = "always") -> dict:
         if optimizer_plan.get("tariff_enabled"):
             opt_line += " (в тарифных единицах)"
         lines.append(opt_line)
+        scenario = optimizer_plan.get("night_scenario")
+        if optimizer_plan.get("tariff_enabled") and scenario:
+            mode = str(opts.get("priority_mode", policy.DEFAULT_PRIORITY))
+            day = {"economy": "оптимистичный", "balanced": "средний"}.get(mode, "пессимистичный")
+            lines.append(
+                f"• Ночной заряд рассчитан на {day} день: солнце {scenario['pv'].upper()}, "
+                f"нагрузка {scenario['load'].upper()} (приоритет {mode})"
+            )
         if optimizer_plan["grid_charge_kwh_cheap"] >= 0.3:
             lines.append(
                 f"• Ночная зарядка из сети по дешёвому тарифу: "
                 f"{optimizer_plan['grid_charge_kwh_cheap']:.1f} кВт·ч"
                 + (
                     f" (из них {optimizer_plan['night_margin_kwh']:.1f} — запас "
-                    "на случай, если солнца будет меньше прогноза)"
+                    "сверх среднего прогноза под сценарий приоритета)"
                     if optimizer_plan.get("night_margin_kwh", 0.0) >= 0.3
                     else ""
                 )

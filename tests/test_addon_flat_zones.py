@@ -94,8 +94,9 @@ SUN_P10 = [0.0] * 9 + [0.5] * 4 + [0.0] * 11  # 6 kWh less = 20 pp of 30 kWh
 
 
 def _margin(soc_p50, runs=((0, 6),), grid_charging=None):
+    dull = [p50 - p10 for p50, p10 in zip(SUN_P50, SUN_P10, strict=True)]  # extra drain, kW
     return optimize.night_charge_adjustment(
-        soc_p50, MARGIN_FLOORS, SUN_P50, SUN_P10, list(runs), 1.0, 30.0, 1.0, grid_charging
+        soc_p50, MARGIN_FLOORS, dull, list(runs), 1.0, 30.0, 1.0, grid_charging
     )
 
 
@@ -156,7 +157,7 @@ def _plan(pv_day, pv_p10_day, strategy="flat"):
         PROGRAMS,
         opts,
         reserve_floors=[0.1] * 48,
-        pv_p10_kw=list(shape * pv_p10_day),
+        pv_scenario_kw=list(shape * pv_p10_day),
     )
 
 

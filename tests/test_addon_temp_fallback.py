@@ -29,7 +29,7 @@ def test_fills_only_missing_values():
     audit, weather = _frames()
     out = retrain._fill_audit_temperature(audit, weather)
     assert list(out["temp_air_observed_c"]) == [5.0, 11.0, 12.0, 13.0]
-    # исходный фрейм не тронут
+    # the input frame is left untouched
     assert audit["temp_air_observed_c"].isna().sum() == 3
 
 

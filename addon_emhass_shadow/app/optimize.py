@@ -1,11 +1,12 @@
-"""MILP day plan for the EMHASS Shadow add-on.
+"""MILP battery plan for the EMHASS Shadow add-on.
 
 Wraps emhass.optimization.Optimization (CVXPY + HiGHS) with the site's
-battery/plant parameters from the add-on options and the shadow pipeline's
-P50 forecasts. Produces an optimal 24 h charge/discharge plan, from which
-target SOCs for the inverter's TOU zones are derived.
-
-Shadow mode: results are advisory only, nothing is written to the inverter.
+battery/plant parameters from the add-on options. The plan covers 48 h on
+the median (P50) forecasts; only the first day becomes target SOCs for the
+inverter's TOU zones. The night zones hold what the next day needs in the
+owner's forecast scenario (priority_mode: optimistic, median or pessimistic
+sun and load), see night_charge_adjustment. This module only computes; the
+pipeline writes the targets to the inverter when apply_mode is on.
 """
 
 import logging
@@ -145,7 +146,9 @@ def _build_optimization(
         "start_timesteps_of_each_deferrable_load": [],
         "end_timesteps_of_each_deferrable_load": [],
         "lp_solver_timeout": 45,
-        "lp_solver_mip_rel_gap": 0.01,
+        # The 0.2 % tie-break tilt must be resolved, so the gap sits well below it;
+        # 48 hourly steps still solve in about a tenth of a second.
+        "lp_solver_mip_rel_gap": 1e-4,
         "battery_soc_final_reward_factor": soc_final_reward_factor,
     }
     plant_conf = {
@@ -203,7 +206,12 @@ def _solve(
     # forces the solver to drain into the evening and curtail midday PV
     # (export is closed, so the surplus has nowhere else to go). EMHASS
     # enforces soc_final softly but at 100x the max tariff, i.e. ~hard.
-    soc_final = max(floor_profile[-1], floor_profile[0])
+    # The same hour one day on stands in for it where the horizon allows: a
+    # BMS calibration lifts the first night's floor to 100 %, and when a run
+    # lands in that night's last hour, floor_profile[0] would pin the end of
+    # the horizon at 100 % too (an infeasible or two-day-high plan).
+    after = floor_profile[24] if len(floor_profile) > 24 else floor_profile[0]
+    soc_final = max(floor_profile[-1], after)
     return optimizer.perform_naive_mpc_optim(
         inputs,
         pd.Series(pv_w, index=starts),
@@ -329,6 +337,7 @@ def zone_targets(
     strategy: str = "ladder", cheap_windows: list[tuple[int, int]] | None = None,
     reserve_floors: list[float] | None = None,
     soc_step_pct: int = 5,
+    grid_charging: list[bool] | None = None,
 ) -> list[dict]:
     """Target SOC per TOU zone, respecting Deye semantics: a zone's Batt% is
     both the discharge floor AND the grid-charge target inside the window.
@@ -399,7 +408,11 @@ def zone_targets(
             entry_soc = soc_opt[zone.match - 1]
         end_soc = soc_opt[span[-1]]
         cheap_charge = _charge_target_kept(span, strategy, cheap_windows, starts, tz)
-        if end_soc > entry_soc + 0.005 and cheap_charge:
+        # A rising cheap window is a grid-charge target only where the plan buys
+        # there (grid_charging); sun at dawn lifts the SOC without one, and a
+        # target would make the inverter buy at night what the sun brings free.
+        buying = grid_charging is None or any(grid_charging[i] for i in span)
+        if end_soc > entry_soc + 0.005 and cheap_charge and buying:
             pct = math.ceil(clamp_pct(end_soc) / soc_step_pct - 1e-9) * soc_step_pct
         elif strategy == "flat" and not (cheap_windows and cheap_charge):
             # Expensive hours: the lowest allowed SOC; the reserve bound
@@ -445,8 +458,7 @@ def cheap_runs(
 def night_charge_adjustment(
     soc_p50: list[float],
     floors: list[float],
-    pv_p50_kw: list[float],
-    pv_p10_kw: list[float],
+    extra_drain_kw: list[float],
     runs: list[tuple[int, int]],
     max_soc: float,
     capacity_kwh: float,
@@ -456,29 +468,28 @@ def night_charge_adjustment(
     """SOC change at the end of each cheap run: what the next day needs.
 
     The night zone should hold what the expensive stretch up to the next
-    cheap run needs, not what the median plan happens to reach. Hour by hour
-    over that stretch, the sun the pessimistic forecast (PV P10) loses
-    against the median one is drawn from the median plan's battery (counted
-    at the discharge efficiency, a little on the safe side for surplus
-    hours); ``spare`` is the least the battery would then stay above its
-    floor.
+    cheap run needs in the owner's forecast scenario (policy.PRIORITIES:
+    optimistic, median or pessimistic), not what the median plan happens to
+    reach. ``extra_drain_kw`` is how much more the scenario draws from the
+    battery than the median forecast each hour (scenario load - median load
+    - (scenario sun - median sun)); negative on an optimistic day. Hour by
+    hour over the stretch it is taken from the median plan's battery: drains
+    at the discharge efficiency, gains with it too (both on the safe side);
+    ``spare`` is the least the battery would then stay above its floor.
 
-    * spare < 0, a margin (+): on a dull day the battery would run down to
+    * spare < 0, a margin (+): in the scenario the battery would run down to
       the floor and the rest would be bought at the day price, so the night
       charges that much more. Capped by the headroom the median plan leaves
       below max SOC, so it never displaces the median day's sun.
-    * spare > 0, a release (-): the battery covers even a dull day with room
-      to spare. Holding it at the plan's own end-of-night level would only
-      push unusual night load (a heater, a car) onto the grid and keep the
-      battery fuller than the day needs, so the zone may go down to the need.
-      Only when the plan buys nothing for the battery in that run: energy it
-      does buy there may be meant for a later day.
+    * spare > 0, a release (-): the scenario day needs less than the plan's
+      own end-of-night level, so the zone may go down to the need: unusual
+      night load (a heater, a car) runs on the battery, and on an optimistic
+      day the night buys less, leaving room for the sun. Where the plan buys
+      for the battery in that run, energy it carries past the next cheap run
+      is meant for a later day and stays: the release there is at most what
+      the scenario gains over the stretch.
 
-    A run with nothing after it in the horizon gets no change. Earlier
-    versions compared the median plan with a plan re-solved on PV P10; the
-    gap between two solver trajectories also held tied choices (hold or spend
-    a full battery overnight), so a battery that already covered both days
-    was still told to hold 95 % all night.
+    A run with nothing after it in the horizon gets no change.
     """
     adjust: dict[int, float] = {}
     for k, (first, last) in enumerate(runs):
@@ -489,14 +500,20 @@ def night_charge_adjustment(
         lost = 0.0
         spare = math.inf
         for i in after:
-            missing_kw = max(0.0, float(pv_p50_kw[i]) - float(pv_p10_kw[i]))
-            lost += missing_kw / (discharge_efficiency * capacity_kwh)  # 1 h steps
+            drain_kw = float(extra_drain_kw[i])
+            if drain_kw > 0.0:
+                lost += drain_kw / (discharge_efficiency * capacity_kwh)  # 1 h steps
+            else:
+                lost += drain_kw * discharge_efficiency / capacity_kwh
             spare = min(spare, soc_p50[i] - floors[i] - lost)
         if spare < 0.0:
             extra = min(-spare, max_soc - max(soc_p50[i] for i in after))
             if extra > 0.005:
                 adjust[last] = extra
-        elif spare > 0.005 and not (grid_charging and any(grid_charging[first : last + 1])):
+            continue
+        if grid_charging and any(grid_charging[first : last + 1]):
+            spare = min(spare, -lost)
+        if spare > 0.005:
             adjust[last] = -spare
     return adjust
 
@@ -522,7 +539,8 @@ def run_plan(
     programs: list[dict],
     opts: dict,
     reserve_floors: list[float] | None = None,
-    pv_p10_kw: list[float] | None = None,
+    pv_scenario_kw: list[float] | None = None,
+    load_scenario_kw: list[float] | None = None,
 ) -> dict | None:
     """Optimal plan over len(starts) hours (24 or 48); None when infeasible.
 
@@ -536,8 +554,10 @@ def run_plan(
     giving the expected daily value of battery actions in tariff units.
     reserve_floors are the per-hour outage-reserve SOC fractions; every zone
     target is held at or above the highest reserve inside its window.
-    pv_p10_kw (with a tariff) sets the night zone to what the next day needs
-    on the pessimistic sun: a margin or a release (see night_charge_adjustment).
+    pv_scenario_kw / load_scenario_kw (with a tariff; either may be omitted,
+    then the median stands in) are the owner's forecast scenario: the night
+    zone holds what the next day needs in it, a margin or a release (see
+    night_charge_adjustment and policy.PRIORITIES).
     """
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
@@ -598,21 +618,27 @@ def run_plan(
     # costs stay the median plan's.
     cheap_windows = _cheap_windows(opts) if opts.get("tariff_enabled", False) else []
     runs = cheap_runs(starts, tz, cheap_windows) if cheap_windows else []
+    # Hours the plan charges the battery from the grid (not from the sun).
+    grid_charging = (
+        [
+            p_batt[i] < -50.0 and p_grid[i] > max(0.0, load_w[i] - pv_w[i]) + 50.0
+            for i in range(horizon)
+        ]
+        if p_grid is not None and p_batt is not None
+        else None
+    )
     margin: dict[int, float] = {}
-    if runs and pv_p10_kw is not None and not relaxed:
-        grid_charging = (
-            [
-                p_batt[i] < -50.0 and p_grid[i] > max(0.0, load_w[i] - pv_w[i]) + 50.0
-                for i in range(horizon)
-            ]
-            if p_grid is not None and p_batt is not None
-            else None
+    scenario = pv_scenario_kw is not None or load_scenario_kw is not None
+    if runs and scenario and not relaxed:
+        pv_s = np.maximum(np.asarray(pv_scenario_kw if pv_scenario_kw is not None else pv_p50_kw, dtype=float), 0.0)
+        load_s = np.maximum(
+            np.asarray(load_scenario_kw if load_scenario_kw is not None else load_p50_kw, dtype=float), 0.0
         )
+        extra_drain = (load_s - load_w / 1000.0) - (pv_s - pv_w / 1000.0)
         margin = night_charge_adjustment(
             soc_opt,
             floor_profile,
-            list(np.maximum(np.asarray(pv_p50_kw, dtype=float), 0.0)),
-            list(np.maximum(np.asarray(pv_p10_kw, dtype=float), 0.0)),
+            list(extra_drain),
             runs,
             max_soc,
             float(opts["capacity_kwh"]),
@@ -620,9 +646,24 @@ def run_plan(
             grid_charging,
         )
     margin = {last: extra for last, extra in margin.items() if last < day1}
-    margin_kwh = sum(max(0.0, extra) for extra in margin.values()) * float(
-        opts["capacity_kwh"]
-    ) / float(opts["charge_efficiency"])
+    # What the margin makes the night buy: none of it where the battery already
+    # enters the run above the raised end (the plan spends down to it instead).
+    bought = 0.0
+    for first, last in runs:
+        extra = margin.get(last, 0.0)
+        if extra > 0.0:
+            entry = soc_init if first == 0 else soc_opt[first - 1]
+            bought += max(0.0, extra - max(0.0, entry - soc_opt[last]))
+    margin_kwh = bought * float(opts["capacity_kwh"]) / float(opts["charge_efficiency"])
+    # Where the night zone must buy: the plan grid-charges there, or a margin
+    # asks for more than the plan. Sun lifting the SOC at dawn is neither.
+    buys = None
+    if grid_charging is not None:
+        buys = list(grid_charging)
+        for first, last in runs:
+            if margin.get(last, 0.0) > 0.0:
+                for i in range(first, last + 1):
+                    buys[i] = True
 
     baseline = _build_optimization(opts, tz_name, battery_off=True, horizon_hours=horizon)
     base_result = _solve(
@@ -691,5 +732,6 @@ def run_plan(
             cheap_windows=cheap_windows,
             reserve_floors=reserve_floors[:day1] if reserve_floors is not None else None,
             soc_step_pct=max(1, int(opts.get("tou_soc_step_pct", 5))),
+            grid_charging=buys[:day1] if buys is not None else None,
         ),
     }

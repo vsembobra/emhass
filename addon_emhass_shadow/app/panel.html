@@ -642,7 +642,10 @@ function renderOptimizer(opt, profile, r) {
   if (opt.savings != null) bits.push("экономия " + opt.savings);
   if (opt.tariff_enabled && opt.grid_charge_kwh_cheap >= 0.3)
     bits.push("ночная зарядка из сети " + opt.grid_charge_kwh_cheap + " кВт·ч" +
-      (opt.night_margin_kwh >= 0.3 ? " (запас на пасмурный день " + opt.night_margin_kwh + ")" : ""));
+      (opt.night_margin_kwh >= 0.3 ? " (запас под сценарий приоритета " + opt.night_margin_kwh + ")" : ""));
+  if (opt.tariff_enabled && opt.night_scenario)
+    bits.push("ночь рассчитана на солнце " + opt.night_scenario.pv.toUpperCase() +
+      " и нагрузку " + opt.night_scenario.load.toUpperCase());
   if (opt.floor_relaxed) bits.push("⚠️ пол смягчён до минимума — прогноз не достигает резерва");
   document.getElementById("optnote").textContent = bits.join(" · ");
   const tz = (r.site && r.site.time_zone) || undefined;

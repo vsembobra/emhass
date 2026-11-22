@@ -139,8 +139,15 @@ def floor_at(
     """(floor with margin, series-reserve floor) at the step, rounded up.
 
     The margin applies only while the logged run saw a live outage series.
+    The logged reserve already holds the margin that run used (``margin_kwh``),
+    so it is taken out first: replaying candidate "1 h" on top of a run that
+    used 1 h meant 2 h, and "no margin" could never be judged. Where the risk
+    hours lifted the logged reserve above the run's own, this errs low by at
+    most that margin.
     """
-    reserve = float(entry["reserve_kwh_by_hour"][index])
+    reserve = max(
+        0.0, float(entry["reserve_kwh_by_hour"][index]) - float(entry.get("margin_kwh", 0.0))
+    )
     extra = 0.0
     if entry.get("outage_regime"):
         extra = margin_h * float(entry.get("critical_kw", 0.0)) / settings.discharge_efficiency

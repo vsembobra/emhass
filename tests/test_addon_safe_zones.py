@@ -175,3 +175,33 @@ def test_routine_outage_log_reads_only_what_is_new(monkeypatch, tmp_path):
     )
     pipeline.update_outage_log({"grid_binary": "binary_sensor.grid", "mean_sensors": {}})
     assert calls and calls[0] >= last - timedelta(hours=2, seconds=1)
+
+
+def _night_report():
+    # Issued 23:00 UTC: one expensive hour, then cheap 00:00-07:00; the plan
+    # (later is cheaper) charges 40 -> 60 % only in the last cheap hours.
+    starts = [
+        (datetime(2026, 11, 23, 23, tzinfo=UTC) + timedelta(hours=h)).isoformat() for h in range(10)
+    ]
+    soc = [0.40, 0.40, 0.40, 0.40, 0.40, 0.40, 0.45, 0.55, 0.60, 0.58]
+    prices = [2.0] + [1.0] * 7 + [2.0] * 2
+    return {
+        "battery_now_pct": "40",
+        "hourly": {"starts_utc": starts},
+        "advisory": {"optimizer": {"soc_opt": soc, "prices": prices, "tariff_enabled": True}},
+    }
+
+
+def test_deye_charging_ahead_of_the_plan_at_night_is_not_a_deviation():
+    report = _night_report()
+    at = datetime(2026, 11, 24, 1, 30, tzinfo=UTC)  # Deye already at 60 %, plan at 40 %
+    assert main.soc_deviation_reason(report, 60.0, at) is None
+    # A shortfall at night still counts.
+    assert main.soc_deviation_reason(report, 25.0, at).startswith("SOC 25%")
+
+
+def test_the_plan_is_read_at_the_current_minute_by_day():
+    report = _night_report()
+    at = datetime(2026, 11, 24, 8, 30, tzinfo=UTC)  # 60 -> 58 % this hour: plan ~59 %
+    assert main.soc_deviation_reason(report, 59.0, at) is None
+    assert main.soc_deviation_reason(report, 75.0, at).startswith("SOC 75% вне плана 59%")

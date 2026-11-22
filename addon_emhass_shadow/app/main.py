@@ -210,6 +210,53 @@ TRIGGER_SOC_DEVIATION_PP = 10.0  # replan when SOC leaves the plan by this much
 TICK_SECONDS = 600
 
 
+def soc_deviation_reason(report: dict, actual_pct: float, now: datetime) -> str | None:
+    """"SOC outside the plan" when the measured SOC left the plan for real.
+
+    soc_opt[i] is the SOC at the END of hour i, so the plan is read between
+    the hour's start and end at the current minute. In the cheap hours the
+    real inverter runs ahead of the plan: Deye charges at full power as soon
+    as the night zone's Batt% is above the SOC, while the plan buys as late as
+    it can, and a battery above the day's need is not held down to the plan's
+    curve. Only a shortfall counts there; being above the plan is expected.
+    """
+    optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
+    soc_opt = optimizer.get("soc_opt") or []
+    starts = ((report or {}).get("hourly") or {}).get("starts_utc") or []
+    index = next(
+        (
+            i
+            for i, start in enumerate(starts[: len(soc_opt)])
+            if datetime.fromisoformat(start) <= now < datetime.fromisoformat(start) + timedelta(hours=1)
+        ),
+        None,
+    )
+    if index is None:
+        return None
+    begin = datetime.fromisoformat(starts[index])
+    if index > 0:
+        before = float(soc_opt[index - 1]) * 100.0
+    else:
+        try:
+            before = float(report.get("battery_now_pct"))
+        except (TypeError, ValueError):
+            before = float(soc_opt[0]) * 100.0
+    after = float(soc_opt[index]) * 100.0
+    planned = before + (after - before) * (now - begin) / timedelta(hours=1)
+    prices = optimizer.get("prices") or []
+    cheap_hour = (
+        bool(optimizer.get("tariff_enabled"))
+        and index < len(prices)
+        and float(prices[index]) <= min(float(p) for p in prices) + 1e-9
+    )
+    deviation = actual_pct - planned
+    if cheap_hour and deviation > 0:
+        return None
+    if abs(deviation) > TRIGGER_SOC_DEVIATION_PP:
+        return f"SOC {actual_pct:.0f}% вне плана {planned:.0f}%"
+    return None
+
+
 def _trigger_reason(opts) -> str | None:
     """Why an unscheduled recalculation is due; None when the plan stands.
 
@@ -247,27 +294,13 @@ def _trigger_reason(opts) -> str | None:
     ):
         return "отключение идёт — обновляю оценку"
     optimizer = ((report or {}).get("advisory") or {}).get("optimizer") or {}
-    soc_opt = optimizer.get("soc_opt")
-    starts = ((report or {}).get("hourly") or {}).get("starts_utc") or []
-    if soc_opt and starts:
+    if optimizer.get("soc_opt"):
         try:
-            now_utc = datetime.now(UTC)
-            index = next(
-                (
-                    i
-                    for i, start in enumerate(starts)
-                    if datetime.fromisoformat(start)
-                    <= now_utc
-                    < datetime.fromisoformat(start) + timedelta(hours=1)
-                ),
-                None,
-            )
-            if index is not None and index < len(soc_opt):
-                ent = pipeline.resolve_entities(opts)
-                actual = float(pipeline.ha_get(f"/api/states/{ent['soc']}")["state"])
-                planned = float(soc_opt[index]) * 100.0
-                if abs(actual - planned) > TRIGGER_SOC_DEVIATION_PP:
-                    return f"SOC {actual:.0f}% вне плана {planned:.0f}%"
+            ent = pipeline.resolve_entities(opts)
+            actual = float(pipeline.ha_get(f"/api/states/{ent['soc']}")["state"])
+            reason = soc_deviation_reason(report, actual, datetime.now(UTC))
+            if reason:
+                return reason
         except Exception:
             pass
     return None

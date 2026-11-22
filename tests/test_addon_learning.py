@@ -247,3 +247,31 @@ def test_retrain_trains_on_outage_hours_of_a_whole_house_site(monkeypatch, tmp_p
     audit["temp_air_observed_c"] = 5.0
     info = retrain._retrain_load(audit, {"time_zone": "UTC"})
     assert info["train_rows"] == 24 * 20
+
+
+def _hour_pairs(days: int, runs_per_hour: int, extra_kw: float) -> pd.DataFrame:
+    """Load actual = forecast + extra; every actual hour forecast by several runs."""
+    rows = []
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    for h in range(days * 24):
+        for _ in range(runs_per_hour):
+            rows.append(
+                {
+                    "start": start + timedelta(hours=h),
+                    "p10": 0.3,
+                    "p50": 0.5,
+                    "p90": 0.7,
+                    "actual": 0.5 + extra_kw,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_replans_do_not_multiply_the_evidence_of_one_day():
+    # Three days of +0.3 kW: twelve forecasts per hour (a replan every two hours)
+    # weigh the same as one, not as thirty-six days.
+    once = learning.fit_calibration(_hour_pairs(3, 1, 0.3), "load", TZ)
+    replanned = learning.fit_calibration(_hour_pairs(3, 12, 0.3), "load", TZ)
+    assert replanned.pairs == once.pairs == 72
+    assert replanned.hourly == once.hourly
+    assert replanned.scale_lo == once.scale_lo and replanned.scale_hi == once.scale_hi

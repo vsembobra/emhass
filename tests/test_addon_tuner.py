@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -15,6 +16,8 @@ sys.path.insert(0, str(ADDON / "app"))
 import learning  # noqa: E402
 import pipeline  # noqa: E402
 import tuner  # noqa: E402
+
+from emhass.reserve import ReserveSettings  # noqa: E402
 
 TZ = ZoneInfo("UTC")
 DAY0 = pd.Timestamp("2026-11-01", tz="UTC")
@@ -200,3 +203,49 @@ def test_tuning_note_ignores_legacy_string_best():
         "best": "conservative",
     }
     assert pipeline._tuning_note(legacy, 1.0, True, True) is None
+
+
+def test_the_replay_does_not_count_the_logged_margin_twice():
+    settings = ReserveSettings(30.0, 1.0, 0.2, 1.0, 0.95, cold_start_kw=0.5)
+    # A run in a live series that used a 1 h margin of a 0.95 kW critical load:
+    # its logged reserve is the 2 kWh series reserve plus 1 kWh of margin.
+    entry = {
+        "reserve_kwh_by_hour": [3.0],
+        "outage_regime": True,
+        "critical_kw": 0.95,
+        "margin_hours": 1.0,
+        "margin_kwh": 1.0,
+    }
+    no_margin, series = tuner.floor_at(entry, 0, 0.0, settings, step=0.01)
+    one_hour, _ = tuner.floor_at(entry, 0, 1.0, settings, step=0.01)
+    assert no_margin == series  # "no margin" is the series reserve itself
+    assert series == pytest.approx(settings.floor_for_energy(2.0)[0], abs=0.01)
+    assert one_hour == pytest.approx(settings.floor_for_energy(3.0)[0], abs=0.01)
+
+
+def test_a_perfect_forecast_shows_no_forecast_effect():
+    # The day went exactly as forecast; the plan looked 48 h ahead. A 24 h
+    # re-solve ended its horizon at the day's end, spent the battery
+    # differently and reported ~5 kWh of "forecast error" here.
+    import optimize
+
+    starts = pd.date_range("2026-11-10 21:00", periods=24, freq="h", tz="UTC")
+    hours = np.asarray(starts.hour, dtype=float)
+    load = 0.4 + 0.4 * np.exp(-((hours - 19) ** 2) / 8)
+    load = load / load.sum() * 18.0
+    sun = np.clip(np.sin((hours - 7) / 10 * np.pi), 0.0, None)
+    sun = sun / sun.sum() * 4.0
+    opts = dict(
+        OPTS, tariff_enabled=True, tariff_cheap_windows="23:00-07:00",
+        tariff_normal_price=2.0, tariff_cheap_price=1.0,
+    )  # fmt: skip
+    full = starts.append(starts + pd.Timedelta(hours=24))
+    plan = optimize.run_plan(full, list(sun) * 2, list(load) * 2, [0.2] * 48, 0.7, [], opts)
+    planned = sum(max(0.0, v) for v in plan["p_grid_kw"][:24])
+    audit = pd.DataFrame({"load_kw": load, "pv_measured_kw": sun, "soc_mean": 0.7}, index=starts)
+    report = {
+        "hourly": {"load_p50_kw": list(load), "pv_p50_kw": list(sun)},
+        "advisory": {"floor_profile": [{"floor_soc": 0.2}] * 24},
+    }
+    hindsight = pipeline.hindsight_import(report, audit, starts, opts)
+    assert hindsight == pytest.approx(planned, abs=0.2)

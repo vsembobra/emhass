@@ -66,3 +66,11 @@ def test_zones_covering_the_window():
     ]
     window = calibration.night_window(starts, TZ, {})
     assert calibration.zones_in_window(programs, starts, TZ, window) == {1}
+
+
+def test_a_battery_capped_below_99_percent_counts_full_at_its_max():
+    capped = {"min_soc_pct": 20, "max_soc_pct": 95}
+    # Charged to its 95 % max tonight: done, not due again tomorrow night.
+    assert not calibration.status(_audit(), 0.95, NOW, capped)["due"]
+    # The usual 99 % still applies at a 100 % max.
+    assert calibration.status(_audit(), 0.95, NOW, {"max_soc_pct": 100})["due"]

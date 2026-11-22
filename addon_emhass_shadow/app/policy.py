@@ -11,9 +11,14 @@ against outages of a live series:
   (only the owner's optional minimum autonomy above min SOC). The first
   outage of a new series switches back immediately.
 
-The priority sets how cautious a live series is handled: which quantile of
-the series' outage durations the reserve covers, and which extra margin (in
-hours of critical load) the replay tuner may add on top of it.
+The priority is how cautious the owner wants the plan to be, in two places:
+
+* the forecast scenario the night charge is sized for: economy counts on the
+  optimistic day (sun P90, load P10), balanced on the median one (P50 for
+  both), resilience on the pessimistic one (sun P10, load P90);
+* a live outage series: which quantile of the series' outage durations the
+  reserve covers, and which extra margin (in hours of critical load) the
+  replay tuner may add on top of it.
 """
 
 from __future__ import annotations
@@ -24,10 +29,23 @@ from emhass.reserve import _merge_intervals, _quantile
 
 DEFAULT_MEMORY_DAYS = 14.0
 
+# forecast: which quantile of the sun and of the load the night charge is sized for.
 PRIORITIES = {
-    "resilience": {"reserve_quantile": 0.95, "margins_h": (1.0, 2.0)},
-    "balanced": {"reserve_quantile": 0.9, "margins_h": (0.0, 1.0)},
-    "economy": {"reserve_quantile": 0.8, "margins_h": (0.0,)},
+    "resilience": {
+        "reserve_quantile": 0.95,
+        "margins_h": (1.0, 2.0),
+        "forecast": {"pv": "p10", "load": "p90"},
+    },
+    "balanced": {
+        "reserve_quantile": 0.9,
+        "margins_h": (0.0, 1.0),
+        "forecast": {"pv": "p50", "load": "p50"},
+    },
+    "economy": {
+        "reserve_quantile": 0.8,
+        "margins_h": (0.0,),
+        "forecast": {"pv": "p90", "load": "p10"},
+    },
 }
 DEFAULT_PRIORITY = "balanced"
 

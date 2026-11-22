@@ -57,6 +57,7 @@ class InverterCaps:
         return [self.grid_charge_template.format(n=n) for n in range(1, self.zones + 1)]
 
 
+RESERVE_SLACK_PP = 2.0  # BMS reading jitter around the floor the inverter holds
 OFF_WORDS = ("disabled", "disable", "off", "none", "no", "выкл", "нет", "отключено")
 
 
@@ -155,6 +156,8 @@ def grid_charge_plan(
     """Desired grid-charge flag per zone with the reason, first day only."""
     windows = optimize.zone_windows(programs, starts, tz)
     cheap = optimize._cheap_windows(opts) if opts.get("tariff_enabled", False) else None
+    has_min = "min_soc_pct" in opts or "min_soc" in opts
+    min_pct = optimize.soc_bounds(opts)[0] * 100.0 if has_min else 0.0
     plan = []
     for program in programs:
         zone = windows[program["n"]]
@@ -165,7 +168,12 @@ def grid_charge_plan(
         window, in_effect = zone.now
         entry_soc = soc_init if in_effect or not soc_opt else soc_opt[zone.match - 1]
         reserve_pct = optimize.reserve_floor_pct(reserve_floors, window)
-        if reserve_pct > round(entry_soc * 100.0):
+        # The inverter holds the battery at the zone's Batt% itself, and the BMS
+        # reading jitters by a point around it: 19/20 % at a 20 % floor flipped
+        # the flag (a write, a notification, a day-price top-up) on every
+        # replan. Grid charge for the reserve only when it sits above min SOC
+        # and the battery is clearly below it.
+        if reserve_pct > min_pct and reserve_pct - entry_soc * 100.0 > RESERVE_SLACK_PP:
             desired, reason = True, f"резерв {reserve_pct}% выше плана на входе"
         elif cheap is not None:
             local = [starts[i].tz_convert(tz) for i in window]
