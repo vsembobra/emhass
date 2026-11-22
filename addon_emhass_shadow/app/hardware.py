@@ -34,7 +34,15 @@ from emhass.battery_identification import BatteryIdentification
 from emhass.pv_quantiles import estimate_geometry
 
 HARDWARE_FILE = "hardware.json"
+HARDWARE_VERSION = 2  # 2: the battery is learned only after its latest pack change
 BATTERY_WINDOW_DAYS = 60
+# A pack added or removed changes the energy per SOC point for good, and one
+# fit over both batteries lands in between (48 then 32 kWh -> "40 kWh"). Each
+# deep run reads that energy on its own; a lasting jump between the earlier
+# and the later runs is a battery change, and only the later runs count.
+CHANGE_MIN_SHIFT = 0.15  # relative jump in energy per SOC point
+CHANGE_MIN_RUNS = 4  # deep runs on each side of a change
+CHANGE_MIN_AGREEMENT = 0.75  # share of the runs on each side that read their own battery
 PROFILE_WINDOW_DAYS = 30
 MIN_POWER_SAMPLES = 20
 MIN_PROFILE_SAMPLES = 5
@@ -65,6 +73,44 @@ def _recent(audit: pd.DataFrame, days: int) -> pd.DataFrame:
     return audit[audit.index >= audit.index[-1] - pd.Timedelta(days=days)]
 
 
+def _battery_change(df: pd.DataFrame) -> tuple[pd.Timestamp, float] | None:
+    """First run on the latest battery and its energy-per-SOC ratio to the one before.
+
+    Every deep run reads Wh per SOC point; charge runs read C/eta and
+    discharge runs eta*C, so each is taken relative to the median of its own
+    direction. The split that leaves both sides most uniform is a change
+    only when the jump is large and most runs on each side agree with it:
+    a BMS resync or an odd day moves a run or two, not a whole side.
+    """
+    estimator = BatteryIdentification(_LOGGER, time_step=pd.Timedelta(hours=1))
+    runs = [s for s in estimator._segment(df, "power_w", "soc_pct") if s.throughput_wh > 0]
+    if len(runs) < 2 * CHANGE_MIN_RUNS:
+        return None
+    per_point = np.array([s.throughput_wh / abs(s.d_soc) for s in runs])
+    directions = np.array([s.direction for s in runs])
+    reading = np.empty(len(runs))
+    for direction in set(directions):
+        mine = directions == direction
+        reading[mine] = np.log(per_point[mine] / np.median(per_point[mine]))
+    best = None
+    for k in range(CHANGE_MIN_RUNS, len(runs) - CHANGE_MIN_RUNS + 1):
+        before, after = reading[:k], reading[k:]
+        cost = np.abs(before - np.median(before)).sum() + np.abs(after - np.median(after)).sum()
+        if best is None or cost < best[0]:
+            best = (cost, k)
+    k = best[1]
+    old, new = np.median(reading[:k]), np.median(reading[k:])
+    if abs(new - old) < np.log1p(CHANGE_MIN_SHIFT):
+        return None
+    middle, up = (old + new) / 2.0, new > old
+    if (
+        np.mean((reading[k:] > middle) == up) < CHANGE_MIN_AGREEMENT
+        or np.mean((reading[:k] > middle) != up) < CHANGE_MIN_AGREEMENT
+    ):
+        return None
+    return runs[k].start, float(np.exp(new - old))
+
+
 def identify_battery(audit: pd.DataFrame, capacity_kwh: float) -> dict:
     frame = _recent(audit, BATTERY_WINDOW_DAYS)
     df = pd.DataFrame(
@@ -74,20 +120,34 @@ def identify_battery(audit: pd.DataFrame, capacity_kwh: float) -> dict:
         },
         index=frame.index,
     )
+    change = None
     try:
+        # A second change inside the window: keep cutting to the newest battery.
+        while (found := _battery_change(df)) is not None:
+            change = {"since_utc": found[0].isoformat(), "ratio": round(found[1], 3)}
+            df = df[df.index >= found[0]]
         result = BatteryIdentification(_LOGGER, time_step=pd.Timedelta(hours=1)).identify(
             df, "power_w", "soc_pct", configured_capacity_wh=float(capacity_kwh) * 1000.0
         )
     except Exception as error:  # an estimator failure must not break the run
-        return {"status": "error", "messages": [str(error)[:200]]}
+        return {"status": "error", "messages": [str(error)[:200]], "battery_change": change}
     data = result.to_dict()
+    messages = result.messages[:3]
+    if change:
+        since = pd.Timestamp(change["since_utc"])
+        messages = [
+            f"смена батареи около {since:%d.%m}: энергия на 1 % SOC ×{change['ratio']:.2f};"
+            " учусь только по циклам после неё",
+            *messages[:2],
+        ]
     return {
         "status": result.status,
-        "messages": result.messages[:3],
+        "messages": messages,
         "capacity_kwh": data["capacity_kwh"]["value"],
         "round_trip_efficiency": data["round_trip_efficiency"]["value"],
         "eta_one_way": result.eta_symmetric,
         "n_segments": [result.n_charge_segments, result.n_discharge_segments],
+        "battery_change": change,
     }
 
 
@@ -212,6 +272,7 @@ def identify(audit: pd.DataFrame, opts: dict, now: datetime | None = None) -> di
     """Run every estimator; each part fails soft to None/'error'."""
     tz = ZoneInfo(opts.get("time_zone", "UTC"))
     return {
+        "version": HARDWARE_VERSION,
         "identified_utc": (now or datetime.now(UTC)).isoformat(),
         "battery": identify_battery(audit, float(opts["capacity_kwh"])),
         "limits": observed_limits(audit),
@@ -244,6 +305,12 @@ def due(data_dir: Path, every: timedelta = timedelta(days=7)) -> bool:
     if not hardware or not hardware.get("identified_utc"):
         return True
     return datetime.now(UTC) - datetime.fromisoformat(hardware["identified_utc"]) >= every
+
+
+def outdated(data_dir: Path) -> bool:
+    """Saved results from an older estimator (relearn now, not at the next retrain)."""
+    hardware = load(data_dir)
+    return bool(hardware) and hardware.get("version") != HARDWARE_VERSION
 
 
 def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str]]:

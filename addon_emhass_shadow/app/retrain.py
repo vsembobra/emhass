@@ -512,6 +512,14 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     (panel button) is an explicit action and always goes ahead.
     """
     state = _load_state()
+    if not force and hardware.outdated(DATA):
+        # Results of an older hardware estimator (a 60-day blend of two
+        # batteries, say) are replaced now, whatever the retrain schedule.
+        try:
+            opts = json.loads((DATA / "options.json").read_text())
+            hardware.save(DATA, hardware.identify(_audit_frame(), opts))
+        except Exception:
+            pass  # advisory; the next run tries again
     # A new PV input contract (pipeline.PV_MODEL) leaves no usable PV model
     # after an upgrade: retrain once, right away, whatever the schedule says.
     upgrade = (

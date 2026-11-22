@@ -578,7 +578,10 @@ function renderLearning(r) {
   const hw = (d.hardware || {}).learned;
   if (hw) {
     const b = hw.battery || {};
-    if (b.status === "ok") rows.push(["Батарея", b.capacity_kwh.toFixed(1) + " кВт·ч, КПД цикла " + share(b.round_trip_efficiency), "по " + b.n_segments.join("/") + " циклам"]);
+    const since = b.battery_change ? new Date(b.battery_change.since_utc).toLocaleDateString("ru-RU") : null;
+    if (b.status === "ok") rows.push(["Батарея", b.capacity_kwh.toFixed(1) + " кВт·ч, КПД цикла " + share(b.round_trip_efficiency),
+      "по " + b.n_segments.join("/") + " циклам" + (since ? " с " + since + " (смена батареи)" : "")]);
+    else if (since) rows.push(["Батарея", "смена батареи " + since + " — копит циклы новой", esc(b.status || "—")]);
     else rows.push(["Батарея", "мало глубоких циклов", esc(b.status || "—")]);
     const g = hw.pv_geometry;
     if (g) rows.push(["Панели", g.kwp.toFixed(1) + " кВтп, наклон " + g.tilt_deg + "°, азимут " + g.azimuth_deg + "°",
