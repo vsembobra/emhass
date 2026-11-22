@@ -9,7 +9,7 @@ description: >-
   панелей, подбирает настройки на своей истории. По умолчанию в инвертор
   ничего не записывает.
 
-version: "0.17.2"
+version: "0.17.3"
 slug: emhass_shadow
 init: false
 arch:

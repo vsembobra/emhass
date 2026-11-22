@@ -442,43 +442,69 @@ def cheap_runs(
     return runs
 
 
-def night_charge_margin(
-    soc_p50: list[float], soc_p10: list[float], runs: list[tuple[int, int]], max_soc: float
+def night_charge_adjustment(
+    soc_p50: list[float],
+    floors: list[float],
+    pv_p50_kw: list[float],
+    pv_p10_kw: list[float],
+    runs: list[tuple[int, int]],
+    max_soc: float,
+    capacity_kwh: float,
+    discharge_efficiency: float,
+    grid_charging: list[bool] | None = None,
 ) -> dict[int, float]:
-    """Extra SOC at the end of each cheap run: the night charge sized on PV P10.
+    """SOC change at the end of each cheap run: what the next day needs.
 
-    Under-charging costs the day/night price gap per kWh; over-charging only
-    the round-trip loss, because the energy stays in the battery and the
-    next night buys that much less. So the night charge covers the expensive
-    hours with the pessimistic sun (the plan re-solved on PV P10) as long as
-    the extra energy cannot displace free solar: it is capped by the
-    headroom the median-sun plan leaves below max SOC until the next cheap
-    run. In summer that headroom is gone and the charge stays the median
-    plan's. A run with nothing after it in the horizon gets no margin.
+    The night zone should hold what the expensive stretch up to the next
+    cheap run needs, not what the median plan happens to reach. Hour by hour
+    over that stretch, the sun the pessimistic forecast (PV P10) loses
+    against the median one is drawn from the median plan's battery (counted
+    at the discharge efficiency, a little on the safe side for surplus
+    hours); ``spare`` is the least the battery would then stay above its
+    floor.
 
-    The extra is what the pessimistic plan draws from the battery over the
-    expensive stretch beyond what the median plan draws — not its whole
-    end-of-night difference: both nights cost the same, so the solver may
-    just as well buy tomorrow night's energy tonight and carry it over.
+    * spare < 0, a margin (+): on a dull day the battery would run down to
+      the floor and the rest would be bought at the day price, so the night
+      charges that much more. Capped by the headroom the median plan leaves
+      below max SOC, so it never displaces the median day's sun.
+    * spare > 0, a release (-): the battery covers even a dull day with room
+      to spare. Holding it at the plan's own end-of-night level would only
+      push unusual night load (a heater, a car) onto the grid and keep the
+      battery fuller than the day needs, so the zone may go down to the need.
+      Only when the plan buys nothing for the battery in that run: energy it
+      does buy there may be meant for a later day.
+
+    A run with nothing after it in the horizon gets no change. Earlier
+    versions compared the median plan with a plan re-solved on PV P10; the
+    gap between two solver trajectories also held tied choices (hold or spend
+    a full battery overnight), so a battery that already covered both days
+    was still told to hold 95 % all night.
     """
-    margin: dict[int, float] = {}
-    for k, (_, last) in enumerate(runs):
+    adjust: dict[int, float] = {}
+    for k, (first, last) in enumerate(runs):
         stop = runs[k + 1][0] if k + 1 < len(runs) else len(soc_p50)
-        after = soc_p50[last + 1 : stop]
+        after = range(last + 1, stop)
         if not after:
             continue
-        end = stop - 1
-        drawn = (soc_p10[last] - soc_p10[end]) - (soc_p50[last] - soc_p50[end])
-        extra = min(drawn, soc_p10[last] - soc_p50[last], max_soc - max(after))
-        if extra > 0.005:
-            margin[last] = extra
-    return margin
+        lost = 0.0
+        spare = math.inf
+        for i in after:
+            missing_kw = max(0.0, float(pv_p50_kw[i]) - float(pv_p10_kw[i]))
+            lost += missing_kw / (discharge_efficiency * capacity_kwh)  # 1 h steps
+            spare = min(spare, soc_p50[i] - floors[i] - lost)
+        if spare < 0.0:
+            extra = min(-spare, max_soc - max(soc_p50[i] for i in after))
+            if extra > 0.005:
+                adjust[last] = extra
+        elif spare > 0.005 and not (grid_charging and any(grid_charging[first : last + 1])):
+            adjust[last] = -spare
+    return adjust
 
 
 def _raise_runs(
     soc: list[float], runs: list[tuple[int, int]], margin: dict[int, float]
 ) -> list[float]:
-    """The trajectory with each margin ramped in over its cheap run."""
+    """The trajectory with each adjustment (margin or release) ramped in over its cheap run."""
     out = list(soc)
     for first, last in runs:
         extra = margin.get(last, 0.0)
@@ -510,8 +536,8 @@ def run_plan(
     giving the expected daily value of battery actions in tariff units.
     reserve_floors are the per-hour outage-reserve SOC fractions; every zone
     target is held at or above the highest reserve inside its window.
-    pv_p10_kw (with a tariff) sizes the night charge on the pessimistic sun
-    within the median plan's solar headroom (see night_charge_margin).
+    pv_p10_kw (with a tariff) sets the night zone to what the next day needs
+    on the pessimistic sun: a margin or a release (see night_charge_adjustment).
     """
     tz = ZoneInfo(opts["time_zone"])
     tz_name = opts["time_zone"]
@@ -566,24 +592,37 @@ def run_plan(
         if p_grid is not None else -float(result["cost_profit"].sum())
     )
 
-    # Night charge on the pessimistic sun: re-solve with PV P10 and keep the
-    # extra end-of-night SOC that fits under the median plan's headroom. The
-    # reported trajectory and costs stay the median plan's.
+    # The night zone holds what the next day needs (night_charge_adjustment):
+    # a margin where a dull day would end in day-price purchases, a release
+    # where the battery covers even a dull day. The reported trajectory and
+    # costs stay the median plan's.
     cheap_windows = _cheap_windows(opts) if opts.get("tariff_enabled", False) else []
     runs = cheap_runs(starts, tz, cheap_windows) if cheap_windows else []
     margin: dict[int, float] = {}
     if runs and pv_p10_kw is not None and not relaxed:
-        pv10_w = np.maximum(np.asarray(pv_p10_kw, dtype=float), 0.0) * 1000.0
-        pessimistic = _solve(
-            optimizer, starts, solver_prices, pv10_w, load_w, soc_init, floor_profile
+        grid_charging = (
+            [
+                p_batt[i] < -50.0 and p_grid[i] > max(0.0, load_w[i] - pv_w[i]) + 50.0
+                for i in range(horizon)
+            ]
+            if p_grid is not None and p_batt is not None
+            else None
         )
-        if str(optimizer.optim_status).lower() == "optimal":
-            soc_p10 = [float(v) for v in pessimistic["SOC_opt"]]
-            margin = night_charge_margin(soc_opt, soc_p10, runs, max_soc)
+        margin = night_charge_adjustment(
+            soc_opt,
+            floor_profile,
+            list(np.maximum(np.asarray(pv_p50_kw, dtype=float), 0.0)),
+            list(np.maximum(np.asarray(pv_p10_kw, dtype=float), 0.0)),
+            runs,
+            max_soc,
+            float(opts["capacity_kwh"]),
+            float(opts["discharge_efficiency"]),
+            grid_charging,
+        )
     margin = {last: extra for last, extra in margin.items() if last < day1}
-    margin_kwh = sum(margin.values()) * float(opts["capacity_kwh"]) / float(
-        opts["charge_efficiency"]
-    )
+    margin_kwh = sum(max(0.0, extra) for extra in margin.values()) * float(
+        opts["capacity_kwh"]
+    ) / float(opts["charge_efficiency"])
 
     baseline = _build_optimization(opts, tz_name, battery_off=True, horizon_hours=horizon)
     base_result = _solve(

@@ -108,3 +108,55 @@ def test_the_tie_break_never_reorders_tariffs():
     )
     assert tilted[0] > tilted[23] > tilted[47]  # the same tariff a hair cheaper later
     assert max(tilted[24:31]) < min(tilted[:24])  # cheap stays cheaper than normal
+
+
+# Owner's report of 23.11 01:00 (Europe/Istanbul): the battery at 95 % covers
+# both days, the plan buys nothing for 48 h, sun P50 4.3 kWh, P10 0.
+REPORT_LOAD = [
+    0.424, 0.3621, 0.3265, 0.3213, 0.3508, 0.3963, 0.4143, 0.4499, 0.6512, 0.7633, 0.7677,
+    0.8371, 0.9029, 0.985, 0.9321, 0.8464, 0.7971, 0.7521, 0.6909, 0.6729, 0.6407, 0.5941,
+    0.5849, 0.4979,
+]  # fmt: skip
+REPORT_SUN = [0.0] * 7 + [0.0551, 0.1344, 0.504, 1.6416, 0.9471, 0.6036, 0.3144, 0.115] + [0.0] * 9
+
+
+def test_a_battery_that_covers_a_dull_day_is_not_held_full_overnight():
+    starts = pd.date_range("2026-11-22T22:00Z", periods=48, freq="h")
+    floors = ([0.30] * 8 + [0.35] * 9 + [0.30] * 7) * 2
+    zones = [
+        {"n": n, "from": f, "soc_pct": s}
+        for n, (f, s) in enumerate(
+            [
+                ("00:00", 95),
+                ("07:00", 30),
+                ("08:00", 35),
+                ("11:00", 35),
+                ("20:00", 30),
+                ("22:00", 30),
+            ],
+            1,
+        )
+    ]
+    result = optimize.run_plan(
+        starts,
+        REPORT_SUN + list(np.array(REPORT_SUN) * 11.4 / 4.32),
+        REPORT_LOAD * 2,
+        floors,
+        0.95,
+        zones,
+        dict(
+            OPTS,
+            time_zone="Europe/Istanbul",
+            min_soc_pct=20,
+            capacity_kwh=31.7,
+            tariff_cheap_windows="23:00-07:00",  # as the report's prices show
+        ),
+        reserve_floors=floors,
+        pv_p10_kw=[0.0] * 24 + list(np.array(REPORT_SUN) * 2.92 / 4.32),
+    )
+    assert sum(result["p_grid_kw"]) == pytest.approx(0.0, abs=0.05)  # nothing to buy
+    assert result["night_margin_kwh"] == 0.0  # a dull day is covered anyway
+    # The zone holds what the day needs even with no sun (~69 %), not the plan's
+    # own 88 % at 07:00: the house runs on the battery at night, whatever it draws.
+    # It was held at 95 % before.
+    assert _night_zone(result) == 70

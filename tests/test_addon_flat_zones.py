@@ -88,30 +88,41 @@ def test_cheap_runs_cross_midnight():
     assert runs == [(2, 9), (26, 29)]
 
 
-def test_margin_is_the_p10_charge_within_the_solar_headroom():
-    runs = [(0, 6)]
-    p50 = [0.5] * 7 + [0.45] * 5 + [0.7] * 4 + [0.3] * 8  # sun lifts it to 70 %
-    p10 = [0.62] * 7 + [0.3] * 17
-    assert optimize.night_charge_margin(p50, p10, runs, 1.0) == {6: pytest.approx(0.12)}
-    # Median sun would fill the pack to 95 %: only 5 pp of room are left.
-    sunny = p50[:12] + [0.95] * 4 + p50[16:]
-    assert optimize.night_charge_margin(sunny, p10, runs, 1.0) == {6: pytest.approx(0.05)}
-    # Summer: the median plan already reaches max SOC — no margin.
-    full = p50[:12] + [1.0] * 4 + p50[16:]
-    assert optimize.night_charge_margin(full, p10, runs, 1.0) == {}
+MARGIN_FLOORS = [0.3] * 24
+SUN_P50 = [0.0] * 9 + [2.0] * 4 + [0.0] * 11  # 8 kWh from 09:00 to 13:00
+SUN_P10 = [0.0] * 9 + [0.5] * 4 + [0.0] * 11  # 6 kWh less = 20 pp of 30 kWh
 
 
-def test_margin_excludes_energy_carried_to_the_next_night():
-    # The pessimistic plan buys 30 pp more tonight but ends the day 20 pp
-    # higher: it only draws 10 pp more over the day; the rest is tomorrow
-    # night's purchase made early (both nights cost the same).
-    p50 = [0.5] * 7 + [0.45] * 5 + [0.7] * 4 + [0.3] * 8
-    p10 = [0.8] * 7 + [0.5] * 17
-    assert optimize.night_charge_margin(p50, p10, [(0, 6)], 1.0) == {6: pytest.approx(0.1)}
+def _margin(soc_p50, runs=((0, 6),), grid_charging=None):
+    return optimize.night_charge_adjustment(
+        soc_p50, MARGIN_FLOORS, SUN_P50, SUN_P10, list(runs), 1.0, 30.0, 1.0, grid_charging
+    )
+
+
+def test_margin_covers_the_dip_below_the_floor_on_a_dull_day():
+    # The median plan lands on the floor before the next night: without the
+    # missing 20 pp the battery would run out and the rest is bought by day.
+    p50 = [0.6] * 7 + [0.55, 0.5, 0.55, 0.6, 0.65, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35] + [0.3] * 6
+    assert _margin(p50) == {6: pytest.approx(0.2)}
+
+
+def test_a_battery_that_covers_a_dull_day_is_released_to_the_need():
+    # Owner's night 23.11: the median plan stays 35 pp above the floor until
+    # the next cheap run; a dull day (20 pp less sun) still leaves 15 pp, so
+    # the night zone may go 15 pp below the plan's own end-of-night level.
+    p50 = [0.95] * 7 + [0.9, 0.88, 0.9, 0.92, 0.94, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7] + [0.65] * 6
+    assert _margin(p50) == {6: pytest.approx(-0.15)}
+    # Energy the plan buys for the battery that night may be meant for later: kept.
+    assert _margin(p50, grid_charging=[False] * 3 + [True] + [False] * 20) == {}
+
+
+def test_margin_never_takes_the_median_day_s_room_for_sun():
+    p50 = [0.6] * 7 + [0.55, 0.5, 0.7, 0.85, 0.95, 0.95, 0.8, 0.6, 0.45, 0.4, 0.35] + [0.3] * 6
+    assert _margin(p50) == {6: pytest.approx(0.05)}  # only 5 pp of headroom left
 
 
 def test_margin_needs_hours_after_the_run():
-    assert optimize.night_charge_margin([0.5] * 6, [0.7] * 6, [(2, 5)], 1.0) == {}
+    assert _margin([0.5] * 6, runs=[(2, 5)]) == {}
 
 
 def _plan(pv_day, pv_p10_day, strategy="flat"):
