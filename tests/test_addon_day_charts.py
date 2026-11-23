@@ -116,3 +116,57 @@ def test_past_hours_show_the_plan_that_covered_them(site, tmp_path):
     assert charts.day_charts(site, now=NOW, live=False)["days"][0]["hours"][12][
         "soc_plan_pct"
     ] == 60.0
+
+
+@pytest.fixture
+def site_tariff(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path)
+    (tmp_path / "options.json").write_text(
+        json.dumps(
+            {
+                "time_zone": "UTC",
+                "tariff_enabled": True,
+                "tariff_cheap_windows": "23:00-07:00",
+            }
+        )
+    )
+    hours = pd.date_range("2026-11-21 00:00", "2026-11-21 11:00", freq="h", tz="UTC")
+    rows = [
+        {
+            "start_utc": h.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "pv_measured_kw": 1.0,
+            "soc_mean": 0.5,
+            "grid_power_kw_raw_sign": 0.8,
+            "raw_grid_status": "outage" if h.hour == 3 else "ok",
+            "grid_quality": "recorded_outage" if h.hour == 3 else "ok",
+        }
+        for h in hours
+    ]
+    (tmp_path / "hourly_audit.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return {
+        "issue_utc": "2026-11-21T12:00:00+00:00",
+        "advisory": {
+            "floor_profile": [
+                {"start_local": "12:00", "floor_soc": 0.35}
+            ] * 24,
+            "optimizer": {"soc_opt": [0.6] * 48, "p_grid_kw": [1.5] * 48},
+        },
+    }
+
+
+def test_tariff_outage_and_plan_layers_reach_the_hours(site_tariff):
+    data = charts.day_charts(site_tariff, now=NOW, live=False)
+    today, tomorrow = data["days"]
+    hours = today["hours"]
+    # Cheap window 23:00-07:00 wraps midnight: early hours cheap, noon not.
+    assert hours[2]["cheap"] and hours[6]["cheap"]
+    assert not hours[12]["cheap"]
+    assert tomorrow["hours"][2]["cheap"]  # the window repeats every day
+    # The outage hour is flagged from the audit's grid status.
+    assert hours[3]["outage"] and not hours[4]["outage"]
+    # Floor and grid plans stitched from the report cover plan hours.
+    assert hours[12]["floor_plan_pct"] == 35.0 and hours[12]["grid_plan_kw"] == 1.5
+    assert tomorrow["hours"][0]["floor_plan_pct"] == 35.0
+    # Measured grid import reaches the past hours.
+    assert hours[3]["grid_actual_kw"] == 0.8
+    assert hours[12]["grid_actual_kw"] is None  # future

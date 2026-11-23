@@ -137,6 +137,8 @@
     <h3 data-i18n="day_title" data-hint="hint_day">Солнце и батарея по часам</h3>
     <div class="sub daylegend">
       <span><i class="hatch"></i><span data-i18n="day_hatch_legend">штриховка — урезано: батарея была полной, панели могли больше</span></span>
+      <span id="legendcheap" style="display:none"><i style="background:rgba(79,195,247,.25)"></i><span data-i18n="day_cheap_legend">голубой фон — дешёвый тариф</span></span>
+      <span id="legendoutage" style="display:none"><i style="background:rgba(239,83,80,.35)"></i><span data-i18n="day_outage_legend">красный фон — отключение сети</span></span>
       <span class="muted" data-i18n="day_legend_note">легенда графика кликабельна · масштаб: Ctrl+колесо или щипок</span>
     </div>
     <div class="sub" id="daynote"></div>
@@ -299,9 +301,14 @@ const I18N = {
     ser_forecast: "Прогноз", ser_band: "Коридор P10–P90", ser_actual: "Факт",
     ser_soc_actual: "Заряд, факт", ser_soc_plan: "Заряд, план",
     ser_charge_plan: "Заряд по плану", ser_floor: "Пол (резерв)", ser_floor_soc: "Пол SOC",
+    ser_grid_actual: "Сеть, факт", ser_grid_plan: "Сеть, план", ser_floor_plan: "Пол, план",
     mark_now: "сейчас",
     day_forecast: "прогноз {v} кВт·ч", day_produced: " · выработано {v} кВт·ч",
     day_ahead: " · ещё ожидается ~{v} кВт·ч",
+    day_cheap_legend: "голубой фон — дешёвый тариф",
+    day_outage_legend: "красный фон — отключение сети",
+    hh_cheap: "дешёвый тариф", hh_outage: "сети не было",
+    hh_floor: "пол", hh_grid: "сеть", hh_grid_plan: "сеть план",
     learn_priority: "Приоритет: {v}",
     prio_resilience: "надёжность", prio_balanced: "баланс", prio_economy: "экономия",
     learn_outages_live: "отключения: серия идёт, запас сверх резерва {v}",
@@ -344,7 +351,7 @@ const I18N = {
     hint_load: "Сколько дом потребит за 24 часа от начала плана (медианный прогноз P50). P10…P90 — коридор: в 8 случаях из 10 факт попадает между ними.",
     hint_pv: "Сколько дадут панели за 24 часа от начала плана (P50). P10 — пессимистичный вариант: хуже бывает в 1 случае из 10. По нему считается запас ночного заряда.",
     hint_res: "Энергия, которую батарея держит на случай отключения: нагрузка дома во время отключений × длительность отключений текущей серии. Если 14 дней отключений не было, резерва нет (кроме минимальной автономии, если вы её задали).",
-    hint_day: "Жёлтое — прогноз выработки панелей по часам, бледная полоса — коридор P10–P90. Зелёное — сколько панели дали на самом деле (в среднем за час; в текущем часу — мгновенная мощность). Штриховка — час, когда батарея была полной и инвертор урезал панели: там зелёное ниже жёлтого не из-за ошибки прогноза. Ниже — заряд батареи: сплошная линия — факт, пунктир — план оптимизатора. Наведите на час — подробности.",
+    hint_day: "Жёлтое — прогноз выработки панелей по часам, бледный ореол вокруг — коридор P10–P90. Зелёное — сколько панели дали на самом деле (в среднем за час; в текущем часу — мгновенная мощность). Штриховка — час, когда батарея была полной и инвертор урезал панели: там зелёное ниже жёлтого не из-за ошибки прогноза. Красное — обмен с сетью: сплошная линия факт, пунктир — план. Голубой фон — дешёвый тариф, красный фон — отключение сети. Ниже — заряд батареи: сплошная линия — факт, пунктир — план оптимизатора, серая ступенька — пол резерва. Наведите на час — подробности.",
     hint_floor: "Резерв на отключение по часам: высота столбика — ниже какого заряда не опускаться в этот час. Наведите на столбик, чтобы увидеть час и значение.",
     hint_opt: "Заряд батареи по часам в оптимальном плане на 48 часов: когда заряжать из сети по дешёвому тарифу и когда тратить. Наведите на столбик — час и SOC.",
     hint_zones: "Программы инвертора по времени. Batt% зоны — это и нижний порог разряда, и цель заряда из сети, если в зоне включён заряд из сети.",
@@ -439,9 +446,14 @@ const I18N = {
     ser_forecast: "Forecast", ser_band: "P10–P90 corridor", ser_actual: "Actual",
     ser_soc_actual: "Charge, actual", ser_soc_plan: "Charge, plan",
     ser_charge_plan: "Planned charge", ser_floor: "Floor (reserve)", ser_floor_soc: "SOC floor",
+    ser_grid_actual: "Grid, actual", ser_grid_plan: "Grid, plan", ser_floor_plan: "Floor, plan",
     mark_now: "now",
     day_forecast: "forecast {v} kWh", day_produced: " · produced {v} kWh",
     day_ahead: " · still expected ~{v} kWh",
+    day_cheap_legend: "blue background — cheap tariff",
+    day_outage_legend: "red background — grid outage",
+    hh_cheap: "cheap tariff", hh_outage: "grid outage",
+    hh_floor: "floor", hh_grid: "grid", hh_grid_plan: "grid plan",
     learn_priority: "Priority: {v}",
     prio_resilience: "resilience", prio_balanced: "balanced", prio_economy: "economy",
     learn_outages_live: "outages: series in progress, margin above the reserve {v}",
@@ -484,7 +496,7 @@ const I18N = {
     hint_load: "How much the house will consume over 24 hours from the plan start (median forecast P50). P10…P90 is the corridor: in 8 cases out of 10 the actual value falls between them.",
     hint_pv: "How much the panels will produce over 24 hours from the plan start (P50). P10 is the pessimistic case: worse happens 1 time in 10. The night charge margin is sized by it.",
     hint_res: "Energy the battery keeps for an outage: house load during outages × the outage durations of the current series. If there were no outages for 14 days, there is no reserve (except the minimum autonomy if you set one).",
-    hint_day: "Yellow — forecast panel output by hour, the pale band is the P10–P90 corridor. Green — what the panels actually produced (hourly average; instantaneous power in the current hour). Hatching — an hour when the battery was full and the inverter clipped the panels: green below yellow there is not a forecast error. Below — battery charge: solid line is actual, dashed is the optimizer plan. Hover an hour for details.",
+    hint_day: "Yellow — forecast panel output by hour, the pale halo around it is the P10–P90 corridor. Green — what the panels actually produced (hourly average; instantaneous power in the current hour). Hatching — an hour when the battery was full and the inverter clipped the panels: green below yellow there is not a forecast error. Red — grid exchange: solid line actual, dashed plan. Blue background — cheap tariff, red background — grid outage. Below — battery charge: solid line is actual, dashed is the optimizer plan, the grey step line is the reserve floor. Hover an hour for details.",
     hint_floor: "Outage reserve by hour: the height is the charge level not to discharge below this hour. Hover a bar to see the hour and value.",
     hint_opt: "Battery charge by hour in the optimal 48-hour plan: when to charge from the grid at the cheap price and when to spend. Hover a bar — hour and SOC.",
     hint_zones: "Inverter time-of-use programs. A zone's Batt% is both the lower discharge threshold and the grid-charge target when grid charging is enabled in the zone.",
@@ -1065,15 +1077,21 @@ function hourHint(h, next) {
   if (h.actual_kw != null)
     txt += " · " + t("hh_actual") + " " + kw(h.actual_kw) + (h.current ? " " + t("hh_now") : "") +
       (h.throttled ? t("hh_throttled") : "");
+  if (h.grid_actual_kw != null) txt += " · " + t("hh_grid") + " " + kw(h.grid_actual_kw);
+  if (h.grid_plan_kw != null) txt += " · " + t("hh_grid_plan") + " " + kw(h.grid_plan_kw);
   if (h.soc_pct != null) txt += " · " + t("hh_soc") + " " + Math.round(h.soc_pct) + "%";
   if (h.soc_plan_pct != null) txt += " · " + t("hh_soc_plan") + " " + Math.round(h.soc_plan_pct) + "%";
+  if (h.floor_plan_pct != null) txt += " · " + t("hh_floor") + " " + Math.round(h.floor_plan_pct) + "%";
+  if (h.cheap) txt += " · " + t("hh_cheap");
+  if (h.outage) txt += " · " + t("hh_outage");
   return txt;
 }
 
 // Charts: Apache ECharts (bundled under vendor/, Apache-2.0). Colors are the
 // validated dark-surface slots: forecast #c98500, actual #199e70, SOC #3987e5.
 const EC = {ink: "#9aa3b2", grid: "#2c313c", text: "#e6e8ee", surface: "#1c1f26",
-  forecast: "#c98500", band: "rgba(201,133,0,.25)", actual: "#199e70", soc: "#3987e5"};
+  forecast: "#c98500", band: "rgba(201,133,0,.25)", actual: "#199e70", soc: "#3987e5",
+  gridLine: "#ef5350"};
 const TOOLTIP = {backgroundColor: "#2a2f3a", borderColor: "#3a404c", confine: true,
   textStyle: {color: EC.text, fontSize: 13}, extraCssText: "border-radius:8px;max-width:320px;white-space:normal"};
 
@@ -1127,6 +1145,22 @@ function columnBar(widthShare, styleOf) {
   };
 }
 
+// Contiguous runs of hours with a flag -> markArea [from, to] pairs on a
+// category axis (half-step padding covers the full first and last hour).
+function hourBands(hours, flag) {
+  const data = [];
+  let start = -1;
+  hours.forEach((h, i) => {
+    const on = !!h[flag];
+    if (on && start < 0) start = i;
+    if ((!on || i === hours.length - 1) && start >= 0) {
+      data.push([{xAxis: start - 0.5}, {xAxis: (on ? i : i - 1) + 0.5}]);
+      start = -1;
+    }
+  });
+  return data;
+}
+
 function dayOption(day, nowFraction, narrow) {
   const labels = day.hours.map(h => h.label + ":00");
   const now = day.hours.findIndex(h => h.current);
@@ -1134,16 +1168,25 @@ function dayOption(day, nowFraction, narrow) {
     .filter(Boolean);
   const actual = day.hours.map((h, i) => h.actual_kw != null ? [i, 0, h.actual_kw, h.throttled ? 1 : 0, h.current ? 1 : 0] : null)
     .filter(Boolean);
+  const cheapBands = hourBands(day.hours, "cheap");
+  const outageBands = hourBands(day.hours, "outage");
+  const bandArea = {silent: true, animation: false, data: [
+    ...cheapBands.map(pair => [Object.assign({itemStyle: {color: "rgba(79,195,247,.07)"}}, pair[0]), pair[1]]),
+    ...outageBands.map(pair => [Object.assign({itemStyle: {color: "rgba(239,83,80,.15)"}}, pair[0]), pair[1]]),
+  ]};
   const nowLine = now < 0 ? undefined : {silent: true, symbol: "none", animation: false,
     lineStyle: {color: EC.text, type: "dotted", opacity: .7},
     label: {formatter: t("mark_now"), color: EC.text, position: "end"},
     data: [{xAxis: now + nowFraction - 0.5}]};
   const xAxis = (grid, show) => Object.assign(axisX(labels), {gridIndex: grid,
     axisLabel: {show, color: EC.ink, interval: narrow ? 5 : 2}});
+  const legend = [t("ser_forecast"), t("ser_band"), t("ser_actual"),
+    t("ser_grid_actual"), t("ser_grid_plan"),
+    t("ser_soc_actual"), t("ser_soc_plan"), t("ser_floor_plan")];
   return {
     animationDurationUpdate: 600,
     axisPointer: {link: [{xAxisIndex: "all"}], lineStyle: {color: "rgba(230,232,238,.35)"}},
-    legend: legendStyle([t("ser_forecast"), t("ser_band"), t("ser_actual"), t("ser_soc_actual"), t("ser_soc_plan")]),
+    legend: legendStyle(legend),
     tooltip: Object.assign({trigger: "axis", axisPointer: {type: "shadow",
       shadowStyle: {color: "rgba(230,232,238,.05)"}}}, TOOLTIP, {
       formatter: params => {
@@ -1161,14 +1204,22 @@ function dayOption(day, nowFraction, narrow) {
     series: [
       {name: t("ser_band"), type: "custom", xAxisIndex: 0, yAxisIndex: 0,
        itemStyle: {color: EC.band}, encode: {x: 0, y: [1, 2]}, data: f,
-       renderItem: columnBar(.8, () => ({fill: EC.band}))},
+       renderItem: columnBar(.8, () => ({fill: EC.band})), markArea: bandArea},
+      // P50 half the corridor width: the P10–P90 band stays visible as a halo.
       {name: t("ser_forecast"), type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.forecast},
        encode: {x: 0, y: 3}, data: f.map(v => [v[0], 0, v[3]]),
-       renderItem: columnBar(.8, () => ({fill: EC.forecast})), markLine: nowLine},
+       renderItem: columnBar(.38, () => ({fill: EC.forecast})), markLine: nowLine},
       {name: t("ser_actual"), type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.actual},
        encode: {x: 0, y: 2}, data: actual, z: 3,
        renderItem: columnBar(.38, i => ({fill: actual[i][3] ? hatch() : EC.actual,
          stroke: EC.surface, lineWidth: 2, opacity: actual[i][4] ? .75 : 1}))},
+      {name: t("ser_grid_actual"), type: "line", xAxisIndex: 0, yAxisIndex: 0, smooth: 0.3,
+       showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: EC.gridLine},
+       itemStyle: {color: EC.gridLine}, data: day.hours.map(h => h.grid_actual_kw)},
+      {name: t("ser_grid_plan"), type: "line", xAxisIndex: 0, yAxisIndex: 0, smooth: 0.3,
+       showSymbol: false, connectNulls: false,
+       lineStyle: {width: 1.5, type: "dashed", color: EC.gridLine},
+       itemStyle: {color: EC.gridLine}, data: day.hours.map(h => h.grid_plan_kw)},
       {name: t("ser_soc_actual"), type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
        showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: EC.soc},
        itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_pct),
@@ -1176,10 +1227,14 @@ function dayOption(day, nowFraction, narrow) {
        markPoint: now < 0 || day.hours[now].soc_pct == null ? undefined : {symbol: "circle",
          symbolSize: 10, itemStyle: {color: EC.soc, borderColor: EC.surface, borderWidth: 2},
          label: {show: false}, data: [{coord: [now, day.hours[now].soc_pct]}]},
-       markLine: nowLine && Object.assign({}, nowLine, {label: {show: false}})},
+       markLine: nowLine && Object.assign({}, nowLine, {label: {show: false}}),
+       markArea: Object.assign({}, bandArea)},
       {name: t("ser_soc_plan"), type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
        showSymbol: false, lineStyle: {width: 2, type: "dashed", color: EC.soc},
        itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_plan_pct)},
+      {name: t("ser_floor_plan"), type: "line", xAxisIndex: 1, yAxisIndex: 1, step: "middle",
+       showSymbol: false, lineStyle: {width: 1.5, type: "dashed", color: EC.ink},
+       itemStyle: {color: EC.ink}, data: day.hours.map(h => h.floor_plan_pct)},
     ],
   };
 }
@@ -1189,6 +1244,9 @@ function renderDayCharts(data) {
   if (!data || !data.days || !data.days.length) { card.style.display = "none"; return; }
   card.style.display = "block";
   document.getElementById("daynote").textContent = pick(data, "plan_note") || "";
+  const anyHour = flag => data.days.slice(0, 2).some(d => d.hours.some(h => h[flag]));
+  document.getElementById("legendcheap").style.display = anyHour("cheap") ? "" : "none";
+  document.getElementById("legendoutage").style.display = anyHour("outage") ? "" : "none";
   data.days.slice(0, 2).forEach((day, i) => {
     let head = "<b>" + esc(pick(day, "label")) + ", " + day.date + "</b> · " +
       t("day_forecast", {v: day.forecast_kwh == null ? "—" : day.forecast_kwh});

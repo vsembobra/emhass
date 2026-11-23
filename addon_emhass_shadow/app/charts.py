@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import learning
+import optimize
 import pandas as pd
 import pipeline
 
@@ -66,6 +67,56 @@ def _soc_plan(reports: list[dict]) -> dict[str, float]:
     return plan
 
 
+def _hourly_plan(reports: list[dict], values_of) -> dict[str, float]:
+    """Per-hour values of the newest plan issued at or before each hour.
+
+    Same stitching as _soc_plan: past hours show what the run covering them
+    planned, so the chart can compare plan against fact. ``values_of``
+    extracts the per-hour list (one value per hour from the issue) from a
+    report, or None when the report does not carry it.
+    """
+    issued = []
+    seen = set()
+    for report in reports:
+        values = values_of(report or {})
+        issue_text = (report or {}).get("issue_utc")
+        if values and issue_text and issue_text not in seen:
+            seen.add(issue_text)
+            issued.append((pd.Timestamp(issue_text), values))
+    issued.sort(key=lambda item: item[0])
+    plan: dict[str, float] = {}
+    for k, (issue, values) in enumerate(issued):
+        stop = issued[k + 1][0] if k + 1 < len(issued) else None
+        for i, value in enumerate(values):
+            hour = issue + pd.Timedelta(hours=i)
+            if stop is not None and hour >= stop:
+                break
+            plan[hour.isoformat()] = round(float(value), 3)
+    return plan
+
+
+def _floor_plan(reports: list[dict]) -> dict[str, float]:
+    """Planned SOC floor (%) per hour from the reports' floor_profile."""
+
+    def values(report: dict):
+        profile = (report.get("advisory") or {}).get("floor_profile") or []
+        floors = [step.get("floor_soc") for step in profile]
+        if not floors or any(f is None for f in floors):
+            return None
+        return [float(f) * 100 for f in floors]
+
+    return _hourly_plan(reports, values)
+
+
+def _grid_plan(reports: list[dict]) -> dict[str, float]:
+    """Planned grid import (kW) per hour from the optimizer's p_grid_kw."""
+
+    def values(report):
+        return ((report.get("advisory") or {}).get("optimizer") or {}).get("p_grid_kw")
+
+    return _hourly_plan(reports, values)
+
+
 def _live(opts: dict) -> tuple[float | None, float | None]:
     """PV power (kW) and SOC (%) right now; None when HA cannot say."""
     ent = pipeline.resolve_entities(opts)
@@ -113,6 +164,9 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
     except OSError:
         pass
     plan = _soc_plan(reports)
+    floor_plan = _floor_plan(reports)
+    grid_plan = _grid_plan(reports)
+    cheap_windows = optimize._cheap_windows(opts) if opts.get("tariff_enabled", False) else []
     live_pv, live_soc = _live(opts) if live else (None, None)
 
     def number(row, column) -> float | None:
@@ -131,6 +185,15 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
             row = audit.loc[stamp] if stamp in audit.index else None
             actual = number(row, "pv_measured_kw")
             soc = number(row, "soc_mean")
+            grid_actual = number(row, "grid_power_kw_raw_sign")
+            outage = row is not None and (
+                row.get("raw_grid_status") == "outage"
+                or row.get("grid_quality") in ("recorded_outage", "low_grid_voltage")
+            )
+            wall = stamp.tz_convert(tz)
+            cheap = bool(cheap_windows) and optimize._is_cheap_minute(
+                wall.hour * 60 + wall.minute, cheap_windows
+            )
             is_current = stamp == current
             if is_current:
                 actual = live_pv if live_pv is not None else actual
@@ -144,6 +207,11 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
                     "throttled": bool(stamp in throttled.index and throttled.loc[stamp]),
                     "soc_pct": None if soc is None else round(soc * 100, 1),
                     "soc_plan_pct": plan.get(key),
+                    "floor_plan_pct": floor_plan.get(key),
+                    "grid_actual_kw": None if grid_actual is None else round(grid_actual, 3),
+                    "grid_plan_kw": grid_plan.get(key),
+                    "cheap": cheap,
+                    "outage": bool(outage),
                     "past": stamp < current,
                     "current": is_current,
                 }
