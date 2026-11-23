@@ -122,7 +122,7 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
 
     days = []
     today = pd.Timestamp(now).tz_convert(tz).normalize()
-    for offset, label in ((0, "Сегодня"), (1, "Завтра")):
+    for offset, label, label_en in ((0, "Сегодня", "Today"), (1, "Завтра", "Tomorrow")):
         start = today + pd.Timedelta(days=offset)
         local = pd.date_range(start, start + pd.Timedelta(days=1), freq="h", inclusive="left")
         hours = []
@@ -158,6 +158,7 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
         days.append(
             {
                 "label": label,
+                "label_en": label_en,
                 "date": start.strftime("%d.%m"),
                 "hours": hours,
                 "forecast_kwh": round(sum(p50), 1) if p50 else None,
@@ -169,5 +170,6 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
         "now_utc": now.isoformat(),
         "now_fraction": round(now.minute / 60, 3),
         "plan_note": None if plan else "нет плана оптимизатора — линия SOC только по факту",
+        "plan_note_en": None if plan else "no optimizer plan — the SOC line is actuals only",
         "days": days,
     }

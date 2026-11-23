@@ -1954,13 +1954,13 @@ def _post_options(opts: dict) -> None:
         json.load(response)
 
 
-def update_options(changes: dict) -> dict:
+def update_options(changes: dict, lang: str = "ru") -> dict:
     """Write option edits from the panel through the Supervisor self-options API.
 
     Entity-binding keys are stored as stripped strings; every other editable
     option is validated and coerced against options_meta (type, range,
-    choices), so a bad edit is rejected with a readable ValueError instead of
-    failing the Supervisor schema check. Unknown keys are reported in
+    choices), so a bad edit is rejected with a readable ValueError in the
+    panel's language instead of failing the Supervisor schema check. Unknown keys are reported in
     "rejected" and dropped. The edits are merged into the options the
     Supervisor holds now — not into the local file, which lags until a
     restart and would silently undo edits made in the add-on settings —
@@ -1975,7 +1975,7 @@ def update_options(changes: dict) -> dict:
         elif key in ENTITY_OPTION_KEYS:
             filtered[key] = str(value).strip()
         elif key in options_meta.OPTION_META and not options_meta.OPTION_META[key].get("entity"):
-            filtered[key] = options_meta.coerce_option(key, value)
+            filtered[key] = options_meta.coerce_option(key, value, lang)
         else:
             rejected.append(key)
     if not filtered and not automatic:
@@ -1998,6 +1998,14 @@ ENTITY_CHECK_LABELS = {
     "grid_power_kw_raw_sign": "Мощность сети",
     "temp_air_observed_c": "Уличная температура",
 }
+ENTITY_CHECK_LABELS_EN = {
+    "load_kw": "Load power",
+    "critical_load_kw": "Critical load",
+    "pv_measured_kw": "PV power",
+    "battery_power_kw_raw_sign": "Battery power",
+    "grid_power_kw_raw_sign": "Grid power",
+    "temp_air_observed_c": "Outdoor temperature",
+}
 
 
 def validate_entities() -> list[dict]:
@@ -2009,48 +2017,56 @@ def validate_entities() -> list[dict]:
     """
     opts = options()
     ent = resolve_entities(opts)
-    # (label, entity value, kind, option key or None when not directly editable)
-    specs: list[tuple[str, str, str, str | None]] = [
-        (ENTITY_CHECK_LABELS[field], str(entity or ""), "number", MEAN_SENSOR_FIELDS[field][0])
+    # (label ru, label en, entity value, kind, option key or None when not directly editable)
+    specs: list[tuple[str, str, str, str, str | None]] = [
+        (
+            ENTITY_CHECK_LABELS[field],
+            ENTITY_CHECK_LABELS_EN[field],
+            str(entity or ""),
+            "number",
+            MEAN_SENSOR_FIELDS[field][0],
+        )
         for field, (entity, _scale) in ent["mean_sensors"].items()
     ]
     specs += [
-        ("SOC батареи", str(ent["soc"] or ""), "number", "entity_battery_soc"),
-        ("Счётчик экспорта", str(ent["export_counter"] or ""), "number", "entity_export_counter"),
-        ("Статус сети", str(ent["grid_binary"] or ""), "binary", "entity_grid_status"),
+        ("SOC батареи", "Battery SOC", str(ent["soc"] or ""), "number", "entity_battery_soc"),
+        ("Счётчик экспорта", "Export counter", str(ent["export_counter"] or ""), "number", "entity_export_counter"),
+        ("Статус сети", "Grid status", str(ent["grid_binary"] or ""), "binary", "entity_grid_status"),
     ]
     specs += [
-        ("Напряжение сети", str(entity or ""), "number", "entity_grid_voltage")
+        ("Напряжение сети", "Grid voltage", str(entity or ""), "number", "entity_grid_voltage")
         for entity in ent["voltages"].values()
     ]
     # Zone rows are not edited one by one; their source is the template's.
     zone_source: dict[str, str] = {}
     for n in range(len(ent["tou_soc"])):
-        specs.append((f"Зона {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
+        specs.append((f"Зона {n + 1}: SOC", f"Zone {n + 1}: SOC", str(ent["tou_soc"][n] or ""), "number", None))
         zone_source[specs[-1][0]] = "tou_soc_entity_template"
-        specs.append((f"Зона {n + 1}: время старта", str(ent["tou_time"][n] or ""), "time", None))
+        specs.append((f"Зона {n + 1}: время старта", f"Zone {n + 1}: start time", str(ent["tou_time"][n] or ""), "time", None))
         zone_source[specs[-1][0]] = "tou_time_entity_template"
     for n, entity in enumerate(ent.get("tou_grid_charge", []), start=1):
         kind = "select" if entity.startswith("select.") else "binary"
-        specs.append((f"Зона {n}: заряд из сети", entity, kind, None))
+        specs.append((f"Зона {n}: заряд из сети", f"Zone {n}: grid charge", entity, kind, None))
         zone_source[specs[-1][0]] = "tou_grid_charge_entity_template"
-    specs.append(("Порог SOC (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
-    specs.append(("SoH батареи", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
+    specs.append(("Порог SOC (helper)", "SOC floor (helper)", str(ent["floor_input"] or ""), "number", "floor_input_entity"))
+    specs.append(("SoH батареи", "Battery SoH", str(opts.get("entity_battery_soh") or ""), "soh", "entity_battery_soh"))
 
     try:
         sources = option_sources()
     except Exception:
         sources = {}
     results = []
-    for label, entity, kind, key in specs:
+    for label, label_en, entity, kind, key in specs:
         entity = entity.strip()
         row = {
             "label": label,
+            "label_en": label_en,
             "entity": entity,
             "state": None,
             "status": "ok",
             "key": key,
             "hint": options_meta.entity_hint(key) if key else None,
+            "hint_en": options_meta.entity_hint(key, "en") if key else None,
             "source": sources.get(key or zone_source.get(label, "")),
         }
         if not entity:

@@ -96,6 +96,12 @@ def test_update_options_rejects_out_of_range(monkeypatch, tmp_path):
         pipeline.update_options({"run_time": "6:47"})
 
 
+def test_update_options_errors_follow_the_panel_language(monkeypatch, tmp_path):
+    _patch_supervisor(monkeypatch, tmp_path, {"capacity_kwh": 32.0})
+    with pytest.raises(ValueError, match="999.0 is outside"):
+        pipeline.update_options({"capacity_kwh": 999}, lang="en")
+
+
 def test_update_options_empty_changes_is_noop(monkeypatch):
     monkeypatch.setattr(
         pipeline, "options", lambda: (_ for _ in ()).throw(AssertionError("must not read"))
@@ -131,6 +137,37 @@ def test_options_view_covers_groups_and_values():
     item = next(i for g in groups for i in g["items"] if i["key"] == "capacity_kwh")
     assert item["value"] == 32.0
     assert item["hint"] and item["label"]
+
+
+def test_options_view_carries_english_mirror():
+    groups = options_meta.options_view({"capacity_kwh": 32.0})
+    for group in groups:
+        assert group["title"] and group["title_en"]
+        for item in group["items"]:
+            assert item["label_en"] and item["hint_en"], item["key"]
+    item = next(i for g in groups for i in g["items"] if i["key"] == "capacity_kwh")
+    assert item["label_en"] == "Battery capacity"
+    titles = [g["title_en"] for g in groups]
+    assert "Inverter and battery" in titles and "Application" in titles
+
+
+def test_entity_metadata_is_bilingual():
+    for key, meta in options_meta.OPTION_META.items():
+        assert meta.get("label_en") and meta.get("hint_en"), key
+    assert options_meta.entity_hint("entity_pv_power")
+    assert options_meta.entity_hint("entity_pv_power", "en")
+    assert options_meta.entity_hint("entity_pv_power", "en") != options_meta.entity_hint(
+        "entity_pv_power"
+    )
+
+
+def test_coerce_option_english_errors():
+    with pytest.raises(ValueError, match="is not a number"):
+        options_meta.coerce_option("capacity_kwh", "abc", "en")
+    with pytest.raises(ValueError, match="999.0 is outside 1–200"):
+        options_meta.coerce_option("capacity_kwh", 999, "en")
+    with pytest.raises(ValueError, match="HH:MM required"):
+        options_meta.coerce_option("run_time", "6:47", "en")
 
 
 def _supervisor_holding(monkeypatch, tmp_path, local, stored):

@@ -511,7 +511,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                self._json(200, pipeline.update_options(body.get("options") or {}))
+                self._json(
+                    200,
+                    pipeline.update_options(
+                        body.get("options") or {}, lang=body.get("lang") or "ru"
+                    ),
+                )
             except ValueError as error:
                 self._json(400, {"error": str(error)})
             except Exception:

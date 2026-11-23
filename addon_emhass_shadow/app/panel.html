@@ -42,6 +42,7 @@
   button { background: var(--accent); color: #08222f; border: 0; font-weight: 600; font-size: 14px; padding: 9px 18px; border-radius: 10px; cursor: pointer; }
   button.secondary { background: #2c313c; color: var(--text); }
   button:disabled { opacity: .5; cursor: default; }
+  #langbtn { padding: 6px 12px; font-size: 13px; }
   .notice { white-space: pre-line; background: #17222b; border: 1px solid #25404d; border-radius: 10px; padding: 14px 16px; font-size: 14px; margin-bottom: 14px; }
   .error { background: rgba(239,83,80,.1); border-color: var(--bad); color: var(--bad); }
   #refresh { margin-left: auto; }
@@ -76,66 +77,67 @@
 <body>
 <datalist id="entity-ids"></datalist>
 <header>
-  <h1>🔋 Теневой план батареи</h1>
-  <span class="badge" id="modebadge">только советует · в инвертор не пишет</span>
-  <button id="backfill" class="secondary" onclick="backfillNow()">Загрузить историю</button>
-  <button id="retrain" class="secondary" onclick="retrainNow()">Переобучить модели</button>
-  <button id="refresh" onclick="recalc()">Пересчитать сейчас</button>
+  <h1>🔋 <span data-i18n="title">Теневой план батареи</span></h1>
+  <span class="badge" id="modebadge"></span>
+  <button id="backfill" class="secondary" onclick="backfillNow()" data-i18n="btn_backfill">Загрузить историю</button>
+  <button id="retrain" class="secondary" onclick="retrainNow()" data-i18n="btn_retrain">Переобучить модели</button>
+  <button id="refresh" onclick="recalc()" data-i18n="btn_recalc">Пересчитать сейчас</button>
+  <button id="langbtn" class="secondary" onclick="switchLang()">EN</button>
 </header>
 
 <div id="status"></div>
 <div class="notice" id="notice" style="display:none"></div>
 <details class="card full" id="entscard" style="display:none;margin-bottom:14px">
   <summary style="cursor:pointer;list-style:none">
-    <h3 style="display:inline">Проверка и настройка сущностей <span class="muted" id="entssummary" style="text-transform:none"></span>
-    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()">Сохранить</button>
+    <h3 style="display:inline"><span data-i18n="ents_title">Проверка и настройка сущностей</span> <span class="muted" id="entssummary" style="text-transform:none"></span>
+    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()" data-i18n="btn_save">Сохранить</button>
     </h3>
   </summary>
   <table>
-    <thead><tr><th>Параметр</th><th>Сущность</th><th>Значение</th><th>Статус</th></tr></thead>
+    <thead><tr><th data-i18n="th_param">Параметр</th><th data-i18n="th_entity">Сущность</th><th data-i18n="th_value">Значение</th><th data-i18n="th_status">Статус</th></tr></thead>
     <tbody id="ents"></tbody>
   </table>
 </details>
 <details class="card full" id="optscard" style="margin-bottom:14px">
   <summary style="cursor:pointer;list-style:none">
-    <h3 style="display:inline">Настройки аддона <span class="muted" style="text-transform:none">— то же, что на странице конфигурации аддона, с подсказками</span>
-    <button id="optssave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveOptions()">Сохранить</button>
+    <h3 style="display:inline"><span data-i18n="opts_title">Настройки аддона</span> <span class="muted" style="text-transform:none" data-i18n="opts_note">— то же, что на странице конфигурации аддона, с подсказками</span>
+    <button id="optssave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveOptions()" data-i18n="btn_save">Сохранить</button>
     </h3>
   </summary>
   <div id="opts"></div>
-  <div class="muted" style="margin-top:10px;font-size:12px">Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.</div>
+  <div class="muted" style="margin-top:10px;font-size:12px" data-i18n="opts_deferrable">Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.</div>
 </details>
 <div id="content" style="display:none">
 
   <div class="period" id="period"></div>
   <div class="grid">
     <div class="card">
-      <h3>Рекомендуемый пол SOC</h3>
+      <h3 data-i18n="card_rec" data-hint="hint_rec">Рекомендуемый пол SOC</h3>
       <div class="big"><span id="rec">—</span><span class="chip" id="delta"></span></div>
       <div class="sub" id="curfloor"></div>
     </div>
     <div class="card">
-      <h3>Нагрузка, 24 ч</h3>
+      <h3 data-i18n="card_load" data-hint="hint_load">Нагрузка, 24 ч</h3>
       <div class="big" id="load">—</div>
       <div class="sub" id="loadband"></div>
     </div>
     <div class="card">
-      <h3>Солнце, 24 ч</h3>
+      <h3 data-i18n="card_pv" data-hint="hint_pv">Солнце, 24 ч</h3>
       <div class="big" id="pv">—</div>
       <div class="sub" id="pvb"></div>
     </div>
     <div class="card">
-      <h3>Резерв отключений</h3>
+      <h3 data-i18n="card_res" data-hint="hint_res">Резерв отключений</h3>
       <div class="big" id="res">—</div>
       <div class="sub" id="resd"></div>
     </div>
   </div>
 
   <div class="card full" id="daycard" style="display:none">
-    <h3>Солнце и батарея по часам</h3>
+    <h3 data-i18n="day_title" data-hint="hint_day">Солнце и батарея по часам</h3>
     <div class="sub daylegend">
-      <span><i class="hatch"></i>штриховка — урезано: батарея была полной, панели могли больше</span>
-      <span class="muted">легенда графика кликабельна · масштаб: Ctrl+колесо или щипок</span>
+      <span><i class="hatch"></i><span data-i18n="day_hatch_legend">штриховка — урезано: батарея была полной, панели могли больше</span></span>
+      <span class="muted" data-i18n="day_legend_note">легенда графика кликабельна · масштаб: Ctrl+колесо или щипок</span>
     </div>
     <div class="sub" id="daynote"></div>
     <div class="dayhead" id="dayhead0"></div>
@@ -145,69 +147,69 @@
   </div>
 
   <div class="card full">
-    <h3>Пол SOC по часам (плавающий)</h3>
+    <h3 data-i18n="floor_title" data-hint="hint_floor">Пол SOC по часам (плавающий)</h3>
     <div class="sub" id="floornote" style="margin-bottom:8px"></div>
     <div class="echart" id="floorchart" style="height:190px"></div>
   </div>
 
   <div class="card full" id="optcard" style="display:none">
-    <h3>Оптимальный план (MILP-оптимизатор)</h3>
+    <h3 data-i18n="opt_title" data-hint="hint_opt">Оптимальный план (MILP-оптимизатор)</h3>
     <div class="sub" id="optnote" style="margin-bottom:8px"></div>
     <div class="echart" id="optchart" style="height:210px"></div>
   </div>
 
   <div class="card full">
-    <h3>Зоны TOU инвертора</h3>
+    <h3 data-i18n="zones_title" data-hint="hint_zones">Зоны TOU инвертора</h3>
     <table>
-      <thead><tr><th>Зона</th><th>Старт</th><th>Текущий SOC</th><th>Пол (эвристика)</th><th>Оптимизатор</th></tr></thead>
+      <thead><tr><th data-i18n="th_zone">Зона</th><th data-i18n="th_start">Старт</th><th data-i18n="th_cur_soc" data-hint="hint_cur_soc">Текущий SOC</th><th data-i18n="th_floor_heur" data-hint="hint_floor_heur">Пол (эвристика)</th><th data-i18n="th_optimizer" data-hint="hint_optimizer">Оптимизатор</th></tr></thead>
       <tbody id="zones"></tbody>
     </table>
   </div>
 
   <div class="card full" id="learncard" style="display:none">
-    <h3>Самообучение и автонастройка</h3>
+    <h3 data-i18n="learn_title" data-hint="hint_learn">Самообучение и автонастройка</h3>
     <div class="sub" id="learnnote" style="margin-bottom:6px"></div>
     <table>
-      <thead><tr><th>Что</th><th>Выучено по данным</th><th>Состояние</th></tr></thead>
+      <thead><tr><th data-i18n="th_what">Что</th><th data-i18n="th_learned">Выучено по данным</th><th data-i18n="th_state">Состояние</th></tr></thead>
       <tbody id="learn"></tbody>
     </table>
     <div id="flexwrap" style="display:none">
-      <h3 style="margin-top:16px">Переносимые нагрузки — когда включать</h3>
+      <h3 style="margin-top:16px" data-i18n="flex_title" data-hint="hint_flex">Переносимые нагрузки — когда включать</h3>
       <table>
-        <thead><tr><th>Нагрузка</th><th>Окно</th><th>На солнце</th><th>Из усечения</th></tr></thead>
+        <thead><tr><th data-i18n="th_load">Нагрузка</th><th data-i18n="th_window">Окно</th><th data-i18n="th_on_sun">На солнце</th><th data-i18n="th_from_curtailment" data-hint="hint_from_curt">Из усечения</th></tr></thead>
         <tbody id="flex"></tbody>
       </table>
     </div>
     <div id="gcwrap" style="display:none">
-      <h3 style="margin-top:16px">Заряд из сети по зонам</h3>
+      <h3 style="margin-top:16px" data-i18n="gc_title" data-hint="hint_gc">Заряд из сети по зонам</h3>
       <table>
-        <thead><tr><th>Зона</th><th>Сейчас</th><th>Нужно</th><th>Почему</th></tr></thead>
+        <thead><tr><th data-i18n="th_zone">Зона</th><th data-i18n="th_now">Сейчас</th><th data-i18n="th_needed">Нужно</th><th data-i18n="th_why">Почему</th></tr></thead>
         <tbody id="gc"></tbody>
       </table>
     </div>
   </div>
 
   <div class="card full">
-    <h3>Суточные данные, 14 дней (кВт·ч)</h3>
+    <h3 data-i18n="daily_title" data-hint="hint_daily">Суточные данные, 14 дней (кВт·ч)</h3>
     <table>
-      <thead><tr><th>Дата</th><th>Потребление</th><th>Солнце факт</th><th>Потери усечения</th><th>Заряд АКБ</th><th>Разряд АКБ</th><th>Из сети</th><th>Мин. SOC</th><th>Сеть вниз, ч</th></tr></thead>
+      <thead><tr><th data-i18n="th_date">Дата</th><th data-i18n="th_consumption">Потребление</th><th data-i18n="th_pv_fact">Солнце факт</th><th data-i18n="th_curtailment_loss" data-hint="hint_curt_loss">Потери усечения</th><th data-i18n="th_batt_charge">Заряд АКБ</th><th data-i18n="th_batt_discharge">Разряд АКБ</th><th data-i18n="th_from_grid">Из сети</th><th data-i18n="th_min_soc" data-hint="hint_min_soc">Мин. SOC</th><th data-i18n="th_grid_down" data-hint="hint_grid_down">Сеть вниз, ч</th></tr></thead>
       <tbody id="daily"></tbody>
     </table>
   </div>
 
   <div class="card full">
-    <h3>Точность прогнозов (факт vs P50)</h3>
+    <h3 data-i18n="metrics_title" data-hint="hint_metrics">Точность прогнозов (факт vs P50)</h3>
     <div class="sub" id="metrics-avg" style="margin-bottom:6px"></div>
     <table>
-      <thead><tr><th>Дата</th><th>Нагрузка: ошибка</th><th>Нагрузка: P10–P90</th><th>Солнце: ошибка</th><th>Солнце: P10–P90</th></tr></thead>
+      <thead><tr><th data-i18n="th_date">Дата</th><th data-i18n="th_load_err">Нагрузка: ошибка</th><th data-i18n="th_load_band">Нагрузка: P10–P90</th><th data-i18n="th_pv_err">Солнце: ошибка</th><th data-i18n="th_pv_band">Солнце: P10–P90</th></tr></thead>
       <tbody id="metrics"></tbody>
     </table>
   </div>
 
   <div class="card full">
-    <h3>История рекомендаций</h3>
+    <h3 data-i18n="history_title" data-hint="hint_history">История рекомендаций</h3>
     <table>
-      <thead><tr><th>Дата</th><th>Пол</th><th>Тогда был</th><th>Δ</th><th>Резерв</th><th>Повышен до</th></tr></thead>
+      <thead><tr><th data-i18n="th_date">Дата</th><th data-i18n="th_floor">Пол</th><th data-i18n="th_then">Тогда был</th><th>Δ</th><th data-i18n="th_reserve">Резерв</th><th data-i18n="th_raised_until">Повышен до</th></tr></thead>
       <tbody id="history"></tbody>
     </table>
   </div>
@@ -215,8 +217,327 @@
 
 <script src="vendor/echarts.min.js"></script>
 <script>
+// UI language: the switch in the header, persisted in localStorage. Server
+// payloads carry both label/hint and label_en/hint_en; report texts
+// (notification, advisory reasons) are generated on the server and stay
+// Russian for now.
+const I18N = {
+  ru: {
+    title: "Теневой план батареи",
+    badge_shadow: "только советует · в инвертор не пишет",
+    badge_apply: "⚡ применяет план в инвертор",
+    btn_backfill: "Загрузить историю", btn_backfilling: "Загружаю историю…",
+    btn_retrain: "Переобучить модели", btn_retraining: "Обучаю…",
+    btn_recalc: "Пересчитать сейчас", btn_recalcing: "Считаю…",
+    btn_save: "Сохранить", btn_saving: "Сохраняю…",
+    no_reports: "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас».",
+    ents_title: "Проверка и настройка сущностей",
+    ents_problems: "— проблем: {n}", ents_ok: "— все на месте",
+    th_param: "Параметр", th_entity: "Сущность", th_value: "Значение", th_status: "Статус",
+    opts_title: "Настройки аддона",
+    opts_note: "— то же, что на странице конфигурации аддона, с подсказками",
+    opts_deferrable: "Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.",
+    save_failed: "Не сохранилось: ", saved_rejected: "Сохранено, но эти ключи отклонены: ",
+    card_rec: "Рекомендуемый пол SOC", card_load: "Нагрузка, 24 ч",
+    card_pv: "Солнце, 24 ч", card_res: "Резерв отключений",
+    day_title: "Солнце и батарея по часам",
+    day_hatch_legend: "штриховка — урезано: батарея была полной, панели могли больше",
+    day_legend_note: "легенда графика кликабельна · масштаб: Ctrl+колесо или щипок",
+    floor_title: "Пол SOC по часам (плавающий)",
+    opt_title: "Оптимальный план (MILP-оптимизатор)",
+    zones_title: "Зоны TOU инвертора",
+    th_zone: "Зона", th_start: "Старт", th_cur_soc: "Текущий SOC",
+    th_floor_heur: "Пол (эвристика)", th_optimizer: "Оптимизатор",
+    learn_title: "Самообучение и автонастройка",
+    th_what: "Что", th_learned: "Выучено по данным", th_state: "Состояние",
+    flex_title: "Переносимые нагрузки — когда включать",
+    th_load: "Нагрузка", th_window: "Окно", th_on_sun: "На солнце", th_from_curtailment: "Из усечения",
+    gc_title: "Заряд из сети по зонам",
+    th_now: "Сейчас", th_needed: "Нужно", th_why: "Почему",
+    daily_title: "Суточные данные, 14 дней (кВт·ч)",
+    th_date: "Дата", th_consumption: "Потребление", th_pv_fact: "Солнце факт",
+    th_curtailment_loss: "Потери усечения", th_batt_charge: "Заряд АКБ",
+    th_batt_discharge: "Разряд АКБ", th_from_grid: "Из сети",
+    th_min_soc: "Мин. SOC", th_grid_down: "Сеть вниз, ч",
+    metrics_title: "Точность прогнозов (факт vs P50)",
+    th_load_err: "Нагрузка: ошибка", th_load_band: "Нагрузка: P10–P90",
+    th_pv_err: "Солнце: ошибка", th_pv_band: "Солнце: P10–P90",
+    history_title: "История рекомендаций",
+    th_floor: "Пол", th_then: "Тогда был", th_reserve: "Резерв", th_raised_until: "Повышен до",
+    st_running: "⏳ идёт расчёт…",
+    st_next_run: "следующий расчёт: {v}", st_audit_rows: "строк аудита: {v}",
+    st_history_loaded: "история загружена: {got} ({at})",
+    st_stats_unavailable: " · статистика недоступна",
+    st_got_recorder: "{n} ч подробной истории", st_got_stats: " + {n} ч долгосрочной статистики",
+    st_retrain_off: "переобучение: выключено в настройках",
+    st_retrained: "переобучено: {v}", st_next_retrain: "следующее переобучение: {v}",
+    st_retrain_next: "переобучение: при следующем расчёте",
+    st_models: "модели: {v}", st_retrain_failed: "⚠️ переобучение не удалось: {v}",
+    word_updated: "обновлена", word_kept: "оставлена текущая",
+    model_load: "нагрузка", model_pv: "солнце",
+    last_error: "Ошибка последнего расчёта:",
+    metrics_avg: "Среднее за {n} дн.: {v}",
+    metrics_empty: "Метрики появятся на следующий день после первого прогноза с почасовыми данными.",
+    metrics_load_mae: "нагрузка ±{v} кВт·ч/день", metrics_pv_mae: "солнце ±{v} кВт·ч/день",
+    metrics_coverage: "покрытие {v}%",
+    daily_curtail_noest: "{h} ч, нет оценки",
+    ent_ok_number: "число вручную", ent_skipped: "не задано", ent_missing: "не найдена",
+    ent_not_numeric: "не число", ent_unexpected: "странное значение",
+    ent_placeholder: "sensor.… или число",
+    autotag: "авто · {v}",
+    curfloor: "сейчас {cur} · батарея {batt}%",
+    loadband: "P10 {p10} … P90 {p90}",
+    pv_p10: "пессимистично P10 {v} кВт·ч",
+    pv_unavailable: "прогноз недоступен — считаем 0",
+    res_line: "критическая {kw} кВт × {h} ч", res_raised: " · повышен до {v}",
+    zone_n: "Зона {n}", no_change: "без изменений", no_change_val: "без изменений ({v}%)",
+    pp: " п.п.",
+    period_line: "План от <b>{start}</b> · пол и резерв — на <b>{h0}–{h1}</b> · нагрузка и солнце — за 24 ч: <b>{startD} → {endD}</b>",
+    hh_forecast: "прогноз", hh_none: "нет", hh_actual: "факт", hh_now: "сейчас",
+    hh_throttled: " — урезано: батарея была полной, панели могли больше",
+    hh_soc: "SOC", hh_soc_plan: "план SOC",
+    ser_forecast: "Прогноз", ser_band: "Коридор P10–P90", ser_actual: "Факт",
+    ser_soc_actual: "Заряд, факт", ser_soc_plan: "Заряд, план",
+    ser_charge_plan: "Заряд по плану", ser_floor: "Пол (резерв)", ser_floor_soc: "Пол SOC",
+    mark_now: "сейчас",
+    day_forecast: "прогноз {v} кВт·ч", day_produced: " · выработано {v} кВт·ч",
+    day_ahead: " · ещё ожидается ~{v} кВт·ч",
+    learn_priority: "Приоритет: {v}",
+    prio_resilience: "надёжность", prio_balanced: "баланс", prio_economy: "экономия",
+    learn_outages_live: "отключения: серия идёт, запас сверх резерва {v}",
+    learn_outages_quiet: "отключения: тишина, резерв не держим",
+    learn_autonomy: " · автономия сейчас ~{v} ч",
+    learn_autotune_applied: "применено — {v}", learn_autotune_on: "включена",
+    learn_autotune_off: "выключена (только совет)", learn_autotune: "автонастройка: {v}",
+    calib_window: " · калибровка BMS: заряд до 100% в {v}",
+    calib_next: " · калибровка BMS: полный заряд {d} дн. назад, следующая через {left} дн.",
+    learn_row_load: "Прогноз нагрузки", learn_row_pv: "Прогноз солнца",
+    learn_shift_load: "сдвиг {v} кВт·ч/сутки", learn_corridor: ", коридор ×{lo}/×{hi}",
+    learn_collecting: "копит данные ({n} пар)", learn_coverage: "охват P10–P90 {a} → {b}",
+    learn_drift: "Дрейф моделей", learn_drift_state: "переобучение раньше срока",
+    learn_battery: "Батарея", learn_battery_ok: "{kwh} кВт·ч, КПД цикла {eff}",
+    learn_battery_cycles: "по {n} циклам", learn_battery_since: " с {date} (смена батареи)",
+    learn_battery_change: "смена батареи {date} — копит циклы новой",
+    learn_battery_few: "мало глубоких циклов",
+    learn_panels: "Панели", learn_panels_geom: "{kwp} кВтп, наклон {tilt}°, азимут {az}°",
+    learn_panels_unreliable: "ненадёжно: {reason}", learn_panels_mae: "ошибка {v} кВт",
+    learn_batt_power: "Мощность АКБ", learn_batt_power_val: "заряд до {c} кВт, разряд до {d} кВт",
+    learn_observed: "наблюдалось",
+    learn_tuning: "Подбор запаса на истории ({n} сут)",
+    learn_tuning_cell: "запас {m}: {unserved} / {curtailed} кВт·ч / {cost}",
+    learn_tuning_legend: "недоданная критическая / усечение / стоимость",
+    learn_tuning_empty: "Подбор на истории", learn_tuning_nodata: "ещё нет данных",
+    margin_hours: "+{v} ч",
+    gc_on: "вкл", gc_off: "выкл",
+    opt_status: "статус: {v}", opt_cost: "стоимость дня {v}", opt_baseline: "без батареи {v}",
+    opt_savings: "экономия {v}", opt_night_charge: "ночная зарядка из сети {v} кВт·ч",
+    opt_night_margin: " (запас под сценарий приоритета {v})",
+    opt_night_scenario: "ночь рассчитана на солнце {pv} и нагрузку {load}",
+    opt_floor_relaxed: "⚠️ пол смягчён до минимума — прогноз не достигает резерва",
+    floor_range: "диапазон суток {lo}–{hi}%", floor_risk: " · окно риска отключений: {v} ч",
+    no_data: "нет данных",
+    choice_ladder: "ladder — лестница", choice_flat: "flat — плоский пол",
+    choice_resilience: "resilience — надёжность", choice_balanced: "balanced — баланс",
+    choice_economy: "economy — экономия",
+    time_placeholder: "ЧЧ:ММ",
+    hint_rec: "Ниже этого заряда батарею сейчас лучше не разряжать: минимальный SOC плюс резерв на случай, если свет выключат в этот час. Днём солнце покрывает часть отключения, поэтому днём пол ниже, чем вечером. Значок справа — разница с порогом, который стоит сейчас.",
+    hint_load: "Сколько дом потребит за 24 часа от начала плана (медианный прогноз P50). P10…P90 — коридор: в 8 случаях из 10 факт попадает между ними.",
+    hint_pv: "Сколько дадут панели за 24 часа от начала плана (P50). P10 — пессимистичный вариант: хуже бывает в 1 случае из 10. По нему считается запас ночного заряда.",
+    hint_res: "Энергия, которую батарея держит на случай отключения: нагрузка дома во время отключений × длительность отключений текущей серии. Если 14 дней отключений не было, резерва нет (кроме минимальной автономии, если вы её задали).",
+    hint_day: "Жёлтое — прогноз выработки панелей по часам, бледная полоса — коридор P10–P90. Зелёное — сколько панели дали на самом деле (в среднем за час; в текущем часу — мгновенная мощность). Штриховка — час, когда батарея была полной и инвертор урезал панели: там зелёное ниже жёлтого не из-за ошибки прогноза. Ниже — заряд батареи: сплошная линия — факт, пунктир — план оптимизатора. Наведите на час — подробности.",
+    hint_floor: "Резерв на отключение по часам: высота столбика — ниже какого заряда не опускаться в этот час. Наведите на столбик, чтобы увидеть час и значение.",
+    hint_opt: "Заряд батареи по часам в оптимальном плане на 48 часов: когда заряжать из сети по дешёвому тарифу и когда тратить. Наведите на столбик — час и SOC.",
+    hint_zones: "Программы инвертора по времени. Batt% зоны — это и нижний порог разряда, и цель заряда из сети, если в зоне включён заряд из сети.",
+    hint_cur_soc: "Batt% зоны, который сейчас стоит в инверторе.",
+    hint_floor_heur: "Минимум для зоны по резерву на отключения, без учёта цен.",
+    hint_optimizer: "Что поставит оптимизатор: ночной зоне — цель заряда, дорогим зонам — нижний порог (минимальный SOC плюс резерв).",
+    hint_learn: "Что аддон выучил по вашим данным: поправки прогнозов, ёмкость и лимиты батареи, подобранный запас.",
+    hint_flex: "Лучшее время запуска нагрузок, которые можно сдвигать (бойлер, стирка): когда больше всего солнца.",
+    hint_from_curt: "Сколько нагрузка взяла бы из солнца, которое иначе срезалось бы при полной батарее.",
+    hint_gc: "Включать ли в зоне заряд батареи из сети: в дешёвые часы — да, в дорогие — только если батарея ниже резерва.",
+    hint_daily: "Что было на самом деле по дням, из истории Home Assistant.",
+    hint_curt_loss: "Солнце, которое панели могли дать, но инвертор срезал: батарея была полной, а экспорта в сеть нет.",
+    hint_min_soc: "Самый низкий заряд батареи за сутки.",
+    hint_grid_down: "Сколько часов за сутки не было сети.",
+    hint_metrics: "Насколько медианный прогноз промахнулся по дням и попадал ли факт в коридор P10–P90.",
+    hint_history: "Какой пол аддон рекомендовал в прошлые дни и какой тогда стоял на инверторе.",
+  },
+  en: {
+    title: "Battery shadow plan",
+    badge_shadow: "advisory only · never writes to the inverter",
+    badge_apply: "⚡ applies the plan to the inverter",
+    btn_backfill: "Backfill history", btn_backfilling: "Backfilling…",
+    btn_retrain: "Retrain models", btn_retraining: "Training…",
+    btn_recalc: "Recalculate now", btn_recalcing: "Calculating…",
+    btn_save: "Save", btn_saving: "Saving…",
+    no_reports: "No reports yet — the first run happens on schedule or via «Recalculate now».",
+    ents_title: "Entity check and setup",
+    ents_problems: "— problems: {n}", ents_ok: "— all present",
+    th_param: "Parameter", th_entity: "Entity", th_value: "Value", th_status: "Status",
+    opts_title: "Add-on settings",
+    opts_note: "— the same as the add-on configuration page, with hints",
+    opts_deferrable: "Flexible loads (deferrable_loads) are edited on the add-on configuration page — a list of objects does not fit here.",
+    save_failed: "Save failed: ", saved_rejected: "Saved, but these keys were rejected: ",
+    card_rec: "Recommended SOC floor", card_load: "Load, 24 h",
+    card_pv: "Solar, 24 h", card_res: "Outage reserve",
+    day_title: "Solar and battery by hour",
+    day_hatch_legend: "hatching — clipped: the battery was full, the panels could give more",
+    day_legend_note: "the chart legend is clickable · zoom: Ctrl+wheel or pinch",
+    floor_title: "SOC floor by hour (floating)",
+    opt_title: "Optimal plan (MILP optimizer)",
+    zones_title: "Inverter TOU zones",
+    th_zone: "Zone", th_start: "Start", th_cur_soc: "Current SOC",
+    th_floor_heur: "Floor (heuristic)", th_optimizer: "Optimizer",
+    learn_title: "Self-learning and autotune",
+    th_what: "What", th_learned: "Learned from data", th_state: "State",
+    flex_title: "Flexible loads — when to run",
+    th_load: "Load", th_window: "Window", th_on_sun: "On solar", th_from_curtailment: "From clipping",
+    gc_title: "Grid charging by zone",
+    th_now: "Now", th_needed: "Needed", th_why: "Why",
+    daily_title: "Daily data, 14 days (kWh)",
+    th_date: "Date", th_consumption: "Consumption", th_pv_fact: "Solar actual",
+    th_curtailment_loss: "Clipping loss", th_batt_charge: "Battery charge",
+    th_batt_discharge: "Battery discharge", th_from_grid: "From grid",
+    th_min_soc: "Min SOC", th_grid_down: "Grid down, h",
+    metrics_title: "Forecast accuracy (actual vs P50)",
+    th_load_err: "Load: error", th_load_band: "Load: P10–P90",
+    th_pv_err: "Solar: error", th_pv_band: "Solar: P10–P90",
+    history_title: "Recommendation history",
+    th_floor: "Floor", th_then: "Then was", th_reserve: "Reserve", th_raised_until: "Raised until",
+    st_running: "⏳ calculating…",
+    st_next_run: "next run: {v}", st_audit_rows: "audit rows: {v}",
+    st_history_loaded: "history loaded: {got} ({at})",
+    st_stats_unavailable: " · statistics unavailable",
+    st_got_recorder: "{n} h of detailed history", st_got_stats: " + {n} h of long-term statistics",
+    st_retrain_off: "retraining: disabled in settings",
+    st_retrained: "retrained: {v}", st_next_retrain: "next retrain: {v}",
+    st_retrain_next: "retraining: on the next run",
+    st_models: "models: {v}", st_retrain_failed: "⚠️ retraining failed: {v}",
+    word_updated: "updated", word_kept: "kept the current one",
+    model_load: "load", model_pv: "solar",
+    last_error: "Last run error:",
+    metrics_avg: "Average over {n} d.: {v}",
+    metrics_empty: "Metrics appear the day after the first forecast with hourly data.",
+    metrics_load_mae: "load ±{v} kWh/day", metrics_pv_mae: "solar ±{v} kWh/day",
+    metrics_coverage: "coverage {v}%",
+    daily_curtail_noest: "{h} h, no estimate",
+    ent_ok_number: "manual number", ent_skipped: "not set", ent_missing: "not found",
+    ent_not_numeric: "not numeric", ent_unexpected: "unexpected value",
+    ent_placeholder: "sensor.… or a number",
+    autotag: "auto · {v}",
+    curfloor: "now {cur} · battery {batt}%",
+    loadband: "P10 {p10} … P90 {p90}",
+    pv_p10: "pessimistic P10 {v} kWh",
+    pv_unavailable: "forecast unavailable — assuming 0",
+    res_line: "critical {kw} kW × {h} h", res_raised: " · raised until {v}",
+    zone_n: "Zone {n}", no_change: "no change", no_change_val: "no change ({v}%)",
+    pp: " pp",
+    period_line: "Plan from <b>{start}</b> · floor and reserve for <b>{h0}–{h1}</b> · load and solar over 24 h: <b>{startD} → {endD}</b>",
+    hh_forecast: "forecast", hh_none: "none", hh_actual: "actual", hh_now: "now",
+    hh_throttled: " — clipped: the battery was full, the panels could give more",
+    hh_soc: "SOC", hh_soc_plan: "plan SOC",
+    ser_forecast: "Forecast", ser_band: "P10–P90 corridor", ser_actual: "Actual",
+    ser_soc_actual: "Charge, actual", ser_soc_plan: "Charge, plan",
+    ser_charge_plan: "Planned charge", ser_floor: "Floor (reserve)", ser_floor_soc: "SOC floor",
+    mark_now: "now",
+    day_forecast: "forecast {v} kWh", day_produced: " · produced {v} kWh",
+    day_ahead: " · still expected ~{v} kWh",
+    learn_priority: "Priority: {v}",
+    prio_resilience: "resilience", prio_balanced: "balanced", prio_economy: "economy",
+    learn_outages_live: "outages: series in progress, margin above the reserve {v}",
+    learn_outages_quiet: "outages: quiet, no reserve held",
+    learn_autonomy: " · autonomy now ~{v} h",
+    learn_autotune_applied: "applied — {v}", learn_autotune_on: "on",
+    learn_autotune_off: "off (advice only)", learn_autotune: "autotune: {v}",
+    calib_window: " · BMS calibration: charge to 100% at {v}",
+    calib_next: " · BMS calibration: last full charge {d} d. ago, next in {left} d.",
+    learn_row_load: "Load forecast", learn_row_pv: "Solar forecast",
+    learn_shift_load: "shift {v} kWh/day", learn_corridor: ", corridor ×{lo}/×{hi}",
+    learn_collecting: "collecting data ({n} pairs)", learn_coverage: "P10–P90 coverage {a} → {b}",
+    learn_drift: "Model drift", learn_drift_state: "retraining ahead of schedule",
+    learn_battery: "Battery", learn_battery_ok: "{kwh} kWh, cycle efficiency {eff}",
+    learn_battery_cycles: "from {n} cycles", learn_battery_since: " since {date} (battery change)",
+    learn_battery_change: "battery changed {date} — collecting cycles of the new one",
+    learn_battery_few: "too few deep cycles",
+    learn_panels: "Panels", learn_panels_geom: "{kwp} kWp, tilt {tilt}°, azimuth {az}°",
+    learn_panels_unreliable: "unreliable: {reason}", learn_panels_mae: "error {v} kW",
+    learn_batt_power: "Battery power", learn_batt_power_val: "charge up to {c} kW, discharge up to {d} kW",
+    learn_observed: "observed",
+    learn_tuning: "Margin tuning on history ({n} d)",
+    learn_tuning_cell: "margin {m}: {unserved} / {curtailed} kWh / {cost}",
+    learn_tuning_legend: "unserved critical / clipping / cost",
+    learn_tuning_empty: "History tuning", learn_tuning_nodata: "no data yet",
+    margin_hours: "+{v} h",
+    gc_on: "on", gc_off: "off",
+    opt_status: "status: {v}", opt_cost: "day cost {v}", opt_baseline: "without battery {v}",
+    opt_savings: "savings {v}", opt_night_charge: "night grid charging {v} kWh",
+    opt_night_margin: " (margin for the priority scenario {v})",
+    opt_night_scenario: "the night is sized for sun {pv} and load {load}",
+    opt_floor_relaxed: "⚠️ floor relaxed to the minimum — the forecast cannot reach the reserve",
+    floor_range: "day range {lo}–{hi}%", floor_risk: " · outage risk window: {v} h",
+    no_data: "no data",
+    choice_ladder: "ladder — hourly ladder", choice_flat: "flat — flat floor",
+    choice_resilience: "resilience — resilience", choice_balanced: "balanced — balanced",
+    choice_economy: "economy — economy",
+    time_placeholder: "HH:MM",
+    hint_rec: "Below this charge the battery should not discharge now: the minimum SOC plus the reserve in case the grid fails this hour. During the day solar covers part of an outage, so the floor is lower than in the evening. The chip on the right is the difference from the threshold currently set.",
+    hint_load: "How much the house will consume over 24 hours from the plan start (median forecast P50). P10…P90 is the corridor: in 8 cases out of 10 the actual value falls between them.",
+    hint_pv: "How much the panels will produce over 24 hours from the plan start (P50). P10 is the pessimistic case: worse happens 1 time in 10. The night charge margin is sized by it.",
+    hint_res: "Energy the battery keeps for an outage: house load during outages × the outage durations of the current series. If there were no outages for 14 days, there is no reserve (except the minimum autonomy if you set one).",
+    hint_day: "Yellow — forecast panel output by hour, the pale band is the P10–P90 corridor. Green — what the panels actually produced (hourly average; instantaneous power in the current hour). Hatching — an hour when the battery was full and the inverter clipped the panels: green below yellow there is not a forecast error. Below — battery charge: solid line is actual, dashed is the optimizer plan. Hover an hour for details.",
+    hint_floor: "Outage reserve by hour: the height is the charge level not to discharge below this hour. Hover a bar to see the hour and value.",
+    hint_opt: "Battery charge by hour in the optimal 48-hour plan: when to charge from the grid at the cheap price and when to spend. Hover a bar — hour and SOC.",
+    hint_zones: "Inverter time-of-use programs. A zone's Batt% is both the lower discharge threshold and the grid-charge target when grid charging is enabled in the zone.",
+    hint_cur_soc: "The zone Batt% currently set in the inverter.",
+    hint_floor_heur: "The zone minimum from the outage reserve, ignoring prices.",
+    hint_optimizer: "What the optimizer will set: the night zone gets the charge target, expensive zones get the floor (minimum SOC plus reserve).",
+    hint_learn: "What the add-on learned from your data: forecast corrections, battery capacity and limits, the tuned margin.",
+    hint_flex: "Best time to start loads that can be shifted (water heater, washer): when the sun is strongest.",
+    hint_from_curt: "How much the load would take from solar that would otherwise be clipped at a full battery.",
+    hint_gc: "Whether to enable battery grid charging in a zone: in cheap hours — yes, in expensive ones — only if the battery is below the reserve.",
+    hint_daily: "What actually happened by day, from the Home Assistant history.",
+    hint_curt_loss: "Solar the panels could have produced but the inverter clipped: the battery was full and there is no grid export.",
+    hint_min_soc: "The lowest battery charge of the day.",
+    hint_grid_down: "How many hours of the day had no grid.",
+    hint_metrics: "How far the median forecast missed by day and whether the actual value fell inside the P10–P90 corridor.",
+    hint_history: "Which floor the add-on recommended on past days and which one was set on the inverter then.",
+  },
+};
+const UNITS_EN = {"дн.": "days", "ч": "h", "мин": "min", "кВт·ч": "kWh", "кВт": "kW", "кВтп": "kWp"};
+
+let LANG = localStorage.getItem("shadow_lang") ||
+  ((navigator.language || "ru").toLowerCase().startsWith("ru") ? "ru" : "en");
+
+function t(key, vars) {
+  let s = (I18N[LANG] && I18N[LANG][key]) ?? I18N.ru[key] ?? key;
+  if (vars) for (const k in vars) s = s.replaceAll("{" + k + "}", vars[k]);
+  return s;
+}
+const locale = () => LANG === "ru" ? "ru-RU" : "en-GB";
+// Bilingual server payload field: row.label_en under EN, else row.label.
+const pick = (obj, base) => (LANG === "en" && obj[base + "_en"]) || obj[base];
+const unit = u => LANG === "en" ? (UNITS_EN[u] || u) : u;
+
+function applyStatic() {
+  document.documentElement.lang = LANG;
+  document.title = t("title");
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.getElementById("langbtn").textContent = LANG === "ru" ? "EN" : "RU";
+  const badge = document.getElementById("modebadge");
+  if (!badge.dataset.applied) badge.textContent = t("badge_shadow");
+  refreshHints();
+}
+
+function switchLang() {
+  LANG = LANG === "ru" ? "en" : "ru";
+  localStorage.setItem("shadow_lang", LANG);
+  applyStatic();
+  load();
+  loadSetup();
+}
+
 const pct = v => Math.round(v * 100) + "%";
-const pp = v => (v > 0 ? "+" + v : v) + " п.п.";
+const pp = v => (v > 0 ? "+" + v : v) + t("pp");
 
 // The minute refresh reads only the add-on's own files. Entity checks and the
 // options ask Home Assistant / the Supervisor, so they load once (loadSetup)
@@ -235,7 +556,7 @@ async function load() {
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
     if (!latest) { document.getElementById("notice").style.display = "block";
-      document.getElementById("notice").textContent = "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас»."; return; }
+      document.getElementById("notice").textContent = t("no_reports"); return; }
     render(latest);
     renderHistory(history);
   } catch (e) { console.error(e); }
@@ -244,55 +565,55 @@ async function load() {
 function renderStatus(s) {
   const el = document.getElementById("status");
   const parts = [];
-  if (s.running) parts.push("⏳ идёт расчёт…");
-  if (s.next_run) parts.push("следующий расчёт: " + new Date(s.next_run).toLocaleString("ru-RU"));
-  if (s.audit_rows) parts.push("строк аудита: " + s.audit_rows);
+  if (s.running) parts.push(t("st_running"));
+  if (s.next_run) parts.push(t("st_next_run", {v: new Date(s.next_run).toLocaleString(locale())}));
+  if (s.audit_rows) parts.push(t("st_audit_rows", {v: s.audit_rows}));
   if (s.last_backfill) {
     const b = s.last_backfill;
-    const got = (b.recorder_rows ?? b.added_rows ?? 0) + " ч подробной истории" +
-      (b.statistics_rows ? " + " + b.statistics_rows + " ч долгосрочной статистики" : "");
-    parts.push("история загружена: " + got + " (" + new Date(b.at).toLocaleString("ru-RU") + ")" +
-      (b.statistics_error ? " · статистика недоступна" : ""));
+    const got = t("st_got_recorder", {n: (b.recorder_rows ?? b.added_rows ?? 0)}) +
+      (b.statistics_rows ? t("st_got_stats", {n: b.statistics_rows}) : "");
+    parts.push(t("st_history_loaded", {got, at: new Date(b.at).toLocaleString(locale())}) +
+      (b.statistics_error ? t("st_stats_unavailable") : ""));
   }
   if (s.retrain) {
     const r = s.retrain;
-    if (r.enabled === false) parts.push("переобучение: выключено в настройках");
-    if (r.last_retrain_utc) parts.push("переобучено: " + new Date(r.last_retrain_utc).toLocaleString("ru-RU"));
+    if (r.enabled === false) parts.push(t("st_retrain_off"));
+    if (r.last_retrain_utc) parts.push(t("st_retrained", {v: new Date(r.last_retrain_utc).toLocaleString(locale())}));
     if (r.enabled !== false) {
-      if (r.next_retrain_utc) parts.push("следующее переобучение: " + new Date(r.next_retrain_utc).toLocaleDateString("ru-RU"));
-      else parts.push("переобучение: при следующем расчёте");
+      if (r.next_retrain_utc) parts.push(t("st_next_retrain", {v: new Date(r.next_retrain_utc).toLocaleDateString(locale())}));
+      else parts.push(t("st_retrain_next"));
     }
     const m = r.models || {};
-    const word = {promoted: "обновлена", ok: "обновлена", kept: "оставлена текущая"};
-    const told = ["load", "pv"].filter(k => m[k] && word[m[k].status]).map(k =>
-      (k === "load" ? "нагрузка" : "солнце") + " " + word[m[k].status]);
-    if (told.length) parts.push("модели: " + told.join(", "));
+    const told = ["load", "pv"].filter(k => m[k] && ["promoted", "ok", "kept"].includes(m[k].status)).map(k =>
+      t(k === "load" ? "model_load" : "model_pv") + " " +
+      t(m[k].status === "kept" ? "word_kept" : "word_updated"));
+    if (told.length) parts.push(t("st_models", {v: told.join(", ")}));
     const bad = ["load", "pv"].filter(k => m[k] && m[k].status === "failed");
-    if (bad.length) parts.push("⚠️ переобучение не удалось: " + bad.map(k => (k === "load" ? "нагрузка" : "солнце")).join(", "));
+    if (bad.length) parts.push(t("st_retrain_failed", {v: bad.map(k => t(k === "load" ? "model_load" : "model_pv")).join(", ")}));
   }
   el.innerHTML = '<p class="muted" style="margin-bottom:14px">' + parts.join(" · ") + "</p>";
-  if (s.last_error) el.innerHTML += '<div class="notice error">Ошибка последнего расчёта:\n' + s.last_error + "</div>";
+  if (s.last_error) el.innerHTML += '<div class="notice error">' + esc(t("last_error")) + "\n" + esc(s.last_error) + "</div>";
 }
 
 function renderMetrics(m) {
   const avg = m.avg7 || {};
   const bits = [];
-  if (avg.load_mae_kwh != null) bits.push("нагрузка ±" + avg.load_mae_kwh + " кВт·ч/день");
-  if (avg.load_coverage_pct != null) bits.push("покрытие " + avg.load_coverage_pct + "%");
-  if (avg.pv_mae_kwh != null) bits.push("солнце ±" + avg.pv_mae_kwh + " кВт·ч/день");
-  if (avg.pv_coverage_pct != null) bits.push("покрытие " + avg.pv_coverage_pct + "%");
+  if (avg.load_mae_kwh != null) bits.push(t("metrics_load_mae", {v: avg.load_mae_kwh}));
+  if (avg.load_coverage_pct != null) bits.push(t("metrics_coverage", {v: avg.load_coverage_pct}));
+  if (avg.pv_mae_kwh != null) bits.push(t("metrics_pv_mae", {v: avg.pv_mae_kwh}));
+  if (avg.pv_coverage_pct != null) bits.push(t("metrics_coverage", {v: avg.pv_coverage_pct}));
   document.getElementById("metrics-avg").textContent = bits.length
-    ? "Среднее за " + (avg.days || 0) + " дн.: " + bits.join(" · ")
-    : "Метрики появятся на следующий день после первого прогноза с почасовыми данными.";
+    ? t("metrics_avg", {n: (avg.days || 0), v: bits.join(" · ")})
+    : t("metrics_empty");
   const cell = (s, unit, suffix) => s ? (s[unit] + suffix) : "—";
   const cov = s => {
     if (!s) return "—";
     const cls = s.coverage_pct >= 70 ? "arrow" : "";
-    return "<span class='" + cls + "'>" + s.coverage_pct + "%</span> <span class='muted'>(" + s.hours + " ч)</span>";
+    return "<span class='" + cls + "'>" + s.coverage_pct + "%</span> <span class='muted'>(" + s.hours + " h)</span>";
   };
   document.getElementById("metrics").innerHTML = (m.days || []).slice().reverse().map(d =>
-    "<tr><td>" + d.date + "</td><td>" + cell(d.load, "mae_kwh", " кВт·ч") + "</td><td>" + cov(d.load) +
-    "</td><td>" + cell(d.pv, "mae_kwh", " кВт·ч") + "</td><td>" + cov(d.pv) + "</td></tr>"
+    "<tr><td>" + d.date + "</td><td>" + cell(d.load, "mae_kwh", " " + t("unit_kwh")) + "</td><td>" + cov(d.load) +
+    "</td><td>" + cell(d.pv, "mae_kwh", " " + t("unit_kwh")) + "</td><td>" + cov(d.pv) + "</td></tr>"
   ).join("");
 }
 
@@ -300,8 +621,8 @@ function renderDaily(days) {
   const v = x => x == null ? "—" : x;
   document.getElementById("daily").innerHTML = days.slice().reverse().map(d => {
     const loss = d.pv_curtailment_loss_kwh != null
-      ? '<span style="color:var(--warn)">-' + d.pv_curtailment_loss_kwh + "</span> <span class='muted'>(" + d.pv_curtailed_hours + " ч)</span>"
-      : (d.pv_curtailed_hours > 0 ? "<span class='muted'>" + d.pv_curtailed_hours + " ч, нет оценки</span>" : "0");
+      ? '<span style="color:var(--warn)">-' + d.pv_curtailment_loss_kwh + "</span> <span class='muted'>(" + d.pv_curtailed_hours + " h)</span>"
+      : (d.pv_curtailed_hours > 0 ? "<span class='muted'>" + t("daily_curtail_noest", {h: d.pv_curtailed_hours}) + "</span>" : "0");
     return "<tr><td>" + d.date + "</td><td>" + v(d.load_kwh) + "</td><td>" + v(d.pv_measured_kwh) +
       "</td><td>" + loss + "</td><td>" + v(d.battery_charge_kwh) + "</td><td>" + v(d.battery_discharge_kwh) +
       "</td><td>" + v(d.grid_import_kwh) + "</td><td>" + (d.min_soc_pct == null ? "—" : d.min_soc_pct + "%") +
@@ -330,17 +651,17 @@ async function saveEntities() {
   document.querySelectorAll(".entinput").forEach(el => {
     if (el.value.trim() !== el.dataset.original) options[el.dataset.key] = el.value.trim();
   });
-  b.disabled = true; b.textContent = "Сохраняю…";
+  b.disabled = true; b.textContent = t("btn_saving");
   try {
     const r = await fetch("api/config", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({options}),
+      body: JSON.stringify({options, lang: LANG}),
     });
     const resp = await r.json();
-    if (resp.error) alert("Не сохранилось: " + resp.error);
-  } catch (e) { alert("Не сохранилось: " + e); }
-  b.disabled = false; b.textContent = "Сохранить";
+    if (resp.error) alert(t("save_failed") + resp.error);
+  } catch (e) { alert(t("save_failed") + e); }
+  b.disabled = false; b.textContent = t("btn_save");
   loadSetup();
   load();
 }
@@ -351,15 +672,15 @@ function renderEntities(checks) {
   card.style.display = "block";
   const bad = checks.filter(c => ["missing", "not_numeric", "unexpected"].includes(c.status)).length;
   document.getElementById("entssummary").textContent = bad
-    ? "— проблем: " + bad : "— все на месте";
+    ? t("ents_problems", {n: bad}) : t("ents_ok");
   // Collapsed by default: opened automatically only while something is broken.
   if (bad) card.open = true;
   // Don't clobber unsaved edits with the periodic refresh.
   if (document.querySelector(".entinput.changed")) return;
   const label = {
-    ok: ["OK", "var(--good)"], ok_number: ["число вручную", "var(--good)"],
-    skipped: ["не задано", "var(--muted)"], missing: ["не найдена", "var(--bad)"],
-    not_numeric: ["не число", "var(--warn)"], unexpected: ["странное значение", "var(--warn)"],
+    ok: ["OK", "var(--good)"], ok_number: [t("ent_ok_number"), "var(--good)"],
+    skipped: [t("ent_skipped"), "var(--muted)"], missing: [t("ent_missing"), "var(--bad)"],
+    not_numeric: [t("ent_not_numeric"), "var(--warn)"], unexpected: [t("ent_unexpected"), "var(--warn)"],
   };
   const order = {missing: 0, not_numeric: 1, unexpected: 2, ok: 3, ok_number: 3, skipped: 4};
   const rows = checks.slice().sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3));
@@ -368,11 +689,12 @@ function renderEntities(checks) {
     const entityCell = c.key
       ? "<input class='entinput' list='entity-ids' data-key='" + c.key + "' data-original='" +
         (c.entity || "") + "' value='" + (c.entity || "") + "' oninput='onEntityInput()' " +
-        "placeholder='sensor.… или число'>"
+        "placeholder='" + esc(t("ent_placeholder")) + "'>"
       : "<span class='muted'>" + (c.entity || "—") + "</span>";
     const entityWithSource = entityCell + autoTag(c.source);
-    const labelCell = esc(c.label) +
-      (c.hint ? "<div class='opthint ent'>" + esc(c.hint) + "</div>" : "");
+    const hint = pick(c, "hint");
+    const labelCell = esc(pick(c, "label")) +
+      (hint ? "<div class='opthint ent'>" + esc(hint) + "</div>" : "");
     return "<tr><td>" + labelCell + "</td><td>" + entityWithSource + "</td><td>" +
       (c.state == null ? "—" : c.state) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
   }).join("");
@@ -381,18 +703,13 @@ function renderEntities(checks) {
 // Values filled from Home Assistant (not typed by the owner): say where from.
 function autoTag(source) {
   return source && source !== "manual" && source !== "default"
-    ? "<span class='autotag'>авто · " + esc(source) + "</span>" : "";
+    ? "<span class='autotag'>" + esc(t("autotag", {v: source})) + "</span>" : "";
 }
-
-const CHOICE_LABELS = {
-  ladder: "ladder — лестница", flat: "flat — плоский пол",
-  resilience: "resilience — надёжность", balanced: "balanced — баланс", economy: "economy — экономия",
-};
 
 function renderOptions(groups) {
   // Don't clobber unsaved edits with the periodic refresh.
   if (document.querySelector(".optinput.changed")) return;
-  const html = groups.map(g => '<div class="optgroup"><h4>' + esc(g.title) + "</h4>" +
+  const html = groups.map(g => '<div class="optgroup"><h4>' + esc(pick(g, "title")) + "</h4>" +
     g.items.map(item => {
       let input;
       const attrs = "class='optinput' data-key='" + item.key + "' data-type='" + item.type + "'";
@@ -402,7 +719,7 @@ function renderOptions(groups) {
       } else if (item.type === "select") {
         input = "<select " + attrs + " data-original='" + esc(item.value) + "' onchange='onOptionInput()'>" +
           (item.choices || []).map(c => "<option value='" + c + "'" +
-            (c === item.value ? " selected" : "") + ">" + esc(CHOICE_LABELS[c] || c) + "</option>").join("") +
+            (c === item.value ? " selected" : "") + ">" + esc(t("choice_" + c)) + "</option>").join("") +
           "</select>";
       } else if (item.type === "float" || item.type === "int") {
         input = "<input type='number' " + attrs +
@@ -413,12 +730,12 @@ function renderOptions(groups) {
       } else {
         input = "<input type='text' " + attrs + " value='" + esc(item.value ?? "") +
           "' data-original='" + esc(item.value ?? "") + "' oninput='onOptionInput()'" +
-          (item.type === "time" ? " placeholder='ЧЧ:ММ'" : "") + ">";
+          (item.type === "time" ? " placeholder='" + t("time_placeholder") + "'" : "") + ">";
       }
-      const unit = (item.unit ? " <span class='muted'>" + esc(item.unit) + "</span>" : "") + autoTag(item.source);
-      return "<div class='optrow'><div class='optlabel'>" + esc(item.label) + "</div>" +
-        "<div>" + input + unit + "</div>" +
-        "<div class='opthint'>" + esc(item.hint) + "</div></div>";
+      const unitHtml = (item.unit ? " <span class='muted'>" + esc(unit(item.unit)) + "</span>" : "") + autoTag(item.source);
+      return "<div class='optrow'><div class='optlabel'>" + esc(pick(item, "label")) + "</div>" +
+        "<div>" + input + unitHtml + "</div>" +
+        "<div class='opthint'>" + esc(pick(item, "hint")) + "</div></div>";
     }).join("") + "</div>").join("");
   document.getElementById("opts").innerHTML = html;
 }
@@ -440,18 +757,18 @@ async function saveOptions() {
   document.querySelectorAll(".optinput.changed").forEach(el => {
     options[el.dataset.key] = el.type === "checkbox" ? el.checked : el.value.trim();
   });
-  b.disabled = true; b.textContent = "Сохраняю…";
+  b.disabled = true; b.textContent = t("btn_saving");
   try {
     const r = await fetch("api/config", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({options}),
+      body: JSON.stringify({options, lang: LANG}),
     });
     const resp = await r.json();
-    if (resp.error) alert("Не сохранилось: " + resp.error);
+    if (resp.error) alert(t("save_failed") + resp.error);
     else {
       if (resp.rejected && resp.rejected.length)
-        alert("Сохранено, но эти ключи отклонены: " + resp.rejected.join(", "));
+        alert(t("saved_rejected") + resp.rejected.join(", "));
       // Mark edits as persisted so the periodic refresh may re-render.
       document.querySelectorAll(".optinput.changed").forEach(el => {
         el.dataset.original = el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim();
@@ -459,15 +776,15 @@ async function saveOptions() {
       });
       document.getElementById("optssave").style.display = "none";
     }
-  } catch (e) { alert("Не сохранилось: " + e); }
-  b.disabled = false; b.textContent = "Сохранить";
+  } catch (e) { alert(t("save_failed") + e); }
+  b.disabled = false; b.textContent = t("btn_save");
   loadSetup();
   load();
 }
 
 async function backfillNow() {
   const b = document.getElementById("backfill");
-  b.disabled = true; b.textContent = "Загружаю историю…";
+  b.disabled = true; b.textContent = t("btn_backfilling");
   try { await fetch("api/backfill", {method: "POST"}); } catch (e) {}
   let tries = 0;
   const timer = setInterval(async () => {
@@ -475,7 +792,7 @@ async function backfillNow() {
     tries++;
     if (!s.running || tries > 200) {
       clearInterval(timer);
-      b.disabled = false; b.textContent = "Загрузить историю";
+      b.disabled = false; b.textContent = t("btn_backfill");
       load();
     }
   }, 3000);
@@ -483,7 +800,7 @@ async function backfillNow() {
 
 async function retrainNow() {
   const b = document.getElementById("retrain");
-  b.disabled = true; b.textContent = "Обучаю…";
+  b.disabled = true; b.textContent = t("btn_retraining");
   try { await fetch("api/retrain", {method: "POST"}); } catch (e) {}
   let tries = 0;
   const timer = setInterval(async () => {
@@ -491,7 +808,7 @@ async function retrainNow() {
     tries++;
     if (!s.running || tries > 100) {
       clearInterval(timer);
-      b.disabled = false; b.textContent = "Переобучить модели";
+      b.disabled = false; b.textContent = t("btn_retrain");
       load();
     }
   }, 3000);
@@ -501,10 +818,14 @@ function render(r) {
   document.getElementById("content").style.display = "block";
   const badge = document.getElementById("modebadge");
   if (r.apply_mode) {
-    badge.textContent = "⚡ применяет план в инвертор";
+    badge.dataset.applied = "1";
+    badge.textContent = t("badge_apply");
     badge.style.background = "rgba(239,83,80,.18)";
     badge.style.color = "var(--warn)";
     badge.style.borderColor = "var(--warn)";
+  } else {
+    delete badge.dataset.applied;
+    badge.textContent = t("badge_shadow");
   }
   const n = document.getElementById("notice");
   n.style.display = "block"; n.textContent = r.notification;
@@ -515,23 +836,23 @@ function render(r) {
   d.textContent = pp(a.delta_pp);
   d.className = "chip " + (a.delta_pp > 0 ? "up" : a.delta_pp < 0 ? "down" : "same");
   document.getElementById("curfloor").textContent =
-    "сейчас " + pct(a.current_floor_soc) + " · батарея " + r.battery_now_pct + "%";
-  document.getElementById("load").textContent = r.load_forecast_kwh_24h.p50 + " кВт·ч";
+    t("curfloor", {cur: pct(a.current_floor_soc), batt: r.battery_now_pct});
+  document.getElementById("load").textContent = r.load_forecast_kwh_24h.p50 + " " + t("unit_kwh");
   document.getElementById("loadband").textContent =
-    "P10 " + r.load_forecast_kwh_24h.p10 + " … P90 " + r.load_forecast_kwh_24h.p90;
+    t("loadband", {p10: r.load_forecast_kwh_24h.p10, p90: r.load_forecast_kwh_24h.p90});
   document.getElementById("pv").textContent =
-    r.pv_forecast_kwh_24h ? r.pv_forecast_kwh_24h.p50 + " кВт·ч" : "—";
+    r.pv_forecast_kwh_24h ? r.pv_forecast_kwh_24h.p50 + " " + t("unit_kwh") : "—";
   document.getElementById("pvb").textContent =
-    r.pv_forecast_kwh_24h ? "пессимистично P10 " + r.pv_forecast_kwh_24h.p10 + " кВт·ч"
-                        : "прогноз недоступен — считаем 0";
-  document.getElementById("res").textContent = r.reserve.reserve_kwh + " кВт·ч";
+    r.pv_forecast_kwh_24h ? t("pv_p10", {v: r.pv_forecast_kwh_24h.p10})
+                        : t("pv_unavailable");
+  document.getElementById("res").textContent = r.reserve.reserve_kwh + " " + t("unit_kwh");
   document.getElementById("resd").textContent =
-    "критическая " + r.reserve.critical_load_kw + " кВт × " + r.reserve.duration_hours + " ч" +
-    (r.reserve.hold_until_local ? " · повышен до " + r.reserve.hold_until_local : "");
+    t("res_line", {kw: r.reserve.critical_load_kw, h: r.reserve.duration_hours}) +
+    (r.reserve.hold_until_local ? t("res_raised", {v: r.reserve.hold_until_local}) : "");
   const recPct = Math.round(a.recommended_floor_soc * 100);
   const optZones = {};
   if (a.optimizer && a.optimizer.zone_targets)
-    a.optimizer.zone_targets.forEach(t => { optZones[t.n] = t.optimal_soc_pct; });
+    a.optimizer.zone_targets.forEach(tg => { optZones[tg.n] = tg.optimal_soc_pct; });
   document.getElementById("zones").innerHTML = a.programs.map(p => {
     const target = p.recommended_soc_pct != null ? Math.round(p.recommended_soc_pct) : recPct;
     const change = p.soc_pct < target;
@@ -539,10 +860,10 @@ function render(r) {
     const optCell = optT == null ? "—" :
       (Math.abs(optT - p.soc_pct) >= 5
         ? '<span class="arrow">' + (optT > p.soc_pct ? "↑ " : "↓ ") + optT + "%</span>"
-        : "без изменений (" + optT + "%)");
-    return "<tr><td>Зона " + p.n + "</td><td>" + p.from.slice(0, 5) + "</td><td>" +
+        : t("no_change_val", {v: optT}));
+    return "<tr><td>" + t("zone_n", {n: p.n}) + "</td><td>" + p.from.slice(0, 5) + "</td><td>" +
       Math.round(p.soc_pct) + "%</td><td>" +
-      (change ? '<span class="arrow">↑ ' + target + "%</span>" : "без изменений") + "</td><td>" +
+      (change ? '<span class="arrow">↑ ' + target + "%</span>" : t("no_change")) + "</td><td>" +
       optCell + "</td></tr>";
   }).join("");
   renderFloorProfile(a.floor_profile || [], r.outage_risk);
@@ -554,15 +875,14 @@ function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
 
-function marginLabel(m) { return "+" + Math.round(Number(m)) + " ч"; }
-const PRIORITY_LABEL = {resilience: "надёжность", balanced: "баланс", economy: "экономия"};
+function marginLabel(m) { return t("margin_hours", {v: Math.round(Number(m))}); }
 
 function calibrationNote(c) {
   if (!c || !c.enabled) return "";
-  if (c.window_local) return " · калибровка BMS: заряд до 100% в " + c.window_local;
+  if (c.window_local) return t("calib_window", {v: c.window_local});
   if (c.days_since_full == null) return "";
   const left = Math.max(0, c.interval_days - c.days_since_full);
-  return " · калибровка BMS: полный заряд " + c.days_since_full.toFixed(0) + " дн. назад, следующая через " + left.toFixed(0) + " дн.";
+  return t("calib_next", {d: c.days_since_full.toFixed(0), left: left.toFixed(0)});
 }
 
 function share(v) { return v == null ? "—" : Math.round(v * 100) + "%"; }
@@ -571,49 +891,51 @@ function renderLearning(r) {
   const d = r.data || {}, a = r.advisory || {};
   const rows = [];
   const sl = d.self_learning || {};
-  for (const [key, label] of [["load", "Прогноз нагрузки"], ["pv", "Прогноз солнца"]]) {
+  for (const [key, labelKey] of [["load", "learn_row_load"], ["pv", "learn_row_pv"]]) {
     const c = sl[key];
     if (!c) continue;
     const shift = key === "load"
-      ? "сдвиг " + c.hourly.reduce((x, y) => x + y, 0).toFixed(1) + " кВт·ч/сутки"
+      ? t("learn_shift_load", {v: c.hourly.reduce((x, y) => x + y, 0).toFixed(1)})
       : "×" + (c.hourly.filter(f => Math.abs(f - 1) > 1e-9).reduce((x, y, _, arr) => x + y / arr.length, 0) || 1).toFixed(2);
-    rows.push([label, c.active
-      ? shift + ", коридор ×" + c.scale_lo.toFixed(2) + "/×" + c.scale_hi.toFixed(2)
-      : "копит данные (" + c.pairs + " пар)",
-      c.active ? "охват P10–P90 " + share(c.coverage_raw) + " → " + share(c.coverage_calibrated) : "—"]);
+    rows.push([t(labelKey), c.active
+      ? shift + t("learn_corridor", {lo: c.scale_lo.toFixed(2), hi: c.scale_hi.toFixed(2)})
+      : t("learn_collecting", {n: c.pairs}),
+      c.active ? t("learn_coverage", {a: share(c.coverage_raw), b: share(c.coverage_calibrated)}) : "—"]);
   }
-  if (sl.drift && sl.drift.drift) rows.push(["Дрейф моделей", esc(sl.drift.reasons.join(", ")), "переобучение раньше срока"]);
+  if (sl.drift && sl.drift.drift) rows.push([t("learn_drift"), esc(sl.drift.reasons.join(", ")), t("learn_drift_state")]);
   const hw = (d.hardware || {}).learned;
   if (hw) {
     const b = hw.battery || {};
-    const since = b.battery_change ? new Date(b.battery_change.since_utc).toLocaleDateString("ru-RU") : null;
-    if (b.status === "ok") rows.push(["Батарея", b.capacity_kwh.toFixed(1) + " кВт·ч, КПД цикла " + share(b.round_trip_efficiency),
-      "по " + b.n_segments.join("/") + " циклам" + (since ? " с " + since + " (смена батареи)" : "")]);
-    else if (since) rows.push(["Батарея", "смена батареи " + since + " — копит циклы новой", esc(b.status || "—")]);
-    else rows.push(["Батарея", "мало глубоких циклов", esc(b.status || "—")]);
+    const since = b.battery_change ? new Date(b.battery_change.since_utc).toLocaleDateString(locale()) : null;
+    if (b.status === "ok") rows.push([t("learn_battery"), t("learn_battery_ok", {kwh: b.capacity_kwh.toFixed(1), eff: share(b.round_trip_efficiency)}),
+      t("learn_battery_cycles", {n: b.n_segments.join("/")}) + (since ? t("learn_battery_since", {date: since}) : "")]);
+    else if (since) rows.push([t("learn_battery"), t("learn_battery_change", {date: since}), esc(b.status || "—")]);
+    else rows.push([t("learn_battery"), t("learn_battery_few"), esc(b.status || "—")]);
     const g = hw.pv_geometry;
-    if (g) rows.push(["Панели", g.kwp.toFixed(1) + " кВтп, наклон " + g.tilt_deg + "°, азимут " + g.azimuth_deg + "°",
-      g.reliable === false ? "ненадёжно: " + esc(g.reason || "") : "ошибка " + g.mae_kw.toFixed(2) + " кВт"]);
+    if (g) rows.push([t("learn_panels"), t("learn_panels_geom", {kwp: g.kwp.toFixed(1), tilt: g.tilt_deg, az: g.azimuth_deg}),
+      g.reliable === false ? t("learn_panels_unreliable", {reason: esc(g.reason || "")}) : t("learn_panels_mae", {v: g.mae_kw.toFixed(2)})]);
     const l = hw.limits || {};
-    if (l.max_charge_kw) rows.push(["Мощность АКБ", "заряд до " + l.max_charge_kw.toFixed(1) + " кВт, разряд до " + (l.max_discharge_kw || 0).toFixed(1) + " кВт", "наблюдалось"]);
+    if (l.max_charge_kw) rows.push([t("learn_batt_power"), t("learn_batt_power_val", {c: l.max_charge_kw.toFixed(1), d: (l.max_discharge_kw || 0).toFixed(1)}), t("learn_observed")]);
   }
-  const t = d.tuning;
-  if (t && t.best) {
-    const cells = Object.entries(t.candidates).map(([m, v]) => {
-      const best = Number(m) === Number(t.best);
-      return (best ? "<b>" : "") + "запас " + marginLabel(m) + ": " + v.unserved_critical_kwh.toFixed(1) + " / " +
-        v.curtailed_kwh.toFixed(1) + " кВт·ч / " + v.net_cost.toFixed(1) + (best ? "</b>" : "");
+  const tun = d.tuning;
+  if (tun && tun.best) {
+    const cells = Object.entries(tun.candidates).map(([m, v]) => {
+      const best = Number(m) === Number(tun.best);
+      return (best ? "<b>" : "") + t("learn_tuning_cell", {m: marginLabel(m), unserved: v.unserved_critical_kwh.toFixed(1),
+        curtailed: v.curtailed_kwh.toFixed(1), cost: v.net_cost.toFixed(1)}) + (best ? "</b>" : "");
     });
-    rows.push(["Подбор запаса на истории (" + t.windows + " сут)", cells.join("<br>"), "недоданная критическая / усечение / стоимость"]);
-  } else if (t) rows.push(["Подбор на истории", "ещё нет данных", esc(t.reason || "")]);
+    rows.push([t("learn_tuning", {n: tun.windows}), cells.join("<br>"), t("learn_tuning_legend")]);
+  } else if (tun) rows.push([t("learn_tuning_empty"), t("learn_tuning_nodata"), esc(tun.reason || "")]);
   const applied = (d.hardware || {}).applied || [];
   const auto = (d.hardware || {}).autotune;
   const regime = (r.reserve || {}).regime || {};
+  const prioKey = "prio_" + (d.priority_mode || "");
+  const prioText = (I18N[LANG][prioKey] || I18N.ru[prioKey]) ? t(prioKey) : (d.priority_mode || "—");
   document.getElementById("learnnote").textContent =
-    "Приоритет: " + (PRIORITY_LABEL[d.priority_mode] || d.priority_mode || "—") +
-    " · отключения: " + (regime.active ? "серия идёт, запас сверх резерва " + marginLabel(d.reserve_margin_hours || 0) : "тишина, резерв не держим") +
-    (a.autonomy_hours != null ? " · автономия сейчас ~" + a.autonomy_hours.toFixed(1) + " ч" : "") +
-    " · автонастройка: " + (auto ? (applied.length ? "применено — " + applied.join(", ") : "включена") : "выключена (только совет)") +
+    t("learn_priority", {v: prioText}) +
+    " · " + (regime.active ? t("learn_outages_live", {v: marginLabel(d.reserve_margin_hours || 0)}) : t("learn_outages_quiet")) +
+    (a.autonomy_hours != null ? t("learn_autonomy", {v: a.autonomy_hours.toFixed(1)}) : "") +
+    " · " + t("learn_autotune", {v: auto ? (applied.length ? t("learn_autotune_applied", {v: applied.join(", ")}) : t("learn_autotune_on")) : t("learn_autotune_off")}) +
     calibrationNote(d.calibration);
   document.getElementById("learn").innerHTML = rows.map(([w, v, s]) =>
     "<tr><td>" + w + "</td><td>" + v + "</td><td>" + s + "</td></tr>").join("");
@@ -624,50 +946,50 @@ function renderLearning(r) {
   document.getElementById("flex").innerHTML = flex.map(f => "<tr><td>" + esc(f.name) + "</td><td>" +
     (f.start_local ? esc(f.start_local) + "–" + esc(f.end_local) : esc(f.reason || "—")) + "</td><td>" +
     (f.start_local ? share(f.solar_share) : "—") + "</td><td>" +
-    (f.start_local ? f.free_solar_kwh.toFixed(1) + " кВт·ч" : "—") + "</td></tr>").join("");
+    (f.start_local ? f.free_solar_kwh.toFixed(1) + " " + t("unit_kwh") : "—") + "</td></tr>").join("");
 
   const gc = a.grid_charge || [];
   document.getElementById("gcwrap").style.display = gc.length ? "block" : "none";
-  document.getElementById("gc").innerHTML = gc.map(g => "<tr><td>Зона " + g.n + "</td><td>" +
-    esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? (g.desired ? "вкл" : "выкл")) + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
+  document.getElementById("gc").innerHTML = gc.map(g => "<tr><td>" + t("zone_n", {n: g.n}) + "</td><td>" +
+    esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? t(g.desired ? "gc_on" : "gc_off")) + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
 }
 
 function renderOptimizer(opt, profile, r) {
   const card = document.getElementById("optcard");
   if (!opt) { card.style.display = "none"; return; }
   card.style.display = "block";
-  const bits = ["статус: " + opt.status];
-  if (opt.cost_plan != null) bits.push("стоимость дня " + opt.cost_plan);
-  if (opt.cost_baseline != null) bits.push("без батареи " + opt.cost_baseline);
-  if (opt.savings != null) bits.push("экономия " + opt.savings);
+  const bits = [t("opt_status", {v: opt.status})];
+  if (opt.cost_plan != null) bits.push(t("opt_cost", {v: opt.cost_plan}));
+  if (opt.cost_baseline != null) bits.push(t("opt_baseline", {v: opt.cost_baseline}));
+  if (opt.savings != null) bits.push(t("opt_savings", {v: opt.savings}));
   if (opt.tariff_enabled && opt.grid_charge_kwh_cheap >= 0.3)
-    bits.push("ночная зарядка из сети " + opt.grid_charge_kwh_cheap + " кВт·ч" +
-      (opt.night_margin_kwh >= 0.3 ? " (запас под сценарий приоритета " + opt.night_margin_kwh + ")" : ""));
+    bits.push(t("opt_night_charge", {v: opt.grid_charge_kwh_cheap}) +
+      (opt.night_margin_kwh >= 0.3 ? t("opt_night_margin", {v: opt.night_margin_kwh}) : ""));
   if (opt.tariff_enabled && opt.night_scenario)
-    bits.push("ночь рассчитана на солнце " + opt.night_scenario.pv.toUpperCase() +
-      " и нагрузку " + opt.night_scenario.load.toUpperCase());
-  if (opt.floor_relaxed) bits.push("⚠️ пол смягчён до минимума — прогноз не достигает резерва");
+    bits.push(t("opt_night_scenario", {pv: opt.night_scenario.pv.toUpperCase(),
+      load: opt.night_scenario.load.toUpperCase()}));
+  if (opt.floor_relaxed) bits.push(t("opt_floor_relaxed"));
   document.getElementById("optnote").textContent = bits.join(" · ");
   const tz = (r.site && r.site.time_zone) || undefined;
   const start = Date.parse(r.issue_utc);
-  const labels = opt.soc_opt.map((_, i) => new Date(start + i * 3600e3).toLocaleString("ru-RU",
+  const labels = opt.soc_opt.map((_, i) => new Date(start + i * 3600e3).toLocaleString(locale(),
     {timeZone: tz, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}));
   const floor = opt.soc_opt.map((_, i) => profile[i] ? Math.round(profile[i].floor_soc * 100) : null);
   chartOf("optchart").setOption({
     animationDurationUpdate: 600,
     grid: {left: 44, right: 16, top: 30, bottom: 28},
-    legend: legendStyle(["Заряд по плану", "Пол (резерв)"]),
+    legend: legendStyle([t("ser_charge_plan"), t("ser_floor")]),
     tooltip: Object.assign({trigger: "axis"}, TOOLTIP, {valueFormatter: v => v == null ? "—" : v + "%"}),
     xAxis: Object.assign(axisX(labels), {axisLabel: {color: EC.ink, interval: 5,
       formatter: v => v.slice(-5)}}),
     yAxis: axisY(0, 100, "%"),
     series: [
-      {name: "Заряд по плану", type: "line", smooth: 0.3, showSymbol: false,
+      {name: t("ser_charge_plan"), type: "line", smooth: 0.3, showSymbol: false,
        data: opt.soc_opt.map(v => Math.round(v * 100)),
        lineStyle: {width: 2, color: EC.soc}, itemStyle: {color: EC.soc},
        areaStyle: {color: new echarts.graphic.LinearGradient(0, 0, 0, 1,
          [{offset: 0, color: "rgba(57,135,229,.35)"}, {offset: 1, color: "rgba(57,135,229,0)"}])}},
-      {name: "Пол (резерв)", type: "line", step: "middle", showSymbol: false, data: floor,
+      {name: t("ser_floor"), type: "line", step: "middle", showSymbol: false, data: floor,
        lineStyle: {width: 2, type: "dashed", color: EC.ink}, itemStyle: {color: EC.ink}},
     ],
   });
@@ -675,7 +997,7 @@ function renderOptimizer(opt, profile, r) {
 
 function renderFloorProfile(profile, risk) {
   const el = document.getElementById("floorchart");
-  if (!profile.length) { el.innerHTML = '<span class="muted">нет данных</span>'; return; }
+  if (!profile.length) { el.innerHTML = '<span class="muted">' + t("no_data") + "</span>"; return; }
   chartOf("floorchart").setOption({
     animationDurationUpdate: 600,
     grid: {left: 44, right: 16, top: 16, bottom: 28},
@@ -683,7 +1005,7 @@ function renderFloorProfile(profile, risk) {
     xAxis: Object.assign(axisX(profile.map(s => s.start_local.slice(0, 5))),
       {axisLabel: {color: EC.ink, interval: 2}}),
     yAxis: axisY(0, 100, "%"),
-    series: [{name: "Пол SOC", type: "line", step: "middle", showSymbol: false,
+    series: [{name: t("ser_floor_soc"), type: "line", step: "middle", showSymbol: false,
       data: profile.map(s => Math.round(s.floor_soc * 100)),
       lineStyle: {width: 2, color: EC.soc}, itemStyle: {color: EC.soc},
       areaStyle: {color: "rgba(57,135,229,.18)"}}],
@@ -691,9 +1013,9 @@ function renderFloorProfile(profile, risk) {
   const note = document.getElementById("floornote");
   const maxF = Math.max(...profile.map(s => s.floor_soc));
   const minF = Math.min(...profile.map(s => s.floor_soc));
-  let text = "диапазон суток " + Math.round(minF * 100) + "–" + Math.round(maxF * 100) + "%";
+  let text = t("floor_range", {lo: Math.round(minF * 100), hi: Math.round(maxF * 100)});
   if (risk && risk.risk_windows && risk.risk_windows.length)
-    text += " · окно риска отключений: " + risk.risk_windows.join(", ") + " ч";
+    text += t("floor_risk", {v: risk.risk_windows.join(", ")});
   note.textContent = text;
 }
 
@@ -701,13 +1023,13 @@ function renderHistory(items) {
   document.getElementById("history").innerHTML = items.map(i =>
     "<tr><td>" + i.date + "</td><td>" + pct(i.recommended_floor_soc) + "</td><td>" +
     pct(i.current_floor_soc) + "</td><td>" + pp(i.delta_pp) + "</td><td>" +
-    i.reserve_kwh + " кВт·ч</td><td>" + (i.hold_until_local || "—") + "</td></tr>"
+    i.reserve_kwh + " " + t("unit_kwh") + "</td><td>" + (i.hold_until_local || "—") + "</td></tr>"
   ).join("");
 }
 
 async function recalc() {
   const b = document.getElementById("refresh");
-  b.disabled = true; b.textContent = "Считаю…";
+  b.disabled = true; b.textContent = t("btn_recalcing");
   try { await fetch("api/run", {method: "POST"}); } catch (e) {}
   let tries = 0;
   const timer = setInterval(async () => {
@@ -715,7 +1037,7 @@ async function recalc() {
     tries++;
     if (!s.running || tries > 60) {
       clearInterval(timer);
-      b.disabled = false; b.textContent = "Пересчитать сейчас";
+      b.disabled = false; b.textContent = t("btn_recalc");
       load();
     }
   }, 3000);
@@ -725,28 +1047,27 @@ async function recalc() {
 // in the site's time zone (the report's issue hour is UTC).
 function periodLine(r) {
   const tz = (r.site && r.site.time_zone) || undefined;
-  const fmt = (ms, withDate) => new Date(ms).toLocaleString("ru-RU", Object.assign(
+  const fmt = (ms, withDate) => new Date(ms).toLocaleString(locale(), Object.assign(
     {timeZone: tz, hour: "2-digit", minute: "2-digit"},
     withDate ? {day: "2-digit", month: "2-digit"} : {}));
   const start = Date.parse(r.issue_utc);
   const hour = start + 3600e3, end = start + 24 * 3600e3;
-  return "План от <b>" + fmt(start, true) + "</b> · пол и резерв — на <b>" + fmt(start) + "–" +
-    fmt(hour) + "</b> · нагрузка и солнце — за 24 ч: <b>" + fmt(start, true) + " → " +
-    fmt(end, true) + "</b>";
+  return t("period_line", {start: fmt(start, true), h0: fmt(start), h1: fmt(hour),
+    startD: fmt(start, true), endD: fmt(end, true)});
 }
 
-const kw = v => v == null ? "—" : v.toFixed(2) + " кВт";
+const kw = v => v == null ? "—" : v.toFixed(2) + " " + t("unit_kw");
 
 function hourHint(h, next) {
   const f = h.forecast;
-  let t = h.label + ":00–" + next + ":00 · прогноз " +
-    (f ? kw(f.p50) + " (P10 " + f.p10.toFixed(2) + " … P90 " + f.p90.toFixed(2) + ")" : "нет");
+  let txt = h.label + ":00–" + next + ":00 · " + t("hh_forecast") + " " +
+    (f ? kw(f.p50) + " (P10 " + f.p10.toFixed(2) + " … P90 " + f.p90.toFixed(2) + ")" : t("hh_none"));
   if (h.actual_kw != null)
-    t += " · факт " + kw(h.actual_kw) + (h.current ? " сейчас" : "") +
-      (h.throttled ? " — урезано: батарея была полной, панели могли больше" : "");
-  if (h.soc_pct != null) t += " · SOC " + Math.round(h.soc_pct) + "%";
-  if (h.soc_plan_pct != null) t += " · план SOC " + Math.round(h.soc_plan_pct) + "%";
-  return t;
+    txt += " · " + t("hh_actual") + " " + kw(h.actual_kw) + (h.current ? " " + t("hh_now") : "") +
+      (h.throttled ? t("hh_throttled") : "");
+  if (h.soc_pct != null) txt += " · " + t("hh_soc") + " " + Math.round(h.soc_pct) + "%";
+  if (h.soc_plan_pct != null) txt += " · " + t("hh_soc_plan") + " " + Math.round(h.soc_plan_pct) + "%";
+  return txt;
 }
 
 // Charts: Apache ECharts (bundled under vendor/, Apache-2.0). Colors are the
@@ -775,8 +1096,8 @@ function axisX(labels) {
   return {type: "category", data: labels, boundaryGap: true,
     axisLine: {lineStyle: {color: EC.grid}}, axisTick: {show: false}, axisLabel: {color: EC.ink}};
 }
-function axisY(min, max, unit) {
-  return {type: "value", min, max, splitNumber: 2, name: unit, nameGap: 8,
+function axisY(min, max, unitName) {
+  return {type: "value", min, max, splitNumber: 2, name: unitName, nameGap: 8,
     nameTextStyle: {color: EC.ink, align: "right"}, axisLabel: {color: EC.ink},
     splitLine: {lineStyle: {color: EC.grid}}};
 }
@@ -815,14 +1136,14 @@ function dayOption(day, nowFraction, narrow) {
     .filter(Boolean);
   const nowLine = now < 0 ? undefined : {silent: true, symbol: "none", animation: false,
     lineStyle: {color: EC.text, type: "dotted", opacity: .7},
-    label: {formatter: "сейчас", color: EC.text, position: "end"},
+    label: {formatter: t("mark_now"), color: EC.text, position: "end"},
     data: [{xAxis: now + nowFraction - 0.5}]};
   const xAxis = (grid, show) => Object.assign(axisX(labels), {gridIndex: grid,
     axisLabel: {show, color: EC.ink, interval: narrow ? 5 : 2}});
   return {
     animationDurationUpdate: 600,
     axisPointer: {link: [{xAxisIndex: "all"}], lineStyle: {color: "rgba(230,232,238,.35)"}},
-    legend: legendStyle(["Прогноз", "Коридор P10–P90", "Факт", "Заряд, факт", "Заряд, план"]),
+    legend: legendStyle([t("ser_forecast"), t("ser_band"), t("ser_actual"), t("ser_soc_actual"), t("ser_soc_plan")]),
     tooltip: Object.assign({trigger: "axis", axisPointer: {type: "shadow",
       shadowStyle: {color: "rgba(230,232,238,.05)"}}}, TOOLTIP, {
       formatter: params => {
@@ -833,22 +1154,22 @@ function dayOption(day, nowFraction, narrow) {
       }}),
     grid: [{left: 44, right: 16, top: 48, height: 176}, {left: 44, right: 16, top: 256, height: 62}],
     xAxis: [xAxis(0, false), xAxis(1, true)],
-    yAxis: [Object.assign(axisY(0, undefined, "кВт"), {gridIndex: 0}),
+    yAxis: [Object.assign(axisY(0, undefined, t("unit_kw")), {gridIndex: 0}),
             Object.assign(axisY(0, 100, "%"), {gridIndex: 1, interval: 50})],
     dataZoom: [{type: "inside", xAxisIndex: [0, 1], zoomOnMouseWheel: "ctrl",
       moveOnMouseWheel: false, preventDefaultMouseMove: false, minValueSpan: 4}],
     series: [
-      {name: "Коридор P10–P90", type: "custom", xAxisIndex: 0, yAxisIndex: 0,
+      {name: t("ser_band"), type: "custom", xAxisIndex: 0, yAxisIndex: 0,
        itemStyle: {color: EC.band}, encode: {x: 0, y: [1, 2]}, data: f,
        renderItem: columnBar(.8, () => ({fill: EC.band}))},
-      {name: "Прогноз", type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.forecast},
+      {name: t("ser_forecast"), type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.forecast},
        encode: {x: 0, y: 3}, data: f.map(v => [v[0], 0, v[3]]),
        renderItem: columnBar(.8, () => ({fill: EC.forecast})), markLine: nowLine},
-      {name: "Факт", type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.actual},
+      {name: t("ser_actual"), type: "custom", xAxisIndex: 0, yAxisIndex: 0, itemStyle: {color: EC.actual},
        encode: {x: 0, y: 2}, data: actual, z: 3,
        renderItem: columnBar(.38, i => ({fill: actual[i][3] ? hatch() : EC.actual,
          stroke: EC.surface, lineWidth: 2, opacity: actual[i][4] ? .75 : 1}))},
-      {name: "Заряд, факт", type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
+      {name: t("ser_soc_actual"), type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
        showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: EC.soc},
        itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_pct),
        areaStyle: {color: "rgba(57,135,229,.15)"},
@@ -856,7 +1177,7 @@ function dayOption(day, nowFraction, narrow) {
          symbolSize: 10, itemStyle: {color: EC.soc, borderColor: EC.surface, borderWidth: 2},
          label: {show: false}, data: [{coord: [now, day.hours[now].soc_pct]}]},
        markLine: nowLine && Object.assign({}, nowLine, {label: {show: false}})},
-      {name: "Заряд, план", type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
+      {name: t("ser_soc_plan"), type: "line", xAxisIndex: 1, yAxisIndex: 1, smooth: 0.3,
        showSymbol: false, lineStyle: {width: 2, type: "dashed", color: EC.soc},
        itemStyle: {color: EC.soc}, data: day.hours.map(h => h.soc_plan_pct)},
     ],
@@ -867,59 +1188,38 @@ function renderDayCharts(data) {
   const card = document.getElementById("daycard");
   if (!data || !data.days || !data.days.length) { card.style.display = "none"; return; }
   card.style.display = "block";
-  document.getElementById("daynote").textContent = data.plan_note || "";
+  document.getElementById("daynote").textContent = pick(data, "plan_note") || "";
   data.days.slice(0, 2).forEach((day, i) => {
-    let head = "<b>" + day.label + ", " + day.date + "</b> · прогноз " +
-      (day.forecast_kwh == null ? "—" : day.forecast_kwh + " кВт·ч");
-    if (i === 0) head += " · выработано " + (day.actual_kwh == null ? "0" : day.actual_kwh) +
-      " кВт·ч · ещё ожидается ~" + day.ahead_kwh + " кВт·ч";
+    let head = "<b>" + esc(pick(day, "label")) + ", " + day.date + "</b> · " +
+      t("day_forecast", {v: day.forecast_kwh == null ? "—" : day.forecast_kwh});
+    if (i === 0) head += t("day_produced", {v: day.actual_kwh == null ? "0" : day.actual_kwh}) +
+      t("day_ahead", {v: day.ahead_kwh});
     document.getElementById("dayhead" + i).innerHTML = head;
     const el = document.getElementById("daychart" + i);
     chartOf("daychart" + i).setOption(dayOption(day, data.now_fraction || 0, el.offsetWidth < 520));
   });
 }
 
-const HINTS = {
-  "Рекомендуемый пол SOC": "Ниже этого заряда батарею сейчас лучше не разряжать: минимальный SOC плюс резерв на случай, если свет выключат в этот час. Днём солнце покрывает часть отключения, поэтому днём пол ниже, чем вечером. Значок справа — разница с порогом, который стоит сейчас.",
-  "Нагрузка, 24 ч": "Сколько дом потребит за 24 часа от начала плана (медианный прогноз P50). P10…P90 — коридор: в 8 случаях из 10 факт попадает между ними.",
-  "Солнце, 24 ч": "Сколько дадут панели за 24 часа от начала плана (P50). P10 — пессимистичный вариант: хуже бывает в 1 случае из 10. По нему считается запас ночного заряда.",
-  "Резерв отключений": "Энергия, которую батарея держит на случай отключения: нагрузка дома во время отключений × длительность отключений текущей серии. Если 14 дней отключений не было, резерва нет (кроме минимальной автономии, если вы её задали).",
-  "Солнце и батарея по часам": "Жёлтое — прогноз выработки панелей по часам, бледная полоса — коридор P10–P90. Зелёное — сколько панели дали на самом деле (в среднем за час; в текущем часу — мгновенная мощность). Штриховка — час, когда батарея была полной и инвертор урезал панели: там зелёное ниже жёлтого не из-за ошибки прогноза. Ниже — заряд батареи: сплошная линия — факт, пунктир — план оптимизатора. Наведите на час — подробности.",
-  "Пол SOC по часам (плавающий)": "Резерв на отключение по часам: высота столбика — ниже какого заряда не опускаться в этот час. Наведите на столбик, чтобы увидеть час и значение.",
-  "Оптимальный план (MILP-оптимизатор)": "Заряд батареи по часам в оптимальном плане на 48 часов: когда заряжать из сети по дешёвому тарифу и когда тратить. Наведите на столбик — час и SOC.",
-  "Зоны TOU инвертора": "Программы инвертора по времени. Batt% зоны — это и нижний порог разряда, и цель заряда из сети, если в зоне включён заряд из сети.",
-  "Текущий SOC": "Batt% зоны, который сейчас стоит в инверторе.",
-  "Пол (эвристика)": "Минимум для зоны по резерву на отключения, без учёта цен.",
-  "Оптимизатор": "Что поставит оптимизатор: ночной зоне — цель заряда, дорогим зонам — нижний порог (минимальный SOC плюс резерв).",
-  "Самообучение и автонастройка": "Что аддон выучил по вашим данным: поправки прогнозов, ёмкость и лимиты батареи, подобранный запас.",
-  "Переносимые нагрузки — когда включать": "Лучшее время запуска нагрузок, которые можно сдвигать (бойлер, стирка): когда больше всего солнца.",
-  "Из усечения": "Сколько нагрузка взяла бы из солнца, которое иначе срезалось бы при полной батарее.",
-  "Заряд из сети по зонам": "Включать ли в зоне заряд батареи из сети: в дешёвые часы — да, в дорогие — только если батарея ниже резерва.",
-  "Суточные данные, 14 дней (кВт·ч)": "Что было на самом деле по дням, из истории Home Assistant.",
-  "Потери усечения": "Солнце, которое панели могли дать, но инвертор срезал: батарея была полной, а экспорта в сеть нет.",
-  "Мин. SOC": "Самый низкий заряд батареи за сутки.",
-  "Сеть вниз, ч": "Сколько часов за сутки не было сети.",
-  "Точность прогнозов (факт vs P50)": "Насколько медианный прогноз промахнулся по дням и попадал ли факт в коридор P10–P90.",
-  "История рекомендаций": "Какой пол аддон рекомендовал в прошлые дни и какой тогда стоял на инверторе.",
-};
-
 // Own tooltip, not the title attribute: the Home Assistant apps embed the
 // panel in a web view that never shows title tooltips. Hover shows it after a
 // short pause; a tap or click toggles it (phones have no hover).
-function applyHints() {
-  document.querySelectorAll("#content h3, #content th").forEach(el => {
-    const text = HINTS[el.textContent.trim()];
-    if (!text) return;
-    el.dataset.hint = text;
+// Hint texts live in the I18N tables; elements carry the key in data-hint.
+function refreshHints() {
+  document.querySelectorAll("[data-hint]").forEach(el => {
+    el.dataset.hintText = t(el.dataset.hint);
     el.classList.add("hint");
   });
+}
+
+function applyHints() {
+  refreshHints();
   const tip = document.createElement("div");
   tip.id = "tip";
   document.body.appendChild(tip);
   let timer = null, current = null;
   const show = el => {
     current = el;
-    tip.textContent = el.dataset.hint;
+    tip.textContent = el.dataset.hintText;
     tip.style.display = "block";
     const box = el.getBoundingClientRect();
     let top = box.bottom + 6;
@@ -965,6 +1265,11 @@ document.getElementById("entscard").addEventListener("toggle", async e => {
   } catch (err) { entityIdsLoaded = false; }
 });
 
+// Extra unit keys used in dynamic strings.
+I18N.ru.unit_kwh = "кВт·ч"; I18N.ru.unit_kw = "кВт";
+I18N.en.unit_kwh = "kWh"; I18N.en.unit_kw = "kW";
+
+applyStatic();
 applyHints();
 load();
 loadSetup();
