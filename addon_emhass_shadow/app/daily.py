@@ -17,6 +17,7 @@ import discovery
 import numpy as np
 import pandas as pd
 import pipeline
+import weather_models
 
 from emhass.pv_quantiles import try_load
 
@@ -26,9 +27,10 @@ MODELS = DATA / "models"
 
 def _potential_pv(bundle, hours: pd.DatetimeIndex) -> pd.Series:
     """Model P50 for the given hours; NaN where as-of weather is missing."""
-    if not WEATHER_HIST.exists():
+    history_path = weather_models.scoped(WEATHER_HIST, weather_models.from_data(DATA))
+    if not history_path.exists():
         return pd.Series(np.nan, index=hours)
-    weather = pd.read_json(WEATHER_HIST, lines=True)
+    weather = pd.read_json(history_path, lines=True)
     weather["start_utc"] = pd.to_datetime(weather["start_utc"], utc=True)
     weather = weather.set_index("start_utc").sort_index()
     weather = weather[~weather.index.duplicated(keep="last")]
@@ -58,7 +60,7 @@ def daily_stats(days: int = 14) -> list[dict]:
     if audit.empty:
         return []
 
-    bundle = try_load(MODELS / pipeline.PV_MODEL)
+    bundle = try_load(weather_models.scoped(MODELS, weather_models.selected(opts)) / pipeline.PV_MODEL)
     curtailed = audit[audit["pv_filter"] == "possible_curtailment"]
     potential = None
     if bundle is not None and not curtailed.empty:

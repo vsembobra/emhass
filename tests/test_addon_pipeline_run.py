@@ -128,6 +128,89 @@ def test_apply_mode_writes_zone_targets(fake_site):
     assert not report["advisory"]["apply_errors"]
 
 
+def test_weather_selection_loads_only_matching_models(fake_site, monkeypatch):
+    fake_site["setup"](open_meteo_model="icon")
+    paths = []
+
+    def missing(path):
+        paths.append(path)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(pipeline.LoadQuantileBundle, "load", missing)
+    monkeypatch.setattr(pipeline.PvQuantileBundle, "load", missing)
+    report = pipeline.run()
+    expected = fake_site["data"] / "weather_models" / "icon" / "models"
+    assert paths == [expected / "load_quantiles_v1", expected / pipeline.PV_MODEL]
+    assert report["data"]["weather_model"] == "icon"
+    assert report["data"]["models_learning"]
+
+
+@pytest.mark.parametrize("model", ["auto", "icon"])
+def test_missing_weather_models_do_not_calibrate_against_other_sources(fake_site, monkeypatch, model):
+    fake_site["setup"](open_meteo_model=model)
+    # A missing version is a wildcard in learning.forecast_pairs. It must
+    # not let Auto's historical model errors become ICON's first drift state.
+    original = pipeline.learning.self_correct
+
+    def correct(log, audit, tz, now, **kwargs):
+        starts = pd.date_range(now - timedelta(hours=72), periods=72, freq="h")
+        old_audit = pd.DataFrame(
+            {"load_kw": 1.0, "load_filter": "keep", "pv_measured_kw": 1.0,
+             "pv_filter": "keep", "solar_elevation_deg": 20.0}, index=starts
+        )
+        log = [pipeline.learning.log_entry(
+            starts[n], starts[n:n + 24], ([3.0] * 24, [4.0] * 24, [5.0] * 24), "model",
+            ([3.0] * 24, [4.0] * 24, [5.0] * 24), "model",
+            versions={"load": "old-auto-model", "pv": "old-auto-model"},
+        ) for n in range(0, 72, 24)]
+        return original(log, old_audit, tz, now, **kwargs)
+
+    monkeypatch.setattr(pipeline.learning, "self_correct", correct)
+    report = pipeline.run()
+    learned = report["data"]["self_learning"]
+    assert learned["load"]["pairs"] == 0
+    assert learned["pv"]["pairs"] == 0
+    assert not learned["drift"]["drift"]
+
+
+def test_weather_selection_has_separate_calibration_identity(fake_site, monkeypatch):
+    opts = fake_site["setup"](open_meteo_model="icon")
+    data = fake_site["data"]
+    model_dir = data / "weather_models" / "icon" / "models"
+    for name in ("load_quantiles_v1", pipeline.PV_MODEL):
+        path = model_dir / name
+        path.mkdir(parents=True)
+        (path / "bundle.json").write_text("{}")
+
+    monkeypatch.setattr(pipeline.LoadQuantileBundle, "load", lambda path: object())
+
+    def load_prediction(bundle, audit, starts, issue, weather):
+        return pd.DataFrame(
+            {f"load_{q}_kw": value for q, value in (("p10", 0.5), ("p50", 1.0), ("p90", 1.5))},
+            index=starts,
+        )
+
+    class PvBundle:
+        geometry = pipeline._site_pv_geometry(opts)
+
+        def predict(self, frame):
+            return pd.DataFrame(
+                {f"pv_{q}_kw": value for q, value in (("p10", 0.0), ("p50", 0.1), ("p90", 0.2))},
+                index=frame.index,
+            )
+
+    monkeypatch.setattr(pipeline, "forecast_load", load_prediction)
+    monkeypatch.setattr(pipeline.PvQuantileBundle, "load", lambda path: PvBundle())
+    report = pipeline.run()
+    log = json.loads((data / "forecast_log.jsonl").read_text().splitlines()[-1])
+    for target in ("load", "pv"):
+        assert log[target]["method"] == "model"
+        assert log[target]["version"].startswith("icon:")
+    assert report["data"]["weather_model"] == "icon"
+    assert (data / "weather_models" / "icon" / "drift_state.json").exists()
+    assert not (data / "drift_state.json").exists()
+
+
 LEARNED = {
     "identified_utc": "2026-11-20T00:00:00+00:00",
     "battery": {

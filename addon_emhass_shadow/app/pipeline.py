@@ -36,6 +36,7 @@ import options_meta
 import pandas as pd
 import policy
 import tuner
+import weather_models
 
 from emhass.battery_planning import ForecastStep, floor_profile
 from emhass.load_quantiles import LoadQuantileBundle
@@ -1043,13 +1044,17 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
         "temperature_2m,shortwave_radiation,direct_normal_irradiance,"
         "diffuse_radiation,cloud_cover"
     )
+    model = weather_models.selected(site)
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={site['latitude']}&longitude={site['longitude']}"
         f"&hourly={variables}&past_hours=48&forecast_hours=49&timezone=UTC&timeformat=unixtime"
     )
-    archive = DATA / "weather_archive"
-    archive.mkdir(exist_ok=True)
+    params = weather_models.parameters(site)
+    if params:
+        url += "&" + urllib.parse.urlencode(params)
+    archive = weather_models.scoped(DATA / "weather_archive", model)
+    archive.mkdir(parents=True, exist_ok=True)
     stale = False
     try:
         with urllib.request.urlopen(url, timeout=30, context=TLS_CONTEXT) as response:
@@ -1076,7 +1081,8 @@ def _weather_frame(payload: dict) -> pd.DataFrame:
 
 def archived_weather() -> pd.DataFrame | None:
     """The newest stored Open-Meteo snapshot, without asking the internet."""
-    files = sorted((DATA / "weather_archive").glob("*.json"))
+    archive = weather_models.scoped(DATA / "weather_archive", weather_models.from_data(DATA))
+    files = sorted(archive.glob("*.json"))
     if not files:
         return None
     try:
@@ -1308,7 +1314,7 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) 
 
 def _retrain_note() -> str | None:
     """One notification line when models were retrained in the last hours."""
-    state_path = DATA / "retrain_state.json"
+    state_path = weather_models.scoped(DATA / "retrain_state.json", weather_models.from_data(DATA))
     if not state_path.exists():
         return None
     try:
@@ -2157,6 +2163,7 @@ def run(notify: str = "always") -> dict:
         "latitude": opts["latitude"],
         "longitude": opts["longitude"],
         "time_zone": opts["time_zone"],
+        "open_meteo_model": weather_models.selected(opts),
     }
     tz = ZoneInfo(site["time_zone"])
 
@@ -2172,6 +2179,8 @@ def run(notify: str = "always") -> dict:
     starts_plan = pd.date_range(issue, periods=PLAN_HOURS, freq="h")
 
     models_learning = False
+    model = weather_models.selected(site)
+    models_dir = weather_models.scoped(DATA / "models", model)
     # Weather comes first: its temperature backstops the load-model features
     # on sites without an outdoor sensor, then feeds the PV forecast itself.
     # Observed sensor values win where present; Open-Meteo only fills gaps.
@@ -2181,7 +2190,7 @@ def run(notify: str = "always") -> dict:
         weather, weather_name, weather_stale = None, None, True
     load_method = "model"
     try:
-        load_bundle = LoadQuantileBundle.load(DATA / "models" / "load_quantiles_v1")
+        load_bundle = LoadQuantileBundle.load(models_dir / "load_quantiles_v1")
         load_prediction = forecast_load(load_bundle, audit, starts_plan, issue, weather)
     except (OSError, ValueError, KeyError):
         models_learning = True
@@ -2190,7 +2199,7 @@ def run(notify: str = "always") -> dict:
 
     pv_bundle = None
     try:
-        pv_bundle = PvQuantileBundle.load(DATA / "models" / PV_MODEL)
+        pv_bundle = PvQuantileBundle.load(models_dir / PV_MODEL)
     except (OSError, ValueError):
         models_learning = True
     if weather is None:
@@ -2211,13 +2220,20 @@ def run(notify: str = "always") -> dict:
         pv_p10, pv_p50, pv_p90 = _fallback_pv_forecast(starts_plan, opts, weather)
     pv_method = "model" if weather is not None and pv_bundle is not None else "fallback"
     model_versions = {
-        "load": learning.bundle_version(DATA / "models" / "load_quantiles_v1")
+        "load": learning.bundle_version(models_dir / "load_quantiles_v1")
         if load_method == "model"
         else None,
-        "pv": learning.bundle_version(DATA / "models" / PV_MODEL)
+        "pv": learning.bundle_version(models_dir / PV_MODEL)
         if pv_method == "model"
         else None,
     }
+    for target, version in model_versions.items():
+        if version is None:
+            # None means "any version" to calibration. Without a live
+            # bundle no previous model's errors should teach this forecast.
+            model_versions[target] = f"{model}:unavailable"
+        elif model != "auto":
+            model_versions[target] = f"{model}:{version}"
 
     # Self-correction between retrains: the RAW forecasts are logged (below,
     # once the reserve is known) and the last two weeks of issued-vs-actual
@@ -2237,7 +2253,9 @@ def run(notify: str = "always") -> dict:
             issue,
             versions=model_versions,
         )
-        (DATA / "drift_state.json").write_text(json.dumps(drift, ensure_ascii=False), encoding="utf-8")
+        drift_path = weather_models.scoped(DATA / "drift_state.json", model)
+        drift_path.parent.mkdir(parents=True, exist_ok=True)
+        drift_path.write_text(json.dumps(drift, ensure_ascii=False), encoding="utf-8")
         if load_method == "model":
             c10, c50, c90 = calibrations["load"].apply(*raw_load, starts_plan, tz)
             load_prediction = pd.DataFrame(
@@ -2860,6 +2878,7 @@ def run(notify: str = "always") -> dict:
             "audit_through": audit.index[-1].isoformat(),
             "grid_transitions_recorded": new_transitions,
             "weather_archive": weather_name,
+            "weather_model": model,
             "weather_stale": weather_stale,
             "models_learning": models_learning,
             "battery_soh": round(soh, 4),

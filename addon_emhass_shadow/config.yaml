@@ -38,6 +38,7 @@ options:
   priority_mode: balanced
   autotune: false
   panel_kwp: 7.0
+  open_meteo_model: auto
   deferrable_loads: []
 schema:
   apply_mode: bool
@@ -51,6 +52,7 @@ schema:
   priority_mode: list(resilience|balanced|economy)
   autotune: bool
   panel_kwp: float(0.5,100)
+  open_meteo_model: list(auto|ecmwf|icon|gfs)
   deferrable_loads:
     - name: str
       power_kw: float(0.1,30)
@@ -103,6 +105,9 @@ schema:
 translations:
   ru:
     configuration:
+      open_meteo_model:
+        name: Погодная модель Open-Meteo
+        description: Auto — автоматический подбор; ECMWF — IFS HRES; ICON и GFS — Seamless. История и обучение каждой модели хранятся отдельно.
       latitude:
         name: Широта
         description: Координата объекта, например 44.94892. Нужна для расчёта высоты солнца и погоды. Пусто = из настроек Home Assistant.
@@ -273,6 +278,9 @@ translations:
         description: "Через сколько дней без полного заряда устраивать калибровочный заряд до 100% (3–60, по умолчанию 14)."
   en:
     configuration:
+      open_meteo_model:
+        name: Open-Meteo weather model
+        description: Auto uses automatic selection; ECMWF uses IFS HRES; ICON and GFS use Seamless. Each selection has separate history and training.
       latitude:
         name: Latitude
         description: Site coordinate, e.g. 44.94892. Used for solar geometry and weather. Empty = from the Home Assistant settings.

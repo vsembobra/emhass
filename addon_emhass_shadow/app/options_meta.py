@@ -22,6 +22,7 @@ DEFAULTS = {
     "time_zone": "Europe/Istanbul",
     "capacity_kwh": 32.0,
     "panel_kwp": 7.0,
+    "open_meteo_model": "auto",
     "panel_tilt_deg": 26.0,
     "panel_azimuth_deg": 195.0,
     "min_soc_pct": 10.0,
@@ -88,6 +89,7 @@ VISIBLE = (
     "priority_mode",
     "autotune",
     "panel_kwp",
+    "open_meteo_model",
     "deferrable_loads",
 )
 
@@ -95,6 +97,12 @@ VISIBLE = (
 # label/hint are Russian, label_en/hint_en their English mirror; the panel
 # picks per its language switch.
 OPTION_META = {
+    "open_meteo_model": {
+        "type": "select", "choices": ["auto", "ecmwf", "icon", "gfs"],
+        "label": "Погодная модель Open-Meteo", "label_en": "Open-Meteo weather model",
+        "hint": "Auto — подбор Open-Meteo; ECMWF — IFS HRES; ICON и GFS — Seamless. При смене модели прогнозы и обучение хранятся отдельно. Первый расчёт может занять дольше из-за обучения.",
+        "hint_en": "Auto uses Open-Meteo selection; ECMWF uses IFS HRES; ICON and GFS use Seamless. Each selection has separate forecasts and training. The first run may take longer to train.",
+    },
     # --- Site -------------------------------------------------------------
     "latitude": {
         "type": "float", "min": -90, "max": 90, "step": 0.00001,
@@ -508,7 +516,7 @@ OPTION_GROUPS = [
         "tou_grid_charge_on_option", "tou_grid_charge_off_option",
     ]},
     {"title": "Солнечные панели", "title_en": "Solar panels", "keys": [
-        "panel_kwp", "panel_tilt_deg", "panel_azimuth_deg",
+        "panel_kwp", "panel_tilt_deg", "panel_azimuth_deg", "open_meteo_model",
     ]},
     {"title": "Тариф и планирование", "title_en": "Tariff and planning", "keys": [
         "optimizer_enabled", "day_zone_strategy",

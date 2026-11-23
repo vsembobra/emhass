@@ -32,6 +32,7 @@ import learning
 import numpy as np
 import pandas as pd
 import pipeline
+import weather_models
 
 from emhass.load_quantiles import (
     QUANTILE_LABELS,
@@ -60,28 +61,33 @@ WEATHER_VARIABLES = (
 )
 
 
-def _load_state() -> dict:
-    if STATE.exists():
+def _load_state(model: str | None = None) -> dict:
+    path = weather_models.scoped(STATE, model or weather_models.from_data(DATA))
+    if path.exists():
         try:
-            return json.loads(STATE.read_text())
+            return json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             pass
     return {"last_retrain_utc": None, "models": {}}
 
 
-def _save_state(state: dict) -> None:
-    STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+def _save_state(state: dict, model: str | None = None) -> None:
+    model = model or weather_models.from_data(DATA)
+    path = weather_models.scoped(STATE, model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
-        SHARE.mkdir(parents=True, exist_ok=True)
-        (SHARE / "retrain_state.json").write_text(
+        mirror = weather_models.scoped(SHARE / "retrain_state.json", model)
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        mirror.write_text(
             json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
         )
     except OSError:
         pass
 
 
-def retrain_status() -> dict:
-    state = _load_state()
+def retrain_status(model: str | None = None) -> dict:
+    state = _load_state(model)
     interval = _interval_days()
     enabled = _enabled()
     last = state.get("last_retrain_utc")
@@ -118,7 +124,8 @@ DRIFT_MIN_RETRAIN_GAP = timedelta(hours=24)
 
 def _drift_detected() -> bool:
     try:
-        return bool(json.loads((DATA / "drift_state.json").read_text(encoding="utf-8")).get("drift"))
+        path = weather_models.scoped(DATA / "drift_state.json", weather_models.from_data(DATA))
+        return bool(json.loads(path.read_text(encoding="utf-8")).get("drift"))
     except (OSError, json.JSONDecodeError, AttributeError):
         return False
 
@@ -254,7 +261,8 @@ def _retrain_load(
     the model refitted on ALL history (the freshest weeks included) and
     swapped in, carrying the challenger's out-of-sample calibration offsets.
     """
-    final = MODELS / "load_quantiles_v1"
+    final = weather_models.scoped(MODELS, weather_models.selected(site)) / "load_quantiles_v1"
+    final.parent.mkdir(parents=True, exist_ok=True)
     champion = _try_load(LoadQuantileBundle.load, final)
     config = challenger_config(champion, site)
     seasonal = champion.seasonal if champion else None
@@ -325,6 +333,7 @@ def _fetch_weather_chunk(site: dict, start: pd.Timestamp, end: pd.Timestamp) -> 
             "start_date": str(start.date()),
             "end_date": str(end.date()),
             "timezone": "UTC",
+            **weather_models.parameters(site),
         }
     )
     url = f"https://previous-runs-api.open-meteo.com/v1/forecast?{query}"
@@ -337,9 +346,11 @@ def _fetch_weather_chunk(site: dict, start: pd.Timestamp, end: pd.Timestamp) -> 
 
 
 def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFrame:
+    history_path = weather_models.scoped(WEATHER_HIST, weather_models.selected(site))
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     existing = None
-    if WEATHER_HIST.exists():
-        existing = pd.read_json(WEATHER_HIST, lines=True)
+    if history_path.exists():
+        existing = pd.read_json(history_path, lines=True)
         existing["start_utc"] = pd.to_datetime(
             existing["start_utc"], utc=True, format="mixed"
         )
@@ -372,7 +383,7 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
     weather = pd.concat(frames)
     weather = weather[~weather.index.duplicated(keep="last")].sort_index()
     weather.reset_index().to_json(
-        WEATHER_HIST, orient="records", lines=True, date_format="iso"
+        history_path, orient="records", lines=True, date_format="iso"
     )
     return weather
 
@@ -416,7 +427,8 @@ def pv_holdout_score(bundle, frame: pd.DataFrame) -> tuple[float | None, int]:
 
 def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = None) -> dict:
     """Champion/challenger retrain of the PV model (see _retrain_load)."""
-    final = MODELS / pipeline.PV_MODEL
+    final = weather_models.scoped(MODELS, weather_models.selected(site)) / pipeline.PV_MODEL
+    final.parent.mkdir(parents=True, exist_ok=True)
     champion = _try_load(PvQuantileBundle.load, final)
     if champion is not None:
         geometry = champion.geometry  # reuse confirmed site geometry
@@ -512,7 +524,9 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     The retrain_enabled option gates only the automatic schedule; a forced run
     (panel button) is an explicit action and always goes ahead.
     """
-    state = _load_state()
+    model = weather_models.selected(site) if site is not None else weather_models.from_data(DATA)
+    models_dir = weather_models.scoped(MODELS, model)
+    state = _load_state(model)
     if not force and hardware.outdated(DATA):
         # Results of an older hardware estimator (a 60-day blend of two
         # batteries, say) are replaced now, whatever the retrain schedule.
@@ -525,10 +539,10 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     # after an upgrade: retrain once, right away, whatever the schedule says.
     upgrade = (
         state.get("pv_model_tried") != pipeline.PV_MODEL
-        and not (MODELS / pipeline.PV_MODEL / "bundle.json").exists()
+        and not (models_dir / pipeline.PV_MODEL / "bundle.json").exists()
     )
     if not force and not upgrade and not _enabled():
-        return retrain_status()
+        return retrain_status(model)
     interval = _interval_days()
     last = state.get("last_retrain_utc")
     if not force and not upgrade and last:
@@ -539,7 +553,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         if not due and _drift_detected() and age >= DRIFT_MIN_RETRAIN_GAP:
             due = True
         if not due:
-            return retrain_status()
+            return retrain_status(model)
     if site is None:
         opts, _ = hardware.effective_options(
             discovery.load_options(DATA), hardware.load(DATA)
@@ -553,6 +567,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             "max_charge_kw": opts.get("max_charge_kw"),
             "time_zone": opts.get("time_zone"),
             "load_holidays": opts.get("load_holidays", ""),
+            "open_meteo_model": model,
         }
     result = {"started_utc": datetime.now(UTC).isoformat(), "models": {}}
     try:
@@ -563,8 +578,8 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         result["models"]["load"] = {"status": "failed", "error": f"audit: {error}"}
         result["models"]["pv"] = {"status": "failed", "error": f"audit: {error}"}
         state["models"] = result["models"]
-        _save_state(state)
-        return retrain_status()
+        _save_state(state, model)
+        return retrain_status(model)
     try:
         weather = _ensure_weather_history(site, audit.index[0])
     except Exception:
@@ -586,9 +601,9 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         pass  # hardware learning is advisory; never fail the retrain on it
     # Stamp only once a model is live: until then every run retries, so a
     # site whose history is still too short trains the day it is not.
-    if any((MODELS / name / "bundle.json").exists() for name in ("load_quantiles_v1", pipeline.PV_MODEL)):
+    if any((models_dir / name / "bundle.json").exists() for name in ("load_quantiles_v1", pipeline.PV_MODEL)):
         state["last_retrain_utc"] = result["started_utc"]
     state["pv_model_tried"] = pipeline.PV_MODEL
     state["models"] = result["models"]
-    _save_state(state)
-    return retrain_status()
+    _save_state(state, model)
+    return retrain_status(model)
