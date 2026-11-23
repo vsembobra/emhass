@@ -407,7 +407,12 @@ def zone_targets(
         else:
             entry_soc = soc_opt[zone.match - 1]
         end_soc = soc_opt[span[-1]]
-        cheap_charge = _charge_target_kept(span, strategy, cheap_windows, starts, tz)
+        # Cheap or not is judged on the zone's whole window: the value written
+        # now stays in the inverter into the zone's next occurrence. A zone in
+        # effect at 23:xx whose rest lies in the cheap hours (22:00-24:00 with
+        # cheap from 23:00) got a hold target that kept the battery up through
+        # tomorrow's expensive 22:00 hour.
+        cheap_charge = _charge_target_kept(zone.window, strategy, cheap_windows, starts, tz)
         # A rising cheap window is a grid-charge target only where the plan buys
         # there (grid_charging); sun at dawn lifts the SOC without one, and a
         # target would make the inverter buy at night what the sun brings free.

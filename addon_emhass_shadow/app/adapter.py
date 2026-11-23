@@ -176,7 +176,8 @@ def grid_charge_plan(
         if reserve_pct > min_pct and reserve_pct - entry_soc * 100.0 > RESERVE_SLACK_PP:
             desired, reason = True, f"резерв {reserve_pct}% выше плана на входе"
         elif cheap is not None:
-            local = [starts[i].tz_convert(tz) for i in window]
+            # The whole zone window: the flag stays set into the next occurrence.
+            local = [starts[i].tz_convert(tz) for i in zone.window]
             in_cheap = all(optimize._is_cheap_minute(t.hour * 60 + t.minute, cheap) for t in local)
             desired, reason = in_cheap, "дешёвый тариф" if in_cheap else "дорогой тариф"
         else:

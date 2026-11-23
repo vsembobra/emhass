@@ -11,6 +11,7 @@ the same) and every night replan put the cloudy-day margin on top again:
 
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -212,3 +213,47 @@ def test_the_priority_scenario_moves_the_night_charge():
     resilience = _night_for(0.5, 1.2)  # sun P10, load P90: a pessimistic day
     assert economy < balanced < resilience
     assert balanced == 50  # ~45 % by hand on the median day, the 5 % step up
+
+
+def test_a_zone_reaching_into_expensive_hours_gets_no_hold_target_at_23():
+    # Owner's panel, 24.11 23:00 (Europe/Istanbul): zone 6 runs 22:00-24:00,
+    # cheap from 23:00. In effect at 23:xx its rest is cheap, and it was given
+    # the plan's level (80 %) - a value that stays in the inverter through
+    # tomorrow's expensive 22:00 hour. Its whole window decides: min SOC plus
+    # the reserve, and no grid charge.
+    import adapter
+
+    tz = "Europe/Istanbul"
+    starts = pd.date_range(pd.Timestamp("2026-11-24 23:00", tz=tz), periods=48, freq="h")
+    starts = starts.tz_convert("UTC")
+    local = starts.tz_convert(tz).hour
+    floors = [0.40 if (h >= 18 or h < 8) else 0.35 for h in local]
+    zones = [
+        {"n": n, "from": f, "soc_pct": s}
+        for n, (f, s) in enumerate(
+            [
+                ("00:00", 50),
+                ("07:00", 35),
+                ("08:00", 40),
+                ("11:00", 45),
+                ("20:00", 40),
+                ("22:00", 40),
+            ],
+            1,
+        )
+    ]
+    opts = dict(
+        OPTS, time_zone=tz, min_soc_pct=20, capacity_kwh=31.7, tariff_cheap_windows="23:00-07:00"
+    )
+    sun = _sun(local, 9.48)
+    result = optimize.run_plan(
+        starts, sun, [15.27 / 24] * 48, floors, 0.81, [dict(z) for z in zones], opts,
+        reserve_floors=floors, pv_scenario_kw=_sun(local, 18.0), load_scenario_kw=[9.16 / 24] * 48,
+    )  # fmt: skip
+    targets = {t["n"]: t["optimal_soc_pct"] for t in result["zone_targets"]}
+    assert targets[6] == 40
+    flags = adapter.grid_charge_plan(
+        [dict(z) for z in zones], starts[:24], ZoneInfo(tz), opts, floors[:24], sun[:24],
+        result["soc_opt"][:24], 0.81,
+    )  # fmt: skip
+    assert not next(f for f in flags if f["n"] == 6)["desired"]
