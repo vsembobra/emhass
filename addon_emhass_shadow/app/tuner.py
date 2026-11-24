@@ -271,6 +271,9 @@ def tune(
     }
     if len(windows) < MIN_WINDOWS:
         result["reason"] = f"нужно минимум {MIN_WINDOWS} полных суток истории с прогнозами"
+        result["reason_en"] = (
+            f"need at least {MIN_WINDOWS} full days of history with forecasts"
+        )
         return result
     battery = battery_from_options(opts, soh)
     settings = settings_from_options(opts, soh)

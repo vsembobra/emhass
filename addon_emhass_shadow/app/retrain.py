@@ -555,7 +555,7 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
         if not due:
             return retrain_status(model)
     if site is None:
-        opts, _ = hardware.effective_options(
+        opts, _, _ = hardware.effective_options(
             discovery.load_options(DATA), hardware.load(DATA)
         )
         site = {

@@ -402,7 +402,12 @@ def fit_calibration(pairs: pd.DataFrame, target: str, tz: ZoneInfo) -> Calibrati
 def drift_status(pairs_by_target: dict[str, pd.DataFrame], now: datetime) -> dict:
     """Bias and band coverage of the RAW forecasts over the last week."""
     since = pd.Timestamp(now).tz_convert(UTC) - pd.Timedelta(days=DRIFT_WINDOW_DAYS)
-    status: dict = {"checked_utc": pd.Timestamp(now).isoformat(), "drift": False, "reasons": []}
+    status: dict = {
+        "checked_utc": pd.Timestamp(now).isoformat(),
+        "drift": False,
+        "reasons": [],
+        "reasons_en": [],
+    }
     for target, pairs in pairs_by_target.items():
         recent = pairs[pd.DatetimeIndex(pairs["start"]) >= since] if len(pairs) else pairs
         hours = int(pd.DatetimeIndex(recent["start"]).nunique()) if len(recent) else 0
@@ -415,8 +420,10 @@ def drift_status(pairs_by_target: dict[str, pd.DataFrame], now: datetime) -> dic
             info.update(rel_bias=round(rel_bias, 3), coverage=round(coverage, 3))
             if abs(rel_bias) > DRIFT_MAX_REL_BIAS:
                 status["reasons"].append(f"{target}: смещение {rel_bias:+.0%}")
+                status["reasons_en"].append(f"{target}: bias {rel_bias:+.0%}")
             if coverage < DRIFT_MIN_COVERAGE:
                 status["reasons"].append(f"{target}: охват P10–P90 {coverage:.0%}")
+                status["reasons_en"].append(f"{target}: P10–P90 coverage {coverage:.0%}")
         status[target] = info
     status["drift"] = bool(status["reasons"])
     return status

@@ -174,13 +174,24 @@ def grid_charge_plan(
         # replan. Grid charge for the reserve only when it sits above min SOC
         # and the battery is clearly below it.
         if reserve_pct > min_pct and reserve_pct - entry_soc * 100.0 > RESERVE_SLACK_PP:
-            desired, reason = True, f"резерв {reserve_pct}% выше плана на входе"
+            desired = True
+            reason = f"резерв {reserve_pct}% выше плана на входе"
+            reason_en = f"reserve {reserve_pct}% above the entry plan"
         elif cheap is not None:
             # The whole zone window: the flag stays set into the next occurrence.
             local = [starts[i].tz_convert(tz) for i in zone.window]
             in_cheap = all(optimize._is_cheap_minute(t.hour * 60 + t.minute, cheap) for t in local)
-            desired, reason = in_cheap, "дешёвый тариф" if in_cheap else "дорогой тариф"
+            desired = in_cheap
+            reason, reason_en = (
+                ("дешёвый тариф", "cheap tariff")
+                if in_cheap
+                else ("дорогой тариф", "expensive tariff")
+            )
         else:
-            desired, reason = False, "цена одинаковая — заряд только от солнца"
-        plan.append({"n": program["n"], "desired": desired, "reason": reason})
+            desired = False
+            reason = "цена одинаковая — заряд только от солнца"
+            reason_en = "flat price — solar charging only"
+        plan.append(
+            {"n": program["n"], "desired": desired, "reason": reason, "reason_en": reason_en}
+        )
     return plan

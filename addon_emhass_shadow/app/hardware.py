@@ -216,11 +216,13 @@ def identify_geometry(
     relative = float(best["mae_kw"]) / peak if peak > 0 else float("inf")
     # A grid search always returns *some* orientation; only a close fit on
     # enough days is evidence. Autotune applies reliable estimates only.
-    reasons = []
+    reasons, reasons_en = [], []
     if days < RELIABLE_GEOMETRY_DAYS:
         reasons.append(f"мало дней с солнцем ({days} из {RELIABLE_GEOMETRY_DAYS})")
+        reasons_en.append(f"too few sunny days ({days} of {RELIABLE_GEOMETRY_DAYS})")
     if relative > MAX_GEOMETRY_REL_ERROR:
         reasons.append(f"ошибка подгонки {relative:.0%} пика")
+        reasons_en.append(f"fit error {relative:.0%} of peak")
     # A clock offset or morning shade fits as a rotated roof with a small
     # error, so a big change against the configured roof is never taken
     # automatically: the owner confirms it by editing the options.
@@ -232,12 +234,18 @@ def identify_geometry(
             reasons.append(
                 f"азимут {geometry.azimuth_deg:.0f}° против {configured_azimuth:.0f}° в настройках — проверьте вручную"
             )
+            reasons_en.append(
+                f"azimuth {geometry.azimuth_deg:.0f}° vs {configured_azimuth:.0f}° in settings — check manually"
+            )
     if (
         configured_tilt is not None
         and abs(float(geometry.tilt_deg) - float(configured_tilt)) > MAX_TILT_CHANGE_DEG
     ):
         reasons.append(
             f"наклон {geometry.tilt_deg:.0f}° против {configured_tilt:.0f}° в настройках — проверьте вручную"
+        )
+        reasons_en.append(
+            f"tilt {geometry.tilt_deg:.0f}° vs {configured_tilt:.0f}° in settings — check manually"
         )
     return {
         "tilt_deg": float(geometry.tilt_deg),
@@ -248,6 +256,7 @@ def identify_geometry(
         "days": days,
         "reliable": not reasons,
         "reason": "; ".join(reasons) or None,
+        "reason_en": "; ".join(reasons_en) or None,
     }
 
 
@@ -313,16 +322,17 @@ def outdated(data_dir: Path) -> bool:
     return bool(hardware) and hardware.get("version") != HARDWARE_VERSION
 
 
-def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str]]:
+def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str], list[str]]:
     """Options with learned hardware applied when ``autotune`` is on.
 
-    Returns the (possibly) adjusted copy and one note per applied change.
-    The configured options are never modified in place.
+    Returns the (possibly) adjusted copy and one note per applied change, in
+    Russian and in English. The configured options are never modified in place.
     """
     effective = dict(opts)
     notes: list[str] = []
+    notes_en: list[str] = []
     if not opts.get("autotune", False) or not hardware:
-        return effective, notes
+        return effective, notes, notes_en
     battery = hardware.get("battery") or {}
     if battery.get("status") == "ok" and battery.get("capacity_kwh"):
         learned_cap = float(battery["capacity_kwh"])
@@ -333,11 +343,13 @@ def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str
             # The identified capacity already reflects ageing: no extra SoH.
             effective["_soh_identified"] = True
             notes.append(f"ёмкость {opts['capacity_kwh']}→{effective['capacity_kwh']:.1f} кВт·ч")
+            notes_en.append(f"capacity {opts['capacity_kwh']}→{effective['capacity_kwh']:.1f} kWh")
             eta = battery.get("eta_one_way")
             if eta:
                 effective["charge_efficiency"] = float(eta)
                 effective["discharge_efficiency"] = float(eta)
                 notes.append(f"КПД в одну сторону {float(eta):.3f}")
+                notes_en.append(f"one-way efficiency {float(eta):.3f}")
         else:
             # A battery swap leaves both batteries' segments in the 60-day
             # window; the pooled estimate then sits between the two real
@@ -347,18 +359,27 @@ def effective_options(opts: dict, hardware: dict | None) -> tuple[dict, list[str
                 f"с настроенной {configured_cap:.0f} — не применяю; если батарею меняли, "
                 f"поправьте настройку или дождитесь переобучения"
             )
+            notes_en.append(
+                f"learned capacity {learned_cap:.1f} kWh deviates {deviation:.0%} "
+                f"from the configured {configured_cap:.0f} — not applying; if the battery "
+                f"was replaced, fix the setting or wait for retraining"
+            )
     limits = hardware.get("limits") or {}
-    for key, label in (("max_charge_kw", "заряд"), ("max_discharge_kw", "разряд")):
+    for key, label, label_en in (
+        ("max_charge_kw", "заряд", "charge"),
+        ("max_discharge_kw", "разряд", "discharge"),
+    ):
         observed = limits.get(key)
         if observed and observed > float(opts[key]) * RAISE_LIMIT_MARGIN:
             effective[key] = round(float(observed), 2)
             notes.append(f"лимит {label}а {opts[key]}→{effective[key]} кВт")
+            notes_en.append(f"{label_en} limit {opts[key]}→{effective[key]} kW")
     geometry = hardware.get("pv_geometry")
     if geometry and geometry.get("reliable"):
         effective["panel_tilt_deg"] = geometry["tilt_deg"]
         effective["panel_azimuth_deg"] = geometry["azimuth_deg"]
         effective["panel_kwp"] = geometry["kwp"]
-    return effective, notes
+    return effective, notes, notes_en
 
 
 def reshape_reserve(

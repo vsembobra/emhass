@@ -94,6 +94,7 @@ def recommend(
                     "slug": slug(name),
                     "start_local": None,
                     "reason": "окно короче нагрузки",
+                    "reason_en": "the window is shorter than the load",
                 }
             )
             continue

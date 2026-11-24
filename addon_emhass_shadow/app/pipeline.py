@@ -2165,7 +2165,9 @@ def run(notify: str = "always") -> dict:
     learned_hardware = hardware.load(DATA)
     # autotune: learned capacity/efficiency/limits/geometry replace the
     # configured ones (in this run's copy only); otherwise opts == configured.
-    opts, autotune_notes = hardware.effective_options(configured, learned_hardware)
+    opts, autotune_notes, autotune_notes_en = hardware.effective_options(
+        configured, learned_hardware
+    )
     ent = resolve_entities(opts)
     entity_checks = validate_entities()
     site = {
@@ -2588,6 +2590,7 @@ def run(notify: str = "always") -> dict:
         for item in grid_charge:
             if item["n"] in calib_zones:
                 item["desired"], item["reason"] = True, "калибровка BMS: заряд до 100%"
+                item["reason_en"] = "BMS calibration: charge to 100%"
             entity = ent["tou_grid_charge"][item["n"] - 1]
             item["entity"] = entity
             try:
@@ -2903,6 +2906,7 @@ def run(notify: str = "always") -> dict:
                 "learned": learned_hardware,
                 "autotune": bool(opts.get("autotune", False)),
                 "applied": autotune_notes,
+                "applied_en": autotune_notes_en,
             },
             "self_learning": {
                 "load": calibrations["load"].to_dict() if "load" in calibrations else None,

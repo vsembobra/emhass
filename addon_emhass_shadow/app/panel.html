@@ -86,36 +86,9 @@
 </header>
 
 <div id="status"></div>
-<div class="notice" id="notice" style="display:none"></div>
-<details class="card full" id="entscard" style="display:none;margin-bottom:14px">
-  <summary style="cursor:pointer;list-style:none">
-    <h3 style="display:inline"><span data-i18n="ents_title">Проверка и настройка сущностей</span> <span class="muted" id="entssummary" style="text-transform:none"></span>
-    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()" data-i18n="btn_save">Сохранить</button>
-    </h3>
-  </summary>
-  <div style="margin:10px 0">
-    <button id="discover" class="secondary" onclick="searchEntities()" data-i18n="btn_discover">Автоматический поиск</button>
-    <span class="muted" data-i18n="discovery_note">Поиск только по кнопке. Выберите один инвертор и проверьте значения перед сохранением.</span>
-    <div id="discovery-status" class="sub" role="status"></div>
-    <div id="discovery-preview" hidden>
-      <label><span data-i18n="discovery_device">Инвертор</span> <select id="discovery-device" onchange="renderDiscoveryPreview()"></select></label>
-      <table><tbody id="discovery-values"></tbody></table>
-      <button id="discovery-save" onclick="saveDiscovery()" disabled data-i18n="discovery_save">Сохранить найденные настройки</button>
-    </div>
-  </div>
-  <table>
-    <thead><tr><th data-i18n="th_param">Параметр</th><th data-i18n="th_entity">Сущность</th><th data-i18n="th_value">Значение</th><th data-i18n="th_status">Статус</th></tr></thead>
-    <tbody id="ents"></tbody>
-  </table>
-</details>
-<details class="card full" id="optscard" style="margin-bottom:14px">
-  <summary style="cursor:pointer;list-style:none">
-    <h3 style="display:inline"><span data-i18n="opts_title">Настройки аддона</span> <span class="muted" style="text-transform:none" data-i18n="opts_note">— то же, что на странице конфигурации аддона, с подсказками</span>
-    <button id="optssave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveOptions()" data-i18n="btn_save">Сохранить</button>
-    </h3>
-  </summary>
-  <div id="opts"></div>
-  <div class="muted" style="margin-top:10px;font-size:12px" data-i18n="opts_deferrable">Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.</div>
+<details class="notice" id="notice" style="display:none">
+  <summary style="cursor:pointer" data-i18n="notice_title">Сводка отчёта</summary>
+  <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
 </details>
 <div id="content" style="display:none">
 
@@ -227,12 +200,42 @@
   </div>
 </div>
 
+<details class="card full" id="entscard" style="display:none;margin-bottom:14px">
+  <summary style="cursor:pointer;list-style:none">
+    <h3 style="display:inline"><span data-i18n="ents_title">Проверка и настройка сущностей</span> <span class="muted" id="entssummary" style="text-transform:none"></span>
+    <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()" data-i18n="btn_save">Сохранить</button>
+    </h3>
+  </summary>
+  <div style="margin:10px 0">
+    <button id="discover" class="secondary" onclick="searchEntities()" data-i18n="btn_discover">Автоматический поиск</button>
+    <span class="muted" data-i18n="discovery_note">Поиск только по кнопке. Выберите один инвертор и проверьте значения перед сохранением.</span>
+    <div id="discovery-status" class="sub" role="status"></div>
+    <div id="discovery-preview" hidden>
+      <label><span data-i18n="discovery_device">Инвертор</span> <select id="discovery-device" onchange="renderDiscoveryPreview()"></select></label>
+      <table><tbody id="discovery-values"></tbody></table>
+      <button id="discovery-save" onclick="saveDiscovery()" disabled data-i18n="discovery_save">Сохранить найденные настройки</button>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th data-i18n="th_param">Параметр</th><th data-i18n="th_entity">Сущность</th><th data-i18n="th_value">Значение</th><th data-i18n="th_status">Статус</th></tr></thead>
+    <tbody id="ents"></tbody>
+  </table>
+</details>
+<details class="card full" id="optscard" style="margin-bottom:14px">
+  <summary style="cursor:pointer;list-style:none">
+    <h3 style="display:inline"><span data-i18n="opts_title">Настройки аддона</span> <span class="muted" style="text-transform:none" data-i18n="opts_note">— то же, что на странице конфигурации аддона, с подсказками</span>
+    <button id="optssave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveOptions()" data-i18n="btn_save">Сохранить</button>
+    </h3>
+  </summary>
+  <div id="opts"></div>
+  <div class="muted" style="margin-top:10px;font-size:12px" data-i18n="opts_deferrable">Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.</div>
+</details>
+
 <script src="vendor/echarts.min.js"></script>
 <script>
-// UI language: the switch in the header, persisted in localStorage. Server
-// payloads carry both label/hint and label_en/hint_en; report texts
-// (notification, advisory reasons) are generated on the server and stay
-// Russian for now.
+// UI language: the switch in the header, persisted in localStorage with a
+// cookie fallback. Server payloads carry both label/hint and label_en/hint_en;
+// report texts (notification) are generated on the server and stay Russian.
 const I18N = {
   ru: {
     title: "Теневой план батареи",
@@ -243,6 +246,7 @@ const I18N = {
     btn_recalc: "Пересчитать сейчас", btn_recalcing: "Считаю…",
     btn_save: "Сохранить", btn_saving: "Сохраняю…",
     no_reports: "Отчётов пока нет — первый расчёт выполнится по расписанию или по кнопке «Пересчитать сейчас».",
+    notice_title: "Сводка отчёта",
     ents_title: "Проверка и настройка сущностей",
     ents_problems: "— проблем: {n}", ents_ok: "— все на месте",
     th_param: "Параметр", th_entity: "Сущность", th_value: "Значение", th_status: "Статус",
@@ -396,6 +400,7 @@ const I18N = {
     btn_recalc: "Recalculate now", btn_recalcing: "Calculating…",
     btn_save: "Save", btn_saving: "Saving…",
     no_reports: "No reports yet — the first run happens on schedule or via «Recalculate now».",
+    notice_title: "Report summary",
     ents_title: "Entity check and setup",
     ents_problems: "— problems: {n}", ents_ok: "— all present",
     th_param: "Parameter", th_entity: "Entity", th_value: "Value", th_status: "Status",
@@ -543,7 +548,19 @@ const I18N = {
 };
 const UNITS_EN = {"дн.": "days", "ч": "h", "мин": "min", "кВт·ч": "kWh", "кВт": "kW", "кВтп": "kWp"};
 
-let LANG = localStorage.getItem("shadow_lang") ||
+// Home Assistant webviews can block or wipe localStorage; a long-lived cookie
+// is the fallback so the language choice survives either way.
+function langRead() {
+  try { const v = localStorage.getItem("shadow_lang"); if (v) return v; } catch (e) {}
+  const m = document.cookie.match(/(?:^|;\s*)shadow_lang=(ru|en)(?:;|$)/);
+  return m ? m[1] : null;
+}
+function langWrite(v) {
+  try { localStorage.setItem("shadow_lang", v); } catch (e) {}
+  document.cookie = "shadow_lang=" + v + "; path=/; max-age=31536000; SameSite=Lax";
+}
+
+let LANG = langRead() ||
   ((navigator.language || "ru").toLowerCase().startsWith("ru") ? "ru" : "en");
 
 function t(key, vars) {
@@ -568,7 +585,7 @@ function applyStatic() {
 
 function switchLang() {
   LANG = LANG === "ru" ? "en" : "ru";
-  localStorage.setItem("shadow_lang", LANG);
+  langWrite(LANG);
   applyStatic();
   load();
   loadSetup();
@@ -593,8 +610,12 @@ async function load() {
     renderStatus(status);
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
-    if (!latest) { document.getElementById("notice").style.display = "block";
-      document.getElementById("notice").textContent = t("no_reports"); return; }
+    if (!latest) {
+      const n = document.getElementById("notice");
+      n.style.display = "block"; n.open = true;
+      document.getElementById("noticetext").textContent = t("no_reports");
+      return;
+    }
     render(latest);
     renderHistory(history);
   } catch (e) { console.error(e); }
@@ -933,7 +954,8 @@ function render(r) {
     badge.textContent = t("badge_shadow");
   }
   const n = document.getElementById("notice");
-  n.style.display = "block"; n.textContent = r.notification;
+  n.style.display = "block";
+  document.getElementById("noticetext").textContent = r.notification;
   const a = r.advisory;
   document.getElementById("period").innerHTML = periodLine(r);
   document.getElementById("rec").textContent = pct(a.recommended_floor_soc);
@@ -1007,7 +1029,7 @@ function renderLearning(r) {
       : t("learn_collecting", {n: c.pairs}),
       c.active ? t("learn_coverage", {a: share(c.coverage_raw), b: share(c.coverage_calibrated)}) : "—"]);
   }
-  if (sl.drift && sl.drift.drift) rows.push([t("learn_drift"), esc(sl.drift.reasons.join(", ")), t("learn_drift_state")]);
+  if (sl.drift && sl.drift.drift) rows.push([t("learn_drift"), esc(pick(sl.drift, "reasons").join(", ")), t("learn_drift_state")]);
   const hw = (d.hardware || {}).learned;
   if (hw) {
     const b = hw.battery || {};
@@ -1018,7 +1040,7 @@ function renderLearning(r) {
     else rows.push([t("learn_battery"), t("learn_battery_few"), esc(b.status || "—")]);
     const g = hw.pv_geometry;
     if (g) rows.push([t("learn_panels"), t("learn_panels_geom", {kwp: g.kwp.toFixed(1), tilt: g.tilt_deg, az: g.azimuth_deg}),
-      g.reliable === false ? t("learn_panels_unreliable", {reason: esc(g.reason || "")}) : t("learn_panels_mae", {v: g.mae_kw.toFixed(2)})]);
+      g.reliable === false ? t("learn_panels_unreliable", {reason: esc(pick(g, "reason") || "")}) : t("learn_panels_mae", {v: g.mae_kw.toFixed(2)})]);
     const l = hw.limits || {};
     if (l.max_charge_kw) rows.push([t("learn_batt_power"), t("learn_batt_power_val", {c: l.max_charge_kw.toFixed(1), d: (l.max_discharge_kw || 0).toFixed(1)}), t("learn_observed")]);
   }
@@ -1030,9 +1052,11 @@ function renderLearning(r) {
         curtailed: v.curtailed_kwh.toFixed(1), cost: v.net_cost.toFixed(1)}) + (best ? "</b>" : "");
     });
     rows.push([t("learn_tuning", {n: tun.windows}), cells.join("<br>"), t("learn_tuning_legend")]);
-  } else if (tun) rows.push([t("learn_tuning_empty"), t("learn_tuning_nodata"), esc(tun.reason || "")]);
-  const applied = (d.hardware || {}).applied || [];
-  const auto = (d.hardware || {}).autotune;
+  } else if (tun) rows.push([t("learn_tuning_empty"), t("learn_tuning_nodata"), esc(pick(tun, "reason") || "")]);
+  const hwData = d.hardware || {};
+  const applied = hwData.applied || [];
+  const appliedList = (LANG === "en" && (hwData.applied_en || []).length) ? hwData.applied_en : applied;
+  const auto = hwData.autotune;
   const regime = (r.reserve || {}).regime || {};
   const prioKey = "prio_" + (d.priority_mode || "");
   const prioText = (I18N[LANG][prioKey] || I18N.ru[prioKey]) ? t(prioKey) : (d.priority_mode || "—");
@@ -1040,7 +1064,7 @@ function renderLearning(r) {
     t("learn_priority", {v: prioText}) +
     " · " + (regime.active ? t("learn_outages_live", {v: marginLabel(d.reserve_margin_hours || 0)}) : t("learn_outages_quiet")) +
     (a.autonomy_hours != null ? t("learn_autonomy", {v: a.autonomy_hours.toFixed(1)}) : "") +
-    " · " + t("learn_autotune", {v: auto ? (applied.length ? t("learn_autotune_applied", {v: applied.join(", ")}) : t("learn_autotune_on")) : t("learn_autotune_off")}) +
+    " · " + t("learn_autotune", {v: auto ? (appliedList.length ? t("learn_autotune_applied", {v: appliedList.join(", ")}) : t("learn_autotune_on")) : t("learn_autotune_off")}) +
     calibrationNote(d.calibration);
   document.getElementById("learn").innerHTML = rows.map(([w, v, s]) =>
     "<tr><td>" + w + "</td><td>" + v + "</td><td>" + s + "</td></tr>").join("");
@@ -1049,14 +1073,14 @@ function renderLearning(r) {
   const flex = a.deferrable || [];
   document.getElementById("flexwrap").style.display = flex.length ? "block" : "none";
   document.getElementById("flex").innerHTML = flex.map(f => "<tr><td>" + esc(f.name) + "</td><td>" +
-    (f.start_local ? esc(f.start_local) + "–" + esc(f.end_local) : esc(f.reason || "—")) + "</td><td>" +
+    (f.start_local ? esc(f.start_local) + "–" + esc(f.end_local) : esc(pick(f, "reason") || "—")) + "</td><td>" +
     (f.start_local ? share(f.solar_share) : "—") + "</td><td>" +
     (f.start_local ? f.free_solar_kwh.toFixed(1) + " " + t("unit_kwh") : "—") + "</td></tr>").join("");
 
   const gc = a.grid_charge || [];
   document.getElementById("gcwrap").style.display = gc.length ? "block" : "none";
   document.getElementById("gc").innerHTML = gc.map(g => "<tr><td>" + t("zone_n", {n: g.n}) + "</td><td>" +
-    esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? t(g.desired ? "gc_on" : "gc_off")) + "</td><td>" + esc(g.reason) + "</td></tr>").join("");
+    esc(g.current ?? "—") + "</td><td>" + esc(g.target_state ?? t(g.desired ? "gc_on" : "gc_off")) + "</td><td>" + esc(pick(g, "reason")) + "</td></tr>").join("");
 }
 
 function renderOptimizer(opt, profile, r) {
