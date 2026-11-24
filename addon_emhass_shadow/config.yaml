@@ -9,7 +9,7 @@ description: >-
   хуже, определяет ёмкость батареи и ориентацию панелей. По умолчанию
   только советует; с «Применять план к инвертору» пишет цели в инвертор.
 
-version: "0.18.1"
+version: "0.18.2"
 slug: emhass_shadow
 init: false
 arch:
@@ -128,7 +128,7 @@ translations:
         description: 0 = лежат горизонтально, 90 = вертикально. Например 26.
       panel_azimuth_deg:
         name: Азимут панелей, градусы
-        description: "Куда смотрят панели: 180 = строго на юг, 90 = восток, 270 = запад. 15° западнее юга = 195."
+        description: "Куда смотрят панели: 180 = строго на юг, 90 = восток, 270 = запад. 15° западнее юга = 195. Проверка по часу пика: при 180° пик в солнечный полдень, а он по местным часам часто не в 12:00 (в Стамбуле около 12:50 зимой и 13:05 летом); пик раньше полудня — панели восточнее юга. После изменения модель солнца переобучается на новой ориентации."
       min_soc_pct:
         name: Минимальный SOC, %
         description: Абсолютное дно разряда в процентах (25 = не разряжать ниже 25%). Резерв отключений может держать пол выше — этот параметр лишь жёсткая нижняя граница.
@@ -301,7 +301,7 @@ translations:
         description: 0 = flat, 90 = vertical. E.g. 26.
       panel_azimuth_deg:
         name: Panel azimuth, degrees
-        description: "Facing direction: 180 = due south, 90 = east, 270 = west. 15 degrees west of south = 195."
+        description: "Facing direction: 180 = due south, 90 = east, 270 = west. 15 degrees west of south = 195. Check against the hour of peak output: at 180 it peaks at solar noon, which on local clocks is often not 12:00 (around 12:50 in winter and 13:05 in summer in Istanbul); a peak before solar noon means the panels face east of south. A change retrains the PV model on the new orientation."
       min_soc_pct:
         name: Minimum SOC, %
         description: Absolute discharge floor in percent (25 = never discharge below 25%). The outage reserve may hold the floor higher — this is only the hard lower bound.

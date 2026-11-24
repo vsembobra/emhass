@@ -155,6 +155,46 @@ RECENCY_HALF_LIFE_DAYS = 60.0  # a row this old weighs half as much as today's
 MIN_HOLDOUT_ROWS = 72
 EVAL_ISSUE_STEP = pd.Timedelta(hours=12)
 HOUR = pd.Timedelta(hours=1)
+# Panel settings this far from the PV model's own geometry retrain it on the
+# new geometry: tilt and azimuth in degrees, peak power as a share.
+GEOMETRY_TOLERANCE = {"tilt_deg": 3.0, "azimuth_deg": 5.0, "kwp": 0.05}
+
+
+def configured_geometry(site: dict) -> PvGeometry:
+    """The array as the owner's settings (or a reliable learned fit) describe it."""
+    return PvGeometry(
+        float(site["latitude"]),
+        float(site["longitude"]),
+        float(site["panel_tilt_deg"]),
+        float(site["panel_azimuth_deg"]),
+        float(site["panel_kwp"]),
+        estimated_from_data=True,
+    )
+
+
+def geometry_changed(model: PvGeometry, site: dict) -> bool:
+    """Whether the panel settings moved away from the geometry a PV model was built on.
+
+    The model's features are clear-sky and plane-of-array power of that
+    geometry, so a corrected azimuth, tilt or kWp in the settings means
+    nothing until the model is rebuilt on it.
+    """
+    configured = configured_geometry(site)
+    turn = abs((configured.azimuth_deg - model.azimuth_deg + 180.0) % 360.0 - 180.0)
+    return (
+        abs(configured.tilt_deg - model.tilt_deg) > GEOMETRY_TOLERANCE["tilt_deg"]
+        or turn > GEOMETRY_TOLERANCE["azimuth_deg"]
+        or abs(configured.kwp - model.kwp) > GEOMETRY_TOLERANCE["kwp"] * max(model.kwp, 0.1)
+    )
+
+
+def pv_geometry_changed(models_dir: Path, site: dict) -> bool:
+    """geometry_changed for the saved PV model, read from its metadata only."""
+    try:
+        meta = json.loads((models_dir / pipeline.PV_MODEL / "bundle.json").read_text("utf-8"))
+        return geometry_changed(PvGeometry(**meta["geometry"]), site)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def recency_weights(index: pd.DatetimeIndex) -> pd.Series:
@@ -430,23 +470,19 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
     final = weather_models.scoped(MODELS, weather_models.selected(site)) / pipeline.PV_MODEL
     final.parent.mkdir(parents=True, exist_ok=True)
     champion = _try_load(PvQuantileBundle.load, final)
-    if champion is not None:
+    moved = champion is not None and geometry_changed(champion.geometry, site)
+    if champion is not None and not moved:
         geometry = champion.geometry  # reuse confirmed site geometry
         ratio_max = champion.ratio_max
         min_clearsky = champion.min_clearsky_kw
     else:
-        # Fresh install: start from the panel parameters in the add-on
-        # options; weekly retraining refines the ratio model on real data.
-        geometry = PvGeometry(
-            float(site["latitude"]),
-            float(site["longitude"]),
-            float(site["panel_tilt_deg"]),
-            float(site["panel_azimuth_deg"]),
-            float(site["panel_kwp"]),
-            estimated_from_data=True,
-        )
+        # Fresh install, or the owner corrected the panels in the settings:
+        # build on the settings' geometry. The old model's features describe
+        # another array, so it is not a fair champion: the rebuilt one wins.
+        geometry = configured_geometry(site)
         ratio_max = 1.2
         min_clearsky = 0.1
+        champion = None
     weather = _ensure_weather_history(site, audit.index[0]) if weather is None else weather
     # Indexed at mid-hour, inputs aligned to the measured hour (see
     # pipeline.pv_weather_frame).
@@ -467,6 +503,8 @@ def _retrain_pv(audit: pd.DataFrame, site: dict, weather: pd.DataFrame | None = 
         "train_rows": int(frame["pv_measured_kw"].notna().sum()),
         "holdout_from": start.isoformat(),
     }
+    if moved:
+        result["geometry_changed"] = True
     comparable = (
         pre["pv_measured_kw"].notna().sum() >= 48
         and holdout["pv_measured_kw"].notna().sum() >= MIN_HOLDOUT_ROWS // 2
@@ -535,25 +573,6 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             hardware.save(DATA, hardware.identify(_audit_frame(), opts))
         except Exception:
             pass  # advisory; the next run tries again
-    # A new PV input contract (pipeline.PV_MODEL) leaves no usable PV model
-    # after an upgrade: retrain once, right away, whatever the schedule says.
-    upgrade = (
-        state.get("pv_model_tried") != pipeline.PV_MODEL
-        and not (models_dir / pipeline.PV_MODEL / "bundle.json").exists()
-    )
-    if not force and not upgrade and not _enabled():
-        return retrain_status(model)
-    interval = _interval_days()
-    last = state.get("last_retrain_utc")
-    if not force and not upgrade and last:
-        age = datetime.now(UTC) - datetime.fromisoformat(last)
-        due = age >= timedelta(days=interval)
-        # Drift (persistent bias or a collapsed P10-P90 band on the last week
-        # of issued forecasts) retrains early, at most once a day.
-        if not due and _drift_detected() and age >= DRIFT_MIN_RETRAIN_GAP:
-            due = True
-        if not due:
-            return retrain_status(model)
     if site is None:
         opts, _, _ = hardware.effective_options(
             discovery.load_options(DATA), hardware.load(DATA)
@@ -569,6 +588,31 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
             "load_holidays": opts.get("load_holidays", ""),
             "open_meteo_model": model,
         }
+    # A new PV input contract (pipeline.PV_MODEL) leaves no usable PV model
+    # after an upgrade: retrain once, right away, whatever the schedule says.
+    upgrade = (
+        state.get("pv_model_tried") != pipeline.PV_MODEL
+        and not (models_dir / pipeline.PV_MODEL / "bundle.json").exists()
+    )
+    # Corrected panels in the settings (or a learned geometry autotune now
+    # trusts) mean nothing to a model built on the old geometry: right away too.
+    panels = [site.get(k) for k in ("panel_tilt_deg", "panel_azimuth_deg", "panel_kwp")]
+    upgrade = upgrade or (
+        state.get("pv_geometry_tried") != panels and pv_geometry_changed(models_dir, site)
+    )
+    if not force and not upgrade and not _enabled():
+        return retrain_status(model)
+    interval = _interval_days()
+    last = state.get("last_retrain_utc")
+    if not force and not upgrade and last:
+        age = datetime.now(UTC) - datetime.fromisoformat(last)
+        due = age >= timedelta(days=interval)
+        # Drift (persistent bias or a collapsed P10-P90 band on the last week
+        # of issued forecasts) retrains early, at most once a day.
+        if not due and _drift_detected() and age >= DRIFT_MIN_RETRAIN_GAP:
+            due = True
+        if not due:
+            return retrain_status(model)
     result = {"started_utc": datetime.now(UTC).isoformat(), "models": {}}
     try:
         audit = _audit_frame()
@@ -604,6 +648,11 @@ def retrain_if_due(force: bool = False, site: dict | None = None) -> dict:
     if any((models_dir / name / "bundle.json").exists() for name in ("load_quantiles_v1", pipeline.PV_MODEL)):
         state["last_retrain_utc"] = result["started_utc"]
     state["pv_model_tried"] = pipeline.PV_MODEL
+    # Once per panel setting: a rebuild that could not be promoted is not
+    # retried on every run, only on the schedule or the next settings change.
+    state["pv_geometry_tried"] = [
+        site.get(k) for k in ("panel_tilt_deg", "panel_azimuth_deg", "panel_kwp")
+    ]
     state["models"] = result["models"]
     _save_state(state, model)
     return retrain_status(model)

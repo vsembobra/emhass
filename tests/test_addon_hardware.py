@@ -152,12 +152,12 @@ def _learned():
 
 
 def test_effective_options_off_by_default():
-    effective, notes = hardware.effective_options(dict(OPTS), _learned())
+    effective, notes, _ = hardware.effective_options(dict(OPTS), _learned())
     assert effective == OPTS and notes == []
 
 
 def test_effective_options_apply_learned_values():
-    effective, notes = hardware.effective_options(dict(OPTS, autotune=True), _learned())
+    effective, notes, _ = hardware.effective_options(dict(OPTS, autotune=True), _learned())
     assert effective["capacity_kwh"] == 28.4 and effective["_soh_identified"]
     assert effective["charge_efficiency"] == effective["discharge_efficiency"] == 0.96
     assert effective["max_charge_kw"] == 6.0  # observed above the setting: raised
@@ -169,14 +169,14 @@ def test_effective_options_apply_learned_values():
 def test_effective_options_ignore_unreliable_geometry():
     learned = _learned()
     learned["pv_geometry"]["reliable"] = False
-    effective, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    effective, _, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
     assert "panel_kwp" not in effective
 
 
 def test_effective_options_ignore_unconfirmed_battery():
     learned = _learned()
     learned["battery"]["status"] = "low_confidence"
-    effective, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    effective, _, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
     assert effective["capacity_kwh"] == 32.0 and "_soh_identified" not in effective
 
 
@@ -185,13 +185,13 @@ def test_effective_options_reject_capacity_from_a_mixed_history():
     # the pooled estimate (40.9 between 32 and 48) must not move the setting.
     learned = _learned()
     learned["battery"]["capacity_kwh"] = 40.9
-    effective, notes = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    effective, notes, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
     assert effective["capacity_kwh"] == 32.0 and "_soh_identified" not in effective
     assert effective["charge_efficiency"] == 0.95  # eta travels with the capacity
     assert any("расходится" in note for note in notes)
     # A learned value within the tolerance still applies.
     learned["battery"]["capacity_kwh"] = 38.0
-    effective, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
+    effective, _, _ = hardware.effective_options(dict(OPTS, autotune=True), learned)
     assert effective["capacity_kwh"] == 38.0
 
 
