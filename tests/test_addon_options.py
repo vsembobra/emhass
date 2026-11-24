@@ -109,6 +109,32 @@ def test_update_options_empty_changes_is_noop(monkeypatch):
     assert pipeline.update_options({"evil_key": 1}) == {"saved": {}, "rejected": ["evil_key"]}
 
 
+def test_panel_can_save_and_clear_flexible_loads(monkeypatch, tmp_path):
+    sent = _patch_supervisor(monkeypatch, tmp_path, {"tariff_normal_price": 2.0})
+    loads = [{"name": "Boiler", "power_kw": "2", "hours": "1.5", "window": "09:00-17:00"}]
+    pipeline.update_options({"deferrable_loads": loads})
+    assert sent["body"]["options"]["deferrable_loads"] == [
+        {"name": "Boiler", "power_kw": 2.0, "hours": 1.5, "window": "09:00-17:00"}
+    ]
+    pipeline.update_options({"deferrable_loads": []})
+    assert sent["body"]["options"]["deferrable_loads"] == []
+    assert pipeline.options()["deferrable_loads"] == []
+
+
+@pytest.mark.parametrize("loads", [
+    "[]", [None], [{"name": "Boiler", "power_kw": True, "hours": 2}],
+    [{"name": "Boiler", "power_kw": 31, "hours": 2}],
+    [{"name": "Boiler", "power_kw": 2, "hours": "nan"}],
+    [{"name": "Boiler", "power_kw": 2, "hours": 13}],
+    [{"name": "Boiler", "power_kw": 2, "hours": 2, "window": "25:00-26:00"}],
+])
+def test_invalid_flexible_loads_are_rejected_before_saving(monkeypatch, tmp_path, loads):
+    sent = _patch_supervisor(monkeypatch, tmp_path, {})
+    with pytest.raises(ValueError):
+        pipeline.update_options({"deferrable_loads": loads})
+    assert sent == {}
+
+
 def test_coerce_option_bool_strings():
     assert options_meta.coerce_option("apply_mode", "true") is True
     assert options_meta.coerce_option("apply_mode", "0") is False
@@ -148,7 +174,7 @@ def test_options_view_carries_english_mirror():
     item = next(i for g in groups for i in g["items"] if i["key"] == "capacity_kwh")
     assert item["label_en"] == "Battery capacity"
     titles = [g["title_en"] for g in groups]
-    assert "Inverter and battery" in titles and "Application" in titles
+    assert "Inverter control" in titles and "Battery" in titles and "Application" in titles
 
 
 def test_entity_metadata_is_bilingual():

@@ -7,11 +7,12 @@ this metadata and update_options() validates edits against it, so a bad
 value is rejected with a readable message instead of breaking the
 Supervisor schema check.
 
-deferrable_loads stays add-on-config only: it is a list of objects and
-does not fit a flat input row.
+Structured flexible loads use the same save path as scalar settings.
 """
 
 import re
+
+import settings_lists
 
 # Every option's built-in value. The add-on settings list only VISIBLE (the
 # owner's decisions); the rest stay optional in the schema, are applied from
@@ -97,6 +98,12 @@ VISIBLE = (
 # label/hint are Russian, label_en/hint_en their English mirror; the panel
 # picks per its language switch.
 OPTION_META = {
+    "deferrable_loads": {
+        "type": "loads",
+        "label": "Приборы с гибким временем работы", "label_en": "Appliances with flexible run times",
+        "hint": "Для каждого прибора задайте мощность, длительность и допустимое время работы. Аддон рекомендует время включения от солнца; сами приборы не переключает. Пустое окно — любое время суток.",
+        "hint_en": "Set each appliance's power, duration and allowed time window. The add-on recommends when to use solar; it does not switch appliances. An empty window allows any time of day.",
+    },
     "open_meteo_model": {
         "type": "select", "choices": ["auto", "ecmwf", "icon", "gfs"],
         "label": "Погодная модель Open-Meteo", "label_en": "Open-Meteo weather model",
@@ -498,25 +505,29 @@ OPTION_META = {
     },
 }
 
-# Groups for the settings card (non-entity keys, panel order). Inverter and
-# battery decisions sit in one group, application behaviour in another.
+# Editable settings; sensor bindings have their own grouped status editor.
 OPTION_GROUPS = [
+    {"title": "Погода и прогнозы", "title_en": "Weather and forecasts", "keys": [
+        "open_meteo_model",
+    ]},
     {"title": "Объект", "title_en": "Site", "keys": [
         "latitude", "longitude", "time_zone",
-        "history_backfill_days", "history_statistics_days",
     ]},
-    {"title": "Инвертор и батарея", "title_en": "Inverter and battery", "keys": [
+    {"title": "Солнечные панели", "title_en": "Solar panels", "keys": [
+        "panel_kwp", "panel_tilt_deg", "panel_azimuth_deg",
+    ]},
+    {"title": "Батарея", "title_en": "Battery", "keys": [
         "capacity_kwh", "min_soc_pct", "max_soc_pct",
         "charge_efficiency", "discharge_efficiency",
         "max_charge_kw", "max_discharge_kw",
+        "calibration_charge_enabled", "calibration_interval_days",
+    ]},
+    {"title": "Управление инвертором", "title_en": "Inverter control", "keys": [
         "apply_mode",
         "tou_zones", "tou_soc_step_pct",
         "tou_soc_entity_template", "tou_time_entity_template",
         "tou_grid_charge_entity_template",
         "tou_grid_charge_on_option", "tou_grid_charge_off_option",
-    ]},
-    {"title": "Солнечные панели", "title_en": "Solar panels", "keys": [
-        "panel_kwp", "panel_tilt_deg", "panel_azimuth_deg", "open_meteo_model",
     ]},
     {"title": "Тариф и планирование", "title_en": "Tariff and planning", "keys": [
         "optimizer_enabled", "day_zone_strategy",
@@ -526,15 +537,40 @@ OPTION_GROUPS = [
         "priority_mode",
         "reserve_cold_start_hours", "reserve_pv_aware", "outage_memory_days",
     ]},
-    {"title": "Обучение и автонастройка", "title_en": "Learning and autotune", "keys": [
+    {"title": "Переносимые нагрузки", "title_en": "Flexible loads", "keys": [
+        "deferrable_loads",
+    ]},
+    {"title": "Обучение и история", "title_en": "Learning and history", "keys": [
         "autotune",
         "retrain_enabled", "retrain_interval_days", "load_holidays",
-        "calibration_charge_enabled", "calibration_interval_days",
+        "history_backfill_days", "history_statistics_days",
     ]},
     {"title": "Приложение", "title_en": "Application", "keys": [
         "run_time", "replan_minutes", "notifications", "publish_sensors",
     ]},
 ]
+
+ENTITY_GROUPS = [
+    {"title": "Дом и солнечная генерация", "title_en": "House and solar generation", "keys": [
+        "entity_load_power", "entity_critical_load_power", "entity_pv_power", "entity_outdoor_temperature",
+    ]},
+    {"title": "Батарея", "title_en": "Battery", "keys": [
+        "entity_battery_soc", "entity_battery_power", "entity_battery_soh",
+    ]},
+    {"title": "Электросеть", "title_en": "Grid", "keys": [
+        "entity_grid_status", "entity_grid_power", "entity_grid_voltage", "entity_export_counter",
+    ]},
+    {"title": "Управление инвертором", "title_en": "Inverter control", "keys": [
+        "floor_input_entity", "tou_soc_entity_template", "tou_time_entity_template", "tou_grid_charge_entity_template",
+    ]},
+]
+
+
+def entity_group(key: str) -> dict:
+    for order, group in enumerate(ENTITY_GROUPS):
+        if key in group["keys"]:
+            return {"group": group["title"], "group_en": group["title_en"], "group_order": order}
+    return {"group": "Другие сущности", "group_en": "Other entities", "group_order": len(ENTITY_GROUPS)}
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -549,6 +585,8 @@ def coerce_option(key: str, value, lang: str = "ru"):
     meta = OPTION_META[key]
     kind = meta["type"]
     label = meta.get("label_en" if lang == "en" else "label", key)
+    if kind == "loads":
+        return settings_lists.deferrable_loads(value, lang)
     if kind == "bool":
         if isinstance(value, bool):
             return value

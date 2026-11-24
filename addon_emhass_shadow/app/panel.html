@@ -59,6 +59,13 @@
   .opthint { grid-column: 2; color: var(--muted); font-size: 12px; line-height: 1.4; }
   .autotag { color: var(--good); font-size: 11px; margin-left: 6px; white-space: nowrap; }
   .opthint.ent { grid-column: auto; margin-top: 2px; }
+  .entitygroup th { color: var(--accent); padding-top: 18px; text-transform: none; }
+  .optinput[data-type="loads"] { max-width: none; background: transparent; border: 0; padding: 0; }
+  .optinput[data-type="loads"].changed { outline: 1px solid var(--warn); outline-offset: 5px; }
+  .flexload-row { display: grid; grid-template-columns: 1.5fr .8fr .8fr 1.4fr auto; gap: 8px; align-items: end; margin-bottom: 10px; }
+  .flexload-row label { color: var(--muted); font-size: 12px; min-width: 0; }
+  .loadinput { width: 100%; box-sizing: border-box; margin-top: 4px; background: #141821; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+  @media (max-width: 900px) { .flexload-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } .flexload-row button { justify-self: start; } }
   .card.full { overflow-x: auto; }
   @media (max-width: 640px) {
     body { padding: 12px; }
@@ -228,7 +235,6 @@
     </h3>
   </summary>
   <div id="opts"></div>
-  <div class="muted" style="margin-top:10px;font-size:12px" data-i18n="opts_deferrable">Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.</div>
 </details>
 
 <script src="vendor/echarts.min.js"></script>
@@ -252,7 +258,9 @@ const I18N = {
     th_param: "Параметр", th_entity: "Сущность", th_value: "Значение", th_status: "Статус",
     opts_title: "Настройки аддона",
     opts_note: "— то же, что на странице конфигурации аддона, с подсказками",
-    opts_deferrable: "Переносимые нагрузки (deferrable_loads) редактируются на странице конфигурации аддона — это список объектов, сюда не влезает.",
+    load_name: "Название прибора", load_power: "Мощность, кВт", load_hours: "Длительность, ч",
+    load_window: "Допустимое время", load_add: "Добавить прибор", load_remove: "Удалить",
+    entities_other: "Другие сущности",
     save_failed: "Не сохранилось: ", saved_rejected: "Сохранено, но эти ключи отклонены: ",
     card_rec: "Рекомендуемый пол SOC", card_load: "Нагрузка, 24 ч",
     card_pv: "Солнце, 24 ч", card_res: "Резерв отключений",
@@ -406,7 +414,9 @@ const I18N = {
     th_param: "Parameter", th_entity: "Entity", th_value: "Value", th_status: "Status",
     opts_title: "Add-on settings",
     opts_note: "— the same as the add-on configuration page, with hints",
-    opts_deferrable: "Flexible loads (deferrable_loads) are edited on the add-on configuration page — a list of objects does not fit here.",
+    load_name: "Appliance name", load_power: "Power, kW", load_hours: "Duration, h",
+    load_window: "Allowed time", load_add: "Add appliance", load_remove: "Remove",
+    entities_other: "Other entities",
     save_failed: "Save failed: ", saved_rejected: "Saved, but these keys were rejected: ",
     card_rec: "Recommended SOC floor", card_load: "Load, 24 h",
     card_pv: "Solar, 24 h", card_res: "Outage reserve",
@@ -809,11 +819,15 @@ function renderEntities(checks) {
     not_numeric: [t("ent_not_numeric"), "var(--warn)"], unexpected: [t("ent_unexpected"), "var(--warn)"],
   };
   const order = {missing: 0, not_numeric: 1, unexpected: 2, ok: 3, ok_number: 3, skipped: 4};
-  const rows = checks.slice().sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3));
+  const rows = checks.slice().sort((a, b) => (a.group_order ?? 99) - (b.group_order ?? 99) || (order[a.status] ?? 3) - (order[b.status] ?? 3));
+  let previousGroup = null;
   document.getElementById("ents").innerHTML = rows.map(c => {
+    const group = pick(c, "group") || t("entities_other");
+    const heading = group === previousGroup ? "" : "<tr class='entitygroup'><th colspan='4'>" + esc(group) + "</th></tr>";
+    previousGroup = group;
     const [text, color] = label[c.status] || [c.status, "var(--muted)"];
     const entityCell = c.key
-      ? "<input class='entinput' list='entity-ids' data-key='" + c.key + "' data-original='" +
+      ? "<input class='entinput' list='entity-ids' aria-label='" + esc(pick(c, "label")) + "' data-key='" + c.key + "' data-original='" +
         (c.entity || "") + "' value='" + (c.entity || "") + "' oninput='onEntityInput()' " +
         "placeholder='" + esc(t("ent_placeholder")) + "'>"
       : "<span class='muted'>" + (c.entity || "—") + "</span>";
@@ -821,7 +835,7 @@ function renderEntities(checks) {
     const hint = pick(c, "hint");
     const labelCell = esc(pick(c, "label")) +
       (hint ? "<div class='opthint ent'>" + esc(hint) + "</div>" : "");
-    return "<tr><td>" + labelCell + "</td><td>" + entityWithSource + "</td><td>" +
+    return heading + "<tr><td>" + labelCell + "</td><td>" + entityWithSource + "</td><td>" +
       (c.state == null ? "—" : c.state) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
   }).join("");
 }
@@ -832,14 +846,62 @@ function autoTag(source) {
     ? "<span class='autotag'>" + esc(t("autotag", {v: source})) + "</span>" : "";
 }
 
+function normalizedLoad(load) {
+  const item = {name: load.name || "", power_kw: Number(load.power_kw), hours: Number(load.hours)};
+  if (load.window && load.window.trim()) item.window = load.window.trim();
+  return item;
+}
+
+function flexibleLoadRow(load) {
+  const field = (key, label, type, extra = "") => "<label><span data-i18n='" + label + "'>" + esc(t(label)) +
+    "</span><input class='loadinput' data-field='" + key + "' type='" + type + "' value='" +
+    esc(load[key] ?? "") + "' " + extra + " oninput='onOptionInput()'></label>";
+  return "<div class='flexload-row'>" + field("name", "load_name", "text") +
+    field("power_kw", "load_power", "number", "min='0.1' max='30' step='any'") +
+    field("hours", "load_hours", "number", "min='0.5' max='12' step='any'") +
+    field("window", "load_window", "text", "placeholder='09:00-17:00'") +
+    "<button type='button' class='secondary' onclick='removeFlexibleLoad(this)' data-i18n='load_remove'>" + esc(t("load_remove")) + "</button></div>";
+}
+
+function readFlexibleLoads(container) {
+  return [...container.querySelectorAll(".flexload-row")].map(row => normalizedLoad(Object.fromEntries(
+    [...row.querySelectorAll(".loadinput")].map(input => [input.dataset.field, input.value])
+  )));
+}
+
+function addFlexibleLoad() {
+  document.getElementById("flexible-load-rows").insertAdjacentHTML("beforeend", flexibleLoadRow({name: "", power_kw: 1, hours: 1}));
+  onOptionInput();
+}
+
+function removeFlexibleLoad(button) {
+  button.closest(".flexload-row").remove();
+  onOptionInput();
+}
+
+function optionValue(element) {
+  if (element.dataset.type === "loads") return readFlexibleLoads(element);
+  return element.type === "checkbox" ? element.checked : element.value.trim();
+}
+
+function optionSnapshot(element) {
+  const value = optionValue(element);
+  return element.dataset.type === "loads" ? JSON.stringify(value) : typeof value === "boolean" ? (value ? "1" : "0") : value;
+}
+
 function renderOptions(groups) {
   // Don't clobber unsaved edits with the periodic refresh.
   if (document.querySelector(".optinput.changed")) return;
   const html = groups.map(g => '<div class="optgroup"><h4>' + esc(pick(g, "title")) + "</h4>" +
     g.items.map(item => {
       let input;
-      const attrs = "class='optinput' data-key='" + item.key + "' data-type='" + item.type + "'";
-      if (item.type === "bool") {
+      const attrs = "id='opt-" + item.key + "' class='optinput' data-key='" + item.key + "' data-type='" + item.type + "'";
+      if (item.type === "loads") {
+        const loads = (item.value || []).map(normalizedLoad);
+        input = "<div " + attrs + " role='group' aria-labelledby='label-opt-" + item.key + "' data-original='" + esc(JSON.stringify(loads)) + "'>" +
+          "<div id='flexible-load-rows'>" + loads.map(flexibleLoadRow).join("") + "</div>" +
+          "<button type='button' class='secondary' onclick='addFlexibleLoad()' data-i18n='load_add'>" + esc(t("load_add")) + "</button></div>";
+      } else if (item.type === "bool") {
         input = "<input type='checkbox' " + attrs + (item.value ? " checked" : "") +
           " data-original='" + (item.value ? "1" : "0") + "' onchange='onOptionInput()'>";
       } else if (item.type === "select") {
@@ -859,7 +921,10 @@ function renderOptions(groups) {
           (item.type === "time" ? " placeholder='" + t("time_placeholder") + "'" : "") + ">";
       }
       const unitHtml = (item.unit ? " <span class='muted'>" + esc(unit(item.unit)) + "</span>" : "") + autoTag(item.source);
-      return "<div class='optrow'><div class='optlabel'>" + esc(pick(item, "label")) + "</div>" +
+      const label = item.type === "loads"
+        ? "<div class='optlabel' id='label-opt-" + item.key + "'>" + esc(pick(item, "label")) + "</div>"
+        : "<label class='optlabel' for='opt-" + item.key + "'>" + esc(pick(item, "label")) + "</label>";
+      return "<div class='optrow'>" + label +
         "<div>" + input + unitHtml + "</div>" +
         "<div class='opthint'>" + esc(pick(item, "hint")) + "</div></div>";
     }).join("") + "</div>").join("");
@@ -869,7 +934,7 @@ function renderOptions(groups) {
 function onOptionInput() {
   let changed = false;
   document.querySelectorAll(".optinput").forEach(el => {
-    const now = el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim();
+    const now = optionSnapshot(el);
     const dirty = now !== el.dataset.original;
     el.classList.toggle("changed", dirty);
     if (dirty) changed = true;
@@ -881,7 +946,7 @@ async function saveOptions() {
   const b = document.getElementById("optssave");
   const options = {};
   document.querySelectorAll(".optinput.changed").forEach(el => {
-    options[el.dataset.key] = el.type === "checkbox" ? el.checked : el.value.trim();
+    options[el.dataset.key] = optionValue(el);
   });
   b.disabled = true; b.textContent = t("btn_saving");
   try {
@@ -897,7 +962,7 @@ async function saveOptions() {
         alert(t("saved_rejected") + resp.rejected.join(", "));
       // Mark edits as persisted so the periodic refresh may re-render.
       document.querySelectorAll(".optinput.changed").forEach(el => {
-        el.dataset.original = el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim();
+        el.dataset.original = optionSnapshot(el);
         el.classList.remove("changed");
       });
       document.getElementById("optssave").style.display = "none";

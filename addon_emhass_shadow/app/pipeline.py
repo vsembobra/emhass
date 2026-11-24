@@ -2049,8 +2049,7 @@ def validate_entities() -> list[dict]:
         ("Статус сети", "Grid status", str(ent["grid_binary"] or ""), "binary", "entity_grid_status"),
     ]
     specs += [
-        ("Напряжение сети", "Grid voltage", str(entity or ""), "number", "entity_grid_voltage")
-        for entity in ent["voltages"].values()
+        ("Напряжение сети", "Grid voltage", str(opts.get("entity_grid_voltage") or ""), "number", "entity_grid_voltage")
     ]
     # Zone rows are not edited one by one; their source is the template's.
     zone_source: dict[str, str] = {}
@@ -2083,6 +2082,7 @@ def validate_entities() -> list[dict]:
             "hint": options_meta.entity_hint(key) if key else None,
             "hint_en": options_meta.entity_hint(key, "en") if key else None,
             "source": sources.get(key or zone_source.get(label, "")),
+            **options_meta.entity_group(key or zone_source.get(label, "")),
         }
         if not entity:
             row["status"] = "missing" if key in discovery.REQUIRED_KEYS else "skipped"
