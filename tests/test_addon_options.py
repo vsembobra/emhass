@@ -227,3 +227,80 @@ def test_without_the_supervisor_the_file_stays(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "DATA", tmp_path)
     monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
     assert pipeline.sync_options() == {"min_soc_pct": 10.0}
+
+
+def test_reset_in_addon_configuration_clears_stale_sensor_bindings(monkeypatch, tmp_path):
+    _supervisor_holding(monkeypatch, tmp_path, {"entity_pv_power": "sensor.old_pv"}, {})
+    assert pipeline.sync_options() == {}
+    assert pipeline.options()["entity_pv_power"] == ""
+
+
+def test_panel_save_after_reset_does_not_restore_old_sensor_bindings(monkeypatch, tmp_path):
+    posted = _supervisor_holding(
+        monkeypatch, tmp_path, {"entity_pv_power": "sensor.old_pv"}, {}
+    )
+    pipeline.update_options({"entity_load_power": "sensor.new_load"})
+    assert posted["body"]["options"] == {"entity_load_power": "sensor.new_load"}
+    assert pipeline.stored_options() == {"entity_load_power": "sensor.new_load"}
+
+
+def test_entities_page_reads_bindings_saved_in_addon_configuration(monkeypatch, tmp_path):
+    import main
+
+    _supervisor_holding(
+        monkeypatch, tmp_path,
+        {"entity_pv_power": "sensor.old_pv"}, {"entity_pv_power": "sensor.new_pv"},
+    )
+    monkeypatch.setattr(pipeline, "_STATES", None)
+    monkeypatch.setattr(pipeline, "ha_get", lambda *a, **kw: [
+        {"entity_id": "sensor.new_pv", "state": "1234"}
+    ])
+    handler = object.__new__(main.Handler)
+    handler.path = "/api/entities"
+    responses = []
+    handler._json = lambda status, body: responses.append((status, body))
+    handler.do_GET()
+    assert responses[-1][0] == 200
+    row = next(c for c in responses[-1][1]["checks"] if c["key"] == "entity_pv_power")
+    assert row["entity"] == "sensor.new_pv"
+    assert row["state"] == "1234"
+    assert row["status"] == "ok"
+
+
+def test_parallel_sync_cannot_overwrite_a_panel_sensor_save(monkeypatch, tmp_path):
+    import threading
+
+    _supervisor_holding(
+        monkeypatch, tmp_path,
+        {"entity_pv_power": "sensor.older_pv"}, {"entity_pv_power": "sensor.old_pv"},
+    )
+    reading_done, release, save_done = threading.Event(), threading.Event(), threading.Event()
+    original = pipeline._write_options
+
+    def delayed_write(opts):
+        if threading.current_thread().name == "settings-sync":
+            reading_done.set()
+            assert release.wait(2)
+        original(opts)
+
+    monkeypatch.setattr(pipeline, "_write_options", delayed_write)
+
+    def save():
+        try:
+            pipeline.update_options({"entity_pv_power": "sensor.new_pv"})
+        finally:
+            save_done.set()
+
+    sync = threading.Thread(target=pipeline.sync_options, name="settings-sync")
+    writer = threading.Thread(target=save)
+    sync.start()
+    try:
+        assert reading_done.wait(1)
+        writer.start()
+        save_done.wait(0.1)
+    finally:
+        release.set()
+        sync.join(2)
+        writer.join(2)
+    assert not sync.is_alive() and not writer.is_alive()
+    assert pipeline.stored_options()["entity_pv_power"] == "sensor.new_pv"

@@ -452,6 +452,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif path.endswith("/api/entities") or path == "/api/entities":
             try:
+                pipeline.sync_options()
                 self._json(200, {"checks": pipeline.validate_entities()})
             except Exception:
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})

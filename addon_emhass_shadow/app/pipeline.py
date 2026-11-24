@@ -16,6 +16,7 @@ import json
 import math
 import os
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -1893,6 +1894,7 @@ ENTITY_OPTION_KEYS = [
 ]
 
 SUPERVISOR_BASE = "http://supervisor"
+_OPTIONS_LOCK = threading.Lock()
 
 
 def supervisor_options() -> dict | None:
@@ -1914,7 +1916,7 @@ def supervisor_options() -> dict | None:
     except Exception:
         return None
     stored = data.get("options")
-    return dict(stored) if isinstance(stored, dict) and stored else None
+    return dict(stored) if isinstance(stored, dict) else None
 
 
 def _write_options(opts: dict) -> None:
@@ -1930,15 +1932,15 @@ def sync_options() -> dict:
     edit applies at the next run without restarting the add-on. Without the
     Supervisor (tests, a local run) the file stays as it is.
     """
-    current = stored_options()
-    stored = supervisor_options()
-    if stored is None:
-        return current
-    # The Supervisor's options replace the file: an option cleared in the
-    # settings must disappear here too, or it would remain configured locally.
-    if stored != current:
-        _write_options(stored)
-    return stored
+    with _OPTIONS_LOCK:
+        current = stored_options()
+        stored = supervisor_options()
+        if stored is None:
+            return current
+        # An empty settings object is a reset, not an unavailable Supervisor.
+        if stored != current:
+            _write_options(stored)
+        return stored
 
 
 def _post_options(opts: dict) -> None:
@@ -1977,13 +1979,15 @@ def update_options(changes: dict, lang: str = "ru") -> dict:
             rejected.append(key)
     if not filtered and not cleared:
         return {"saved": {}, "rejected": rejected}
-    # Only the owner's own values are saved: never the defaults or what
-    # was found, or those would stop following Home Assistant.
-    opts = {**(supervisor_options() or stored_options()), **filtered}
-    for key in cleared:
-        opts.pop(key, None)
-    _post_options(opts)
-    _write_options(opts)
+    # Serialize saves with refreshes: a late sync must not overwrite a new
+    # sensor binding or race another writer's temporary options file.
+    with _OPTIONS_LOCK:
+        stored = supervisor_options()
+        opts = {**(stored_options() if stored is None else stored), **filtered}
+        for key in cleared:
+            opts.pop(key, None)
+        _post_options(opts)
+        _write_options(opts)
     return {"saved": filtered, "cleared": cleared, "rejected": rejected}
 
 
