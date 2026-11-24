@@ -139,7 +139,7 @@ def test_other_integrations_find_nothing():
     assert discovery.discover(registry, STATES, None)["found"] == {}
 
 
-def test_owner_value_wins_empty_follows_ha_none_switches_off():
+def test_owner_value_wins_empty_stays_empty_and_none_switches_off():
     found = discovery.discover(_registry(), STATES, CORE)
     stored = {
         "capacity_kwh": 30.0,  # typed by the owner
@@ -149,14 +149,14 @@ def test_owner_value_wins_empty_follows_ha_none_switches_off():
     }
     opts = discovery.effective(stored, found)
     assert opts["capacity_kwh"] == 30.0
-    assert opts["entity_pv_power"] == "sensor.deye_pv_power"
+    assert opts["entity_pv_power"] == ""
     assert opts["entity_battery_soh"] == ""
-    assert opts["latitude"] == 50.45 and opts["min_soc_pct"] == 25.0
+    assert opts["latitude"] == options_meta.DEFAULTS["latitude"] and opts["min_soc_pct"] == 25.0
     assert opts["run_time"] == options_meta.DEFAULTS["run_time"]  # hidden: built-in value
     sources = discovery.sources(stored, found)
     assert sources["capacity_kwh"] == "manual"
-    assert sources["entity_pv_power"] == discovery.SOLARMAN
-    assert sources["latitude"] == discovery.CORE
+    assert sources["entity_pv_power"] == "default"
+    assert sources["latitude"] == "default"
     assert sources["run_time"] == "default"
 
 
@@ -219,28 +219,24 @@ def _supervisor(monkeypatch, tmp_path, stored):
     return posted
 
 
-def test_compaction_runs_once_and_shortens_the_settings(monkeypatch, tmp_path):
+def test_reading_options_preserves_saved_settings_and_never_posts(monkeypatch, tmp_path):
     stored = dict(options_meta.DEFAULTS, min_soc_pct=25.0)
     posted = _supervisor(monkeypatch, tmp_path, stored)
     discovery.save(tmp_path, discovery.discover(_registry(), STATES, CORE))
-    dropped = pipeline.compact_options()
-    assert "entity_battery_power" in dropped and len(posted) == 1
-    assert set(pipeline.stored_options()) == {
-        *options_meta.VISIBLE,
-        "tou_grid_charge_entity_template",
-    }
-    assert pipeline.options()["entity_battery_power"] == "sensor.deye_battery_power"
-    assert pipeline.compact_options() == [] and len(posted) == 1  # once
+    before = dict(stored)
+    assert pipeline.options()["entity_battery_power"] == ""
+    assert pipeline.stored_options() == before
+    assert posted == []
 
 
-def test_clearing_an_option_in_the_panel_makes_it_automatic(monkeypatch, tmp_path):
+def test_clearing_an_option_does_not_resume_automatic_discovery(monkeypatch, tmp_path):
     stored = {"min_soc_pct": 25.0, "capacity_kwh": 30.0}
     posted = _supervisor(monkeypatch, tmp_path, stored)
     discovery.save(tmp_path, discovery.discover(_registry(), STATES, CORE))
     result = pipeline.update_options({"capacity_kwh": ""})
-    assert result["automatic"] == ["capacity_kwh"]
+    assert result["cleared"] == ["capacity_kwh"]
     assert posted[-1] == {"min_soc_pct": 25.0}
-    assert pipeline.options()["capacity_kwh"] == pytest.approx(31.7)
+    assert pipeline.options()["capacity_kwh"] == options_meta.DEFAULTS["capacity_kwh"]
 
 
 def test_an_option_cleared_in_the_settings_leaves_the_file(monkeypatch, tmp_path):
@@ -252,7 +248,7 @@ def test_an_option_cleared_in_the_settings_leaves_the_file(monkeypatch, tmp_path
     assert pipeline.stored_options() == {"min_soc_pct": 25.0}
 
 
-def test_refresh_keeps_the_last_result_when_home_assistant_is_away(monkeypatch, tmp_path):
+def test_explicit_search_reports_unavailable_ha_without_using_old_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "DATA", tmp_path)
     old = discovery.discover(_registry(), STATES, CORE)
     old["checked_utc"] = "2026-01-01T00:00:00+00:00"  # stale
@@ -263,7 +259,8 @@ def test_refresh_keeps_the_last_result_when_home_assistant_is_away(monkeypatch, 
 
     monkeypatch.setattr(pipeline, "ha_get", away)
     monkeypatch.setattr(pipeline, "_ws_request", away)
-    assert pipeline.refresh_discovery()["found"] == old["found"]
+    with pytest.raises(OSError, match="Home Assistant restarting"):
+        pipeline.search_entities()
 
 
 def test_settings_list_only_the_owners_decisions():

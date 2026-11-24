@@ -193,7 +193,7 @@ def test_bootstrap_pulls_recorder_outages_and_statistics(monkeypatch):
 def test_fresh_install_bootstraps_then_trains_then_plans(monkeypatch, tmp_path):
     order = []
     monkeypatch.setattr(main, "DATA", tmp_path)
-    monkeypatch.setattr(pipeline, "options", lambda: {})
+    monkeypatch.setattr(pipeline, "options", lambda: dict.fromkeys(main.discovery.REQUIRED_KEYS, "sensor.configured"))
     monkeypatch.setattr(
         pipeline, "bootstrap", lambda opts: order.append("bootstrap") or {"at": "x"}
     )

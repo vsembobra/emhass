@@ -1,4 +1,4 @@
-"""Options the owner leaves empty, filled from what Home Assistant already knows.
+"""Explicit discovery previews for one inverter at a time.
 
 ha-solarman (github.com/davidrapan/ha-solarman) builds the Deye entities
 from fixed profiles, so a role is found by its profile item, not by entity
@@ -11,10 +11,8 @@ battery discharging current x voltage, capped by the rated power (the
 grid-charge current is what bounds the planned night charge). The Home Assistant
 core config gives the site location and time zone.
 
-Per option: a value the owner set > found here > options_meta.DEFAULTS.
-"none" switches an optional entity off. What was found is cached in
-/data/discovery.json (pipeline.refresh_discovery); reading options never
-calls Home Assistant.
+Reading options never searches Home Assistant or applies a discovery cache.
+The search button previews candidates; the owner explicitly saves a choice.
 """
 
 from __future__ import annotations
@@ -33,6 +31,7 @@ REFRESH_EVERY = timedelta(hours=6)
 NONE = "none"
 SOLARMAN = "ha-solarman"
 CORE = "Home Assistant"
+REQUIRED_KEYS = ("entity_load_power", "entity_critical_load_power", "entity_pv_power", "entity_battery_soc", "entity_grid_status")
 
 LV_NOMINAL_V = 51.2  # 16-cell LiFePO4: the usual low-voltage Deye pack
 LEAD_NOMINAL_V = 48.0
@@ -161,12 +160,14 @@ def _location(core: dict | None) -> dict:
     return found
 
 
-def discover(
+def _discover_one(
     registry: list[dict], states: dict[str, dict], core: dict | None, now: datetime | None = None
 ) -> dict:
     """What the options can take from HA: {"found": {option: value}, "source": {option: label}}."""
     by_entry: dict[str, dict[str, str]] = {}
     for entry in registry:
+        if not isinstance(entry, dict):
+            continue
         if entry.get("platform") != "solarman" or entry.get("disabled_by"):
             continue
         key = _item_key(entry)
@@ -210,6 +211,50 @@ def discover(
     }
 
 
+def discover(registry, states: dict, core: dict | None, now: datetime | None = None) -> dict:
+    """Preview coherent inverter candidates; several devices require a choice."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for entry in registry:
+        if not isinstance(entry, dict) or entry.get("platform") != "solarman" or entry.get("disabled_by"):
+            continue
+        config_id = str(entry.get("config_entry_id") or "")
+        device_id = str(entry.get("device_id") or config_id)
+        if config_id and entry.get("entity_id"):
+            groups.setdefault((config_id, device_id), []).append(entry)
+    candidates = []
+    for (config_id, device_id), entries in groups.items():
+        if not any(_item_key(e) == "battery_sensor" for e in entries):
+            continue
+        result = _discover_one(entries, states, core, now)
+        replacement = candidate_options(result["found"])
+        soc = result["found"].get("entity_battery_soc", "")
+        label = ((states.get(soc) or {}).get("attributes") or {}).get("friendly_name") or soc
+        candidates.append({
+            "id": f"{config_id}:{device_id}", "device_id": device_id,
+            "label": str(label), **result,
+            "options": replacement,
+            "labels": {key: {
+                "label": options_meta.OPTION_META[key]["label"],
+                "label_en": options_meta.OPTION_META[key]["label_en"],
+            } for key in replacement if key in options_meta.OPTION_META},
+        })
+    # Never merge or arbitrarily choose among two battery inverters.
+    result = _discover_one([], states, core, now)
+    if len(candidates) == 1:
+        result.update({k: candidates[0][k] for k in ("found", "source", "solarman_entities")})
+    result["candidates"] = candidates
+    return result
+
+
+def candidate_options(found: dict) -> dict:
+    """Replace device bindings as a set, including clearing undiscovered ones.
+
+    Keeping an old TOU/floor binding while switching SOC/load to another
+    inverter would steer the wrong device. Non-device settings stay intact.
+    """
+    return {**dict.fromkeys((*ENTITY_ITEMS, *ZONE_ITEMS, "floor_input_entity"), ""), **found}
+
+
 def save(data_dir: Path, result: dict) -> None:
     path = data_dir / DISCOVERY_FILE
     tmp = path.with_suffix(".tmp")
@@ -237,12 +282,11 @@ def _unset(value) -> bool:
 
 
 def effective(stored: dict, discovered: dict | None) -> dict:
-    """Options a run uses: DEFAULTS < found in HA < the owner's values."""
+    """Only explicit settings and defaults; legacy search caches are ignored."""
     opts = dict(options_meta.DEFAULTS)
-    opts.update((discovered or {}).get("found") or {})
     for key, value in stored.items():
         if key in AUTO_KEYS and _unset(value):
-            continue  # left empty: found or default
+            continue  # left empty: default, never a discovery result
         opts[key] = value
     for key in AUTO_KEYS:
         if isinstance(opts.get(key), str) and opts[key].strip().lower() == NONE:
@@ -252,23 +296,23 @@ def effective(stored: dict, discovered: dict | None) -> dict:
 
 def sources(stored: dict, discovered: dict | None) -> dict[str, str]:
     """Where each option's value comes from: "manual", a discovery source or "default"."""
-    found = (discovered or {}).get("found") or {}
-    labels = (discovered or {}).get("source") or {}
     out = {}
     for key in options_meta.DEFAULTS:
         if key in stored and not (key in AUTO_KEYS and _unset(stored[key])):
             out[key] = "manual"
-        elif key in found:
-            out[key] = labels.get(key, SOLARMAN)
         else:
             out[key] = "default"
     return out
 
 
 def load_options(data_dir: Path) -> dict:
-    """Effective options from data_dir/options.json and the discovery cache."""
+    """Effective options from explicit settings, without a search or cache."""
     stored = json.loads((data_dir / "options.json").read_text())
-    return effective(stored, load(data_dir))
+    return effective(stored, None)
+
+
+def missing_required(opts: dict) -> list[str]:
+    return [key for key in REQUIRED_KEYS if not str(opts.get(key) or "").strip()]
 
 
 def compact(stored: dict, discovered: dict) -> tuple[dict, list[str]]:

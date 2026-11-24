@@ -24,7 +24,21 @@ ZONE_TIMES = ["00:00:00", "06:00:00", "10:00:00", "14:00:00", "18:00:00", "22:00
 def default_options() -> dict:
     """Every option at its built-in value (the add-on settings list only the visible ones)."""
     config = yaml.safe_load((ADDON / "config.yaml").read_text(encoding="utf-8"))
-    return {**pipeline.options_meta.DEFAULTS, **config["options"]}
+    return {
+        **pipeline.options_meta.DEFAULTS, **config["options"],
+        "floor_input_entity": "input_number.deye_soc_backup",
+        "entity_load_power": "sensor.inverter_load_power",
+        "entity_critical_load_power": "sensor.inverter_load_ups_power",
+        "entity_pv_power": "sensor.inverter_pv_power",
+        "entity_battery_power": "sensor.inverter_battery_power",
+        "entity_grid_power": "sensor.inverter_grid_power",
+        "entity_battery_soc": "sensor.inverter_battery",
+        "entity_grid_status": "binary_sensor.inverter_grid",
+        "entity_grid_voltage": "sensor.inverter_grid_l1_voltage",
+        "entity_export_counter": "sensor.inverter_total_energy_export",
+        "tou_soc_entity_template": "number.inverter_program_{n}_soc",
+        "tou_time_entity_template": "time.inverter_program_{n}_time",
+    }
 
 
 @pytest.fixture
@@ -50,6 +64,12 @@ def fake_site(monkeypatch, tmp_path):
     attributes: dict[str, dict] = {}
 
     def ha_get(path, timeout=180):
+        if path == "/api/states":
+            entities = set(states) | {
+                str(opts[k]) for k in pipeline.ENTITY_OPTION_KEYS
+                if opts.get(k) and "." in str(opts[k]) and "{n}" not in str(opts[k])
+            }
+            return [ha_get(f"/api/states/{entity}") for entity in sorted(entities)]
         entity = path.rsplit("/", 1)[-1]
         if entity in states:
             return {

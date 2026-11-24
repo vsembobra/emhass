@@ -76,12 +76,12 @@ def stored_options() -> dict:
 
 
 def options() -> dict:
-    """What a run uses: built-in defaults < found in Home Assistant < the owner's values."""
+    """Explicit owner settings over built-in defaults; no implicit discovery."""
     return discovery.load_options(DATA)
 
 
 def option_sources() -> dict[str, str]:
-    return discovery.sources(stored_options(), discovery.load(DATA))
+    return discovery.sources(stored_options(), None)
 
 
 def _plain_number(value) -> float | None:
@@ -119,10 +119,10 @@ def resolve_entities(opts: dict) -> dict:
         ),
         "tou_soc": [
             opts["tou_soc_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
-        ],
+        ] if opts["tou_soc_entity_template"] and opts["tou_time_entity_template"] else [],
         "tou_time": [
             opts["tou_time_entity_template"].format(n=n) for n in range(1, caps.zones + 1)
-        ],
+        ] if opts["tou_soc_entity_template"] and opts["tou_time_entity_template"] else [],
         "tou_grid_charge": caps.grid_charge_entities(),
         "floor_input": opts["floor_input_entity"],
     }
@@ -681,52 +681,43 @@ async def _ws_statistics(start: datetime, end: datetime, ids: list[str]) -> dict
     return result or {}
 
 
-def refresh_discovery(force: bool = False) -> dict | None:
-    """Look up ha-solarman entities, inverter settings and the HA location.
+DISCOVERY_REGISTRY_TIMEOUT_S = 15.0
 
-    Cached for discovery.REFRESH_EVERY; a failure keeps the last result, so
-    a Home Assistant restart never empties the options a run uses.
-    """
+
+def search_entities() -> dict:
+    """Explicit preview only; at most 15 + 10 + 5 seconds of HA reads."""
     import asyncio
 
-    cached = discovery.load(DATA)
-    if not force and not discovery.stale(cached):
-        return cached
-    try:
-        registry = asyncio.run(_ws_request({"type": "config/entity_registry/list"}, timeout=60))
-        states = {s["entity_id"]: s for s in ha_get("/api/states", timeout=30) if "entity_id" in s}
-        try:
-            core = ha_get("/api/config", timeout=30)
-        except Exception:
-            core = None
-    except Exception:
-        return cached
-    result = discovery.discover(registry or [], states, core)
-    result["compacted"] = (cached or {}).get("compacted")
-    discovery.save(DATA, result)
-    return result
+    import aiohttp
 
+    async def preview():
+        # Total budget includes authentication, reads and parsing. Socket-idle
+        # timeouts alone could wait indefinitely on a slow streaming response.
+        async with asyncio.timeout(30):
+            registry = await asyncio.wait_for(
+                _ws_request({"type": "config/entity_registry/list"}, timeout=10),
+                timeout=DISCOVERY_REGISTRY_TIMEOUT_S,
+            )
+            async with aiohttp.ClientSession() as session:
+                async def read(path, seconds):
+                    async with session.get(
+                        HA_BASE + path, headers={"Authorization": f"Bearer {_token()}"},
+                        timeout=aiohttp.ClientTimeout(total=seconds),
+                    ) as response:
+                        response.raise_for_status()
+                        return await response.json()
 
-def compact_options() -> list[str]:
-    """Once per discovery version: drop saved values that only repeat the automatic ones.
+                rows = await read("/api/states", 10)
+                try:
+                    core = await read("/api/config", 5)
+                except (aiohttp.ClientError, TimeoutError, ValueError):
+                    core = None
+            if not isinstance(registry, list) or not isinstance(rows, list):
+                raise ValueError("Home Assistant returned an invalid registry or state list")
+            states = {s["entity_id"]: s for s in rows if isinstance(s, dict) and s.get("entity_id")}
+            return discovery.discover(registry, states, core if isinstance(core, dict) else None)
 
-    Settings saved by an older version hold every option, so nothing could
-    be found automatically and the add-on settings stayed long. Needs a
-    discovery that reached Home Assistant and the Supervisor's stored options.
-    """
-    found = discovery.load(DATA)
-    if not found or found.get("compacted") == discovery.VERSION:
-        return []
-    stored = supervisor_options()
-    if stored is None:
-        return []
-    kept, dropped = discovery.compact(stored, found)
-    if dropped or kept != stored:
-        _post_options(kept)
-        _write_options(kept)
-    found["compacted"] = discovery.VERSION
-    discovery.save(DATA, found)
-    return dropped
+    return asyncio.run(preview())
 
 
 def fetch_statistics(start: datetime, end: datetime, ids: list[str]) -> dict[str, list[dict]]:
@@ -1944,7 +1935,7 @@ def sync_options() -> dict:
     if stored is None:
         return current
     # The Supervisor's options replace the file: an option cleared in the
-    # settings must disappear here too, or it would never turn automatic.
+    # settings must disappear here too, or it would remain configured locally.
     if stored != current:
         _write_options(stored)
     return stored
@@ -1973,27 +1964,32 @@ def update_options(changes: dict, lang: str = "ru") -> dict:
     and the local file is updated at once, so the next run uses them.
     """
     filtered: dict = {}
-    automatic: list[str] = []  # cleared: found in Home Assistant again
+    cleared: list[str] = []
     rejected: list[str] = []
     for key, value in changes.items():
         if key in discovery.AUTO_KEYS and not str(value if value is not None else "").strip():
-            automatic.append(key)
+            cleared.append(key)
         elif key in ENTITY_OPTION_KEYS:
             filtered[key] = str(value).strip()
         elif key in options_meta.OPTION_META and not options_meta.OPTION_META[key].get("entity"):
             filtered[key] = options_meta.coerce_option(key, value, lang)
         else:
             rejected.append(key)
-    if not filtered and not automatic:
+    if not filtered and not cleared:
         return {"saved": {}, "rejected": rejected}
     # Only the owner's own values are saved: never the defaults or what
     # was found, or those would stop following Home Assistant.
     opts = {**(supervisor_options() or stored_options()), **filtered}
-    for key in automatic:
+    for key in cleared:
         opts.pop(key, None)
     _post_options(opts)
     _write_options(opts)
-    return {"saved": filtered, "automatic": automatic, "rejected": rejected}
+    return {"saved": filtered, "cleared": cleared, "rejected": rejected}
+
+
+def apply_discovery(candidate: dict, lang: str = "ru") -> dict:
+    """Explicitly save a reviewed device, clearing incompatible old bindings."""
+    return update_options(discovery.candidate_options(candidate["found"]), lang=lang)
 
 
 ENTITY_CHECK_LABELS = {
@@ -2023,6 +2019,15 @@ def validate_entities() -> list[dict]:
     """
     opts = options()
     ent = resolve_entities(opts)
+    # One bounded read: dozens of missing entities must not each wait ten
+    # seconds, especially on an unconfigured or multi-inverter installation.
+    states = _STATES if _STATES is not None and time.monotonic() - _STATES_AT < STATES_MAX_AGE_S else None
+    if states is None:
+        try:
+            rows = ha_get("/api/states", timeout=10)
+            states = {s["entity_id"]: s for s in rows if isinstance(s, dict) and s.get("entity_id")}
+        except Exception:
+            states = {}
     # (label ru, label en, entity value, kind, option key or None when not directly editable)
     specs: list[tuple[str, str, str, str, str | None]] = [
         (
@@ -2076,7 +2081,7 @@ def validate_entities() -> list[dict]:
             "source": sources.get(key or zone_source.get(label, "")),
         }
         if not entity:
-            row["status"] = "skipped"
+            row["status"] = "missing" if key in discovery.REQUIRED_KEYS else "skipped"
             results.append(row)
             continue
         if kind in ("number", "soh") and _plain_number(entity) is not None:
@@ -2085,7 +2090,7 @@ def validate_entities() -> list[dict]:
             results.append(row)
             continue
         try:
-            state = str(ha_get(f"/api/states/{entity}", timeout=10)["state"])
+            state = str(states[entity]["state"])
         except Exception:
             row["status"] = "missing"
             results.append(row)
@@ -2442,13 +2447,12 @@ def run(notify: str = "always") -> dict:
 
     floor_entity = ent["floor_input"]
     floor_warning: str | None = None
-    try:
-        current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
-    except Exception:
-        # A missing/unreadable floor entity must not kill the whole run:
-        # assume the configured minimum and say so in the report.
-        current_floor = _soc_bounds(opts)[0]
-        floor_warning = f"сущность порога SOC ({floor_entity}) недоступна"
+    current_floor = _soc_bounds(opts)[0]
+    if floor_entity:
+        try:
+            current_floor = float(ha_get(f"/api/states/{floor_entity}")["state"]) / 100.0
+        except Exception:
+            floor_warning = f"сущность порога SOC ({floor_entity}) недоступна"
     programs = []
     for n, (soc_entity, time_entity) in enumerate(
         zip(ent["tou_soc"], ent["tou_time"], strict=True), start=1
@@ -2649,7 +2653,7 @@ def run(notify: str = "always") -> dict:
                 f"зона {p['n']} ({p['from'][:5]}) {p['soc_pct']:.0f}→{target}%",
             ))
         floor_target = min(max(int(round(recommended_floor * 100)), min_pct), max_pct)
-        if abs(floor_target - round(current_floor * 100)) >= caps.soc_step_pct:
+        if floor_entity and abs(floor_target - round(current_floor * 100)) >= caps.soc_step_pct:
             try:
                 # Domain follows the entity id: number.* and input_number.*
                 # share the set_value service name but live in own domains.

@@ -93,6 +93,16 @@
     <button id="entsave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveEntities()" data-i18n="btn_save">Сохранить</button>
     </h3>
   </summary>
+  <div style="margin:10px 0">
+    <button id="discover" class="secondary" onclick="searchEntities()" data-i18n="btn_discover">Автоматический поиск</button>
+    <span class="muted" data-i18n="discovery_note">Поиск только по кнопке. Выберите один инвертор и проверьте значения перед сохранением.</span>
+    <div id="discovery-status" class="sub" role="status"></div>
+    <div id="discovery-preview" hidden>
+      <label><span data-i18n="discovery_device">Инвертор</span> <select id="discovery-device" onchange="renderDiscoveryPreview()"></select></label>
+      <table><tbody id="discovery-values"></tbody></table>
+      <button id="discovery-save" onclick="saveDiscovery()" disabled data-i18n="discovery_save">Сохранить найденные настройки</button>
+    </div>
+  </div>
   <table>
     <thead><tr><th data-i18n="th_param">Параметр</th><th data-i18n="th_entity">Сущность</th><th data-i18n="th_value">Значение</th><th data-i18n="th_status">Статус</th></tr></thead>
     <tbody id="ents"></tbody>
@@ -346,6 +356,12 @@ const I18N = {
     choice_ladder: "ladder — лестница", choice_flat: "flat — плоский пол",
     choice_resilience: "resilience — надёжность", choice_balanced: "balanced — баланс",
     choice_economy: "economy — экономия",
+    btn_discover: "Автоматический поиск", discovery_device: "Инвертор",
+    discovery_note: "Выберите один инвертор и проверьте значения. Пустые строки при сохранении очищают старые привязки, включая управление другим инвертором.",
+    discovery_searching: "Идёт поиск… Настройки не изменяются.",
+    discovery_choose: "Выберите инвертор", discovery_none: "Совместимые инверторы не найдены. Заполните сущности вручную.",
+    discovery_save: "Сохранить найденные настройки", discovery_saved: "Найденные настройки сохранены. Проверьте обязательные сенсоры ниже.",
+    discovery_error: "Поиск не выполнен: ",
     choice_auto: "Auto — подбор Open-Meteo", choice_ecmwf: "ECMWF — IFS HRES",
     choice_icon: "ICON — Seamless", choice_gfs: "GFS — Seamless",
     time_placeholder: "ЧЧ:ММ",
@@ -493,6 +509,12 @@ const I18N = {
     choice_ladder: "ladder — hourly ladder", choice_flat: "flat — flat floor",
     choice_resilience: "resilience — resilience", choice_balanced: "balanced — balanced",
     choice_economy: "economy — economy",
+    btn_discover: "Automatic search", discovery_device: "Inverter",
+    discovery_note: "Select one inverter and review the values. Saving clears bindings shown as empty, including controls for another inverter.",
+    discovery_searching: "Searching… Settings remain unchanged.",
+    discovery_choose: "Select an inverter", discovery_none: "No compatible inverters found. Configure entity bindings manually.",
+    discovery_save: "Save discovered settings", discovery_saved: "Discovered settings saved. Check the required sensors below.",
+    discovery_error: "Search failed: ",
     choice_auto: "Auto — Open-Meteo selection", choice_ecmwf: "ECMWF — IFS HRES",
     choice_icon: "ICON — Seamless", choice_gfs: "GFS — Seamless",
     time_placeholder: "HH:MM",
@@ -651,6 +673,73 @@ function renderEntityIds(ids) {
     ids.map(id => "<option value='" + id + "'>").join("");
 }
 
+let discoveryCandidates = [];
+
+async function searchEntities() {
+  const button = document.getElementById("discover");
+  button.disabled = true;
+  document.getElementById("discovery-preview").hidden = true;
+  document.getElementById("discovery-status").textContent = t("discovery_searching");
+  try {
+    const response = await fetch("api/discovery", {method: "POST", signal: AbortSignal.timeout(5000)});
+    if (!response.ok && response.status !== 409) throw new Error(response.status);
+    const deadline = Date.now() + 45000;
+    for (;;) {
+      if (Date.now() > deadline) throw new Error("Timeout");
+      const statusResponse = await fetch("api/discovery", {signal: AbortSignal.timeout(5000)});
+      if (!statusResponse.ok) throw new Error(statusResponse.status);
+      const status = await statusResponse.json();
+      if (status.running) { await new Promise(resolve => setTimeout(resolve, 500)); continue; }
+      if (status.error) throw new Error(status.error);
+      discoveryCandidates = (status.result || {}).candidates || [];
+      const select = document.getElementById("discovery-device");
+      select.innerHTML = (discoveryCandidates.length === 1 ? "" : "<option value=''>" + esc(t("discovery_choose")) + "</option>") +
+        discoveryCandidates.map((c, i) => "<option value='" + i + "'>" + esc(c.label) + "</option>").join("");
+      // Force a choice when there is more than one device.
+      select.value = discoveryCandidates.length === 1 ? "0" : "";
+      document.getElementById("discovery-preview").hidden = !discoveryCandidates.length;
+      document.getElementById("discovery-status").textContent = discoveryCandidates.length ? "" : t("discovery_none");
+      renderDiscoveryPreview();
+      break;
+    }
+  } catch (error) {
+    document.getElementById("discovery-status").textContent = t("discovery_error") + error.message;
+  } finally { button.disabled = false; }
+}
+
+function discoveryChoice() {
+  const value = document.getElementById("discovery-device").value;
+  return value === "" ? null : discoveryCandidates[Number(value)];
+}
+
+function renderDiscoveryPreview() {
+  const candidate = discoveryChoice();
+  document.getElementById("discovery-save").disabled = !candidate;
+  document.getElementById("discovery-values").innerHTML = Object.entries((candidate || {}).options || {})
+    .map(([key, value]) => "<tr><td>" + esc(pick((candidate.labels || {})[key] || {label: key}, "label")) +
+      "</td><td>" + esc(String(value)) + "</td></tr>").join("");
+}
+
+async function saveDiscovery() {
+  const candidate = discoveryChoice();
+  if (!candidate) return;
+  const button = document.getElementById("discovery-save");
+  button.disabled = true;
+  try {
+    const response = await fetch("api/discovery/apply", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({candidate_id: candidate.id, lang: LANG}), signal: AbortSignal.timeout(35000),
+    });
+    const result = await response.json();
+    if (!response.ok || result.error) throw new Error(result.error || response.status);
+    document.getElementById("discovery-status").textContent = t("discovery_saved");
+    document.getElementById("discovery-preview").hidden = true;
+    await loadSetup();
+  } catch (error) {
+    document.getElementById("discovery-status").textContent = t("save_failed") + error.message;
+  } finally { button.disabled = false; }
+}
+
 function onEntityInput() {
   let changed = false;
   document.querySelectorAll(".entinput").forEach(el => {
@@ -684,8 +773,8 @@ async function saveEntities() {
 
 function renderEntities(checks) {
   const card = document.getElementById("entscard");
-  if (!checks.length) { card.style.display = "none"; return; }
   card.style.display = "block";
+  if (!checks.length) { document.getElementById("entssummary").textContent = t("discovery_note"); return; }
   const bad = checks.filter(c => ["missing", "not_numeric", "unexpected"].includes(c.status)).length;
   document.getElementById("entssummary").textContent = bad
     ? t("ents_problems", {n: bad}) : t("ents_ok");

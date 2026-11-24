@@ -11,9 +11,11 @@ from zoneinfo import ZoneInfo
 
 import charts
 import daily
+import discovery
 import options_meta
 import pipeline
 import retrain
+from discovery_search import DiscoverySearch
 
 DATA = Path("/data")
 APP = Path(__file__).resolve().parent
@@ -21,6 +23,16 @@ PORT = 8099
 
 STATE = {"running": False, "last_error": None, "last_run": None, "next_run": None}
 LOCK = threading.Lock()
+SEARCH = DiscoverySearch(lambda: pipeline.search_entities())
+
+
+def configuration_ready() -> bool:
+    missing = discovery.missing_required(pipeline.options())
+    STATE["configuration_missing"] = missing
+    if missing:
+        labels = [options_meta.OPTION_META[key]["label"] for key in missing]
+        STATE["last_error"] = "Настройте обязательные сенсоры в панели или нажмите «Автоматический поиск»: " + ", ".join(labels)
+    return not missing
 
 
 def _report_retrain_problems(status: dict) -> None:
@@ -61,13 +73,8 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
             pipeline.sync_options()
         except Exception:
             pass
-        try:
-            # Empty options are filled from ha-solarman and the HA config;
-            # settings saved by an older version are shortened once.
-            pipeline.refresh_discovery()
-            pipeline.compact_options()
-        except Exception:
-            pass
+        if not configuration_ready():
+            return
         if not (DATA / "hourly_audit.jsonl").exists():
             # Fresh install: learn from what Home Assistant already holds
             # (recorder detail + months of long-term statistics + outages),
@@ -108,6 +115,8 @@ def run_retrain() -> None:
         STATE["running"] = True
         STATE["last_error"] = None
     try:
+        if not configuration_ready():
+            return
         _report_retrain_problems(retrain.retrain_if_due(force=True))
     except Exception:
         STATE["last_error"] = traceback.format_exc(limit=5)
@@ -130,6 +139,8 @@ def run_backfill() -> None:
         STATE["running"] = True
         STATE["last_error"] = None
     try:
+        if not configuration_ready():
+            return
         opts = pipeline.options()
         site = {
             "latitude": opts["latitude"],
@@ -444,6 +455,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"checks": pipeline.validate_entities()})
             except Exception:
                 self._json(200, {"checks": [], "error": traceback.format_exc(limit=3)})
+        elif path.endswith("/api/discovery"):
+            self._json(200, SEARCH.status())
         elif path.endswith("/api/options") or path == "/api/options":
             try:
                 pipeline.sync_options()
@@ -474,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "running": STATE["running"],
+                    "configuration_missing": STATE.get("configuration_missing", []),
                     "last_error": STATE["last_error"],
                     "last_run": STATE["last_run"],
                     "next_run": STATE["next_run"],
@@ -489,7 +503,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0].rstrip("/")
-        if path.endswith("/api/run"):
+        if path.endswith("/api/discovery/apply"):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                status = SEARCH.status()
+                if status["running"]:
+                    self._json(409, {"error": "Search is still running"})
+                    return
+                candidates = (status["result"] or {}).get("candidates", [])
+                candidate = next((c for c in candidates if c["id"] == body.get("candidate_id")), None)
+                if candidate is None:
+                    self._json(400, {"error": "Select an inverter from the completed search"})
+                    return
+                self._json(200, pipeline.apply_discovery(candidate, body.get("lang") or "ru"))
+            except ValueError as error:
+                self._json(400, {"error": str(error)})
+            except Exception:
+                self._json(500, {"error": traceback.format_exc(limit=3)})
+        elif path.endswith("/api/discovery"):
+            started = SEARCH.start()
+            self._json(202 if started else 409, {"started": started})
+        elif path.endswith("/api/run"):
             if STATE["running"]:
                 self._json(409, {"started": False, "reason": "already running"})
             else:
