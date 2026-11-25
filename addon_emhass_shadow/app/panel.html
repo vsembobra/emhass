@@ -160,6 +160,10 @@
 
 
   <details class="plan-details" id="plan-details"><summary data-i18n="plan_details">Подробности плана</summary>
+  <section class="notice" id="notice" style="display:none;white-space:normal;margin-top:14px">
+    <h3 data-i18n="title">Теневой план батареи</h3>
+    <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
+  </section>
   <div class="grid" style="margin-top:14px">
     <div class="card"><h3 data-i18n="card_rec">Рекомендуемый пол SOC</h3><div class="big"><span id="rec">—</span><span class="chip" id="delta"></span></div><div class="sub" id="curfloor"></div></div>
     <div class="card"><h3 data-i18n="card_load">Нагрузка, 24 ч</h3><div class="big" id="load">—</div><div class="sub" id="loadband"></div></div>
@@ -190,10 +194,6 @@
 <section id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden>
   <div class="maintenance"><button id="backfill" class="secondary" onclick="backfillNow()" data-i18n="btn_backfill">Загрузить историю</button><button id="retrain" class="secondary" onclick="retrainNow()" data-i18n="btn_retrain">Переобучить модели</button></div>
   <div id="status"></div>
-<details class="notice" id="notice" style="display:none">
-  <summary style="cursor:pointer" data-i18n="notice_title">Сводка отчёта</summary>
-  <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
-</details>
   <div class="card full" id="learncard" style="display:none">
     <h3 data-i18n="learn_title" data-hint="hint_learn">Самообучение и автонастройка</h3>
     <div class="sub" id="learnnote" style="margin-bottom:6px"></div>
@@ -675,12 +675,7 @@ async function load() {
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
     renderHistory(history);
-    if (!latest) {
-      const n = document.getElementById("notice");
-      n.style.display = "block"; n.open = true;
-      document.getElementById("noticetext").textContent = t("no_reports");
-      return;
-    }
+    if (!latest) return;
     render(latest);
   } catch (e) { console.error(e); panelOnline = false; renderOverview(); }
 }
