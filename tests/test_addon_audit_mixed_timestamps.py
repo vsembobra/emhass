@@ -59,6 +59,6 @@ def test_prepend_writes_z_spelling(tmp_path, monkeypatch):
     ]
     audit = pipeline._read_audit()
     pipeline._prepend_rows(audit, rows)
-    text = (tmp_path / "hourly_audit.jsonl").read_text(encoding="utf-8")
+    text = pipeline.data_store.read_text(tmp_path / "hourly_audit.jsonl")
     assert "+00:00" not in text
     assert text.count(".000Z") == 4

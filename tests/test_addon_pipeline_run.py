@@ -127,7 +127,7 @@ def test_run_produces_report_and_logs(fake_site):
     data = fake_site["data"]
     assert report["advisory"]["optimizer"] is not None
     assert len(report["hourly"]["load_p50_kw"]) == 24
-    assert (data / "forecast_log.jsonl").exists()
+    assert pipeline.data_store.exists(data / "forecast_log.jsonl")
     assert (data / "drift_state.json").exists()
     assert "self_learning" in report["data"]
     assert report["notification"].startswith("Теневой план")
@@ -222,7 +222,7 @@ def test_weather_selection_has_separate_calibration_identity(fake_site, monkeypa
     monkeypatch.setattr(pipeline, "forecast_load", load_prediction)
     monkeypatch.setattr(pipeline.PvQuantileBundle, "load", lambda path: PvBundle())
     report = pipeline.run()
-    log = json.loads((data / "forecast_log.jsonl").read_text().splitlines()[-1])
+    log = json.loads(pipeline.data_store.read_text(data / "forecast_log.jsonl").splitlines()[-1])
     for target in ("load", "pv"):
         assert log[target]["method"] == "model"
         assert log[target]["version"].startswith("icon:")

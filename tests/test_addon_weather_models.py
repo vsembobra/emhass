@@ -69,7 +69,7 @@ def test_live_request_uses_selected_model(tmp_path, monkeypatch, model, api_id):
     assert frame["temperature_2m"].tolist() == [10, 11]
     assert not stale
     assert (
-        pipeline.weather_models.scoped(tmp_path / "weather_archive", model).joinpath(name).exists()
+        pipeline.data_store.exists(pipeline.weather_models.scoped(tmp_path / "weather_archive", model).joinpath(name))
     )
 
 
@@ -171,7 +171,7 @@ def test_training_history_does_not_reuse_auto_file(tmp_path, monkeypatch):
     assert result.iloc[-1, 0] == 100.0
     assert sites[0]["open_meteo_model"] == "icon"
     path = pipeline.weather_models.scoped(tmp_path / "weather_previous_day1.jsonl", "icon")
-    assert path.exists()
+    assert retrain.data_store.exists(path)
     assert (tmp_path / "weather_previous_day1.jsonl").read_text() == "unrelated auto history"
 
 

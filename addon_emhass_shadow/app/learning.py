@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import data_store
 import numpy as np
 import pandas as pd
 
@@ -63,16 +64,14 @@ def append_forecast_log(path: Path, entry: dict, now: datetime | None = None) ->
     entries = [e for e in entries if datetime.fromisoformat(e["issue_utc"]) >= cutoff]
     entries = [e for e in entries if e["issue_utc"] != entry["issue_utc"]]
     entries.append(entry)
-    path.write_text(
-        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8"
-    )
+    data_store.write_text(path, "".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in entries))
 
 
 def read_forecast_log(path: Path) -> list[dict]:
-    if not path.exists():
+    if not data_store.exists(path):
         return []
     entries = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in data_store.read_text(path).splitlines():
         if not line.strip():
             continue
         try:

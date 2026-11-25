@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import data_store
 import discovery
 import numpy as np
 import pandas as pd
@@ -28,9 +29,9 @@ MODELS = DATA / "models"
 def _potential_pv(bundle, hours: pd.DatetimeIndex) -> pd.Series:
     """Model P50 for the given hours; NaN where as-of weather is missing."""
     history_path = weather_models.scoped(WEATHER_HIST, weather_models.from_data(DATA))
-    if not history_path.exists():
+    if not data_store.exists(history_path):
         return pd.Series(np.nan, index=hours)
-    weather = pd.read_json(history_path, lines=True)
+    weather = data_store.read_frame(history_path)
     weather["start_utc"] = pd.to_datetime(weather["start_utc"], utc=True)
     weather = weather.set_index("start_utc").sort_index()
     weather = weather[~weather.index.duplicated(keep="last")]
@@ -45,11 +46,11 @@ def _potential_pv(bundle, hours: pd.DatetimeIndex) -> pd.Series:
 
 def daily_stats(days: int = 14) -> list[dict]:
     audit_path = DATA / "hourly_audit.jsonl"
-    if not audit_path.exists():
+    if not data_store.exists(audit_path):
         return []
     opts = discovery.load_options(DATA)
     tz = ZoneInfo(opts.get("time_zone", "UTC"))
-    audit = pd.read_json(audit_path, lines=True)
+    audit = data_store.read_frame(audit_path)
     # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
     audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     audit = audit.set_index("start_utc").sort_index()

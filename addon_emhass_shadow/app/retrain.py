@@ -26,6 +26,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import data_store
 import discovery
 import hardware
 import learning
@@ -131,7 +132,7 @@ def _drift_detected() -> bool:
 
 
 def _audit_frame() -> pd.DataFrame:
-    audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
+    audit = data_store.read_frame(DATA / "hourly_audit.jsonl")
     # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
     audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     audit = audit.set_index("start_utc").sort_index()
@@ -389,8 +390,8 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
     history_path = weather_models.scoped(WEATHER_HIST, weather_models.selected(site))
     history_path.parent.mkdir(parents=True, exist_ok=True)
     existing = None
-    if history_path.exists():
-        existing = pd.read_json(history_path, lines=True)
+    if data_store.exists(history_path):
+        existing = data_store.read_frame(history_path)
         existing["start_utc"] = pd.to_datetime(
             existing["start_utc"], utc=True, format="mixed"
         )
@@ -422,9 +423,7 @@ def _ensure_weather_history(site: dict, needed_start: pd.Timestamp) -> pd.DataFr
         time.sleep(1)
     weather = pd.concat(frames)
     weather = weather[~weather.index.duplicated(keep="last")].sort_index()
-    weather.reset_index().to_json(
-        history_path, orient="records", lines=True, date_format="iso"
-    )
+    data_store.write_text(history_path, weather.reset_index().to_json(orient="records", lines=True, date_format="iso"))
     return weather
 
 

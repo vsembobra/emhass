@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 import adapter
 import calibration
 import certifi
+import data_store
 import deferrable
 import discovery
 import hardware
@@ -576,7 +577,7 @@ def _rows_for_hours(site, ent, hours: list) -> list[dict]:
 
 
 def _read_audit() -> pd.DataFrame:
-    audit = pd.read_json(DATA / "hourly_audit.jsonl", lines=True)
+    audit = data_store.read_frame(DATA / "hourly_audit.jsonl")
     # Writers disagree on spelling ("…Z" vs "+00:00"); mixed parses both.
     audit["start_utc"] = pd.to_datetime(audit["start_utc"], utc=True, format="mixed")
     return audit.set_index("start_utc").sort_index()
@@ -601,7 +602,7 @@ def backfill_audit(site, ent, days: float) -> int:
     audit_path = DATA / "hourly_audit.jsonl"
     now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     target = now_hour - timedelta(days=days)
-    if audit_path.exists():
+    if data_store.exists(audit_path):
         audit = _read_audit()
         first = audit.index[0]
     else:
@@ -622,7 +623,7 @@ def _prepend_rows(audit: pd.DataFrame, rows: list[dict]) -> int:
     prepended["start_utc"] = pd.to_datetime(prepended["start_utc"], utc=True)
     combined = pd.concat([prepended.set_index("start_utc"), audit]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
-    (DATA / "hourly_audit.jsonl").write_text(
+    data_store.write_text(DATA / "hourly_audit.jsonl",
         "".join(
             json.dumps(
                 # Same spelling as build_audit_rows ("…Z"), so appends and
@@ -633,7 +634,6 @@ def _prepend_rows(audit: pd.DataFrame, rows: list[dict]) -> int:
             + "\n"
             for at, row in combined.iterrows()
         ),
-        encoding="utf-8",
     )
     return len(rows)
 
@@ -822,7 +822,7 @@ def backfill_statistics(site, ent, days: float) -> int:
         return 0
     now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     target = now_hour - timedelta(days=days)
-    audit = _read_audit() if audit_path.exists() else pd.DataFrame()
+    audit = _read_audit() if data_store.exists(audit_path) else pd.DataFrame()
     first = audit.index[0] if len(audit) else now_hour
     if first <= target:
         return 0
@@ -882,7 +882,7 @@ def bootstrap(opts: dict) -> dict:
 def update_audit(site, ent, backfill_days: float = 1.0) -> tuple[pd.DataFrame, int]:
     audit_path = DATA / "hourly_audit.jsonl"
     now_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    if audit_path.exists():
+    if data_store.exists(audit_path):
         audit = _read_audit()
         last = audit.index[-1]
     else:
@@ -898,9 +898,7 @@ def update_audit(site, ent, backfill_days: float = 1.0) -> tuple[pd.DataFrame, i
         hours.append(cursor)
         cursor += timedelta(hours=1)
     rows = _rows_for_hours(site, ent, hours)
-    with audit_path.open("a", encoding="utf-8") as file:
-        for row in rows:
-            file.write(json.dumps(row) + "\n")
+    data_store.append_jsonl(audit_path, rows)
     appended = pd.DataFrame(rows)
     appended["start_utc"] = pd.to_datetime(appended["start_utc"], utc=True)
     return pd.concat([audit, appended.set_index("start_utc")]).sort_index(), len(rows)
@@ -1052,16 +1050,16 @@ def archive_weather(site) -> tuple[pd.DataFrame, str, bool]:
         with urllib.request.urlopen(url, timeout=30, context=TLS_CONTEXT) as response:
             body = response.read().decode("utf-8")
         received = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        (archive / f"{received}.json").write_text(body, encoding="utf-8")
+        data_store.write_text(archive / f"{received}.json", body)
         payload = json.loads(body)
         prune_weather_archive(archive)
     except OSError:
-        files = sorted(archive.glob("*.json"))
+        files = data_store.json_paths(archive)
         if not files:
             raise
         stale = True
         received = files[-1].stem
-        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        payload = data_store.read_json(files[-1])
     return _weather_frame(payload), received + ".json", stale
 
 
@@ -1074,11 +1072,11 @@ def _weather_frame(payload: dict) -> pd.DataFrame:
 def archived_weather() -> pd.DataFrame | None:
     """The newest stored Open-Meteo snapshot, without asking the internet."""
     archive = weather_models.scoped(DATA / "weather_archive", weather_models.from_data(DATA))
-    files = sorted(archive.glob("*.json"))
+    files = data_store.json_paths(archive)
     if not files:
         return None
     try:
-        return _weather_frame(json.loads(files[-1].read_text(encoding="utf-8")))
+        return _weather_frame(data_store.read_json(files[-1]))
     except (OSError, ValueError, KeyError):
         return None
 
@@ -1132,7 +1130,7 @@ WEATHER_ARCHIVE_DAYS = 7  # the archive only backs the offline fallback
 def prune_weather_archive(archive: Path, keep_days: float = WEATHER_ARCHIVE_DAYS) -> int:
     """Delete snapshots older than keep_days (hourly runs add 24 a day);
     the newest one always stays. Returns the number removed."""
-    files = sorted(archive.glob("*.json"))
+    files = data_store.json_paths(archive)
     cutoff = datetime.now(UTC) - timedelta(days=keep_days)
     removed = 0
     for path in files[:-1]:
@@ -1141,7 +1139,7 @@ def prune_weather_archive(archive: Path, keep_days: float = WEATHER_ARCHIVE_DAYS
         except ValueError:
             continue  # seeded or foreign files are left alone
         if received < cutoff:
-            path.unlink(missing_ok=True)
+            data_store.remove(path)
             removed += 1
     return removed
 
@@ -1224,19 +1222,19 @@ def hindsight_import(
 def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) -> int:
     """Score fully observed past reports against audit actuals, append once."""
     entries = []
-    if METRICS.exists():
+    if data_store.exists(METRICS):
         entries = [
             json.loads(line)
-            for line in METRICS.read_text(encoding="utf-8").splitlines()
+            for line in data_store.read_text(METRICS).splitlines()
             if line.strip()
         ]
     scored = {entry["issue_utc"] for entry in entries}
     audit_end = audit.index[-1]
     added = 0
     reports_dir = DATA / "shadow_reports"
-    for path in sorted(reports_dir.glob("*.json"))[-10:]:
+    for path in data_store.json_paths(reports_dir)[-10:]:
         try:
-            report = json.loads(path.read_text(encoding="utf-8"))
+            report = data_store.read_json(path)
         except (OSError, json.JSONDecodeError):
             continue
         hourly = report.get("hourly")
@@ -1292,13 +1290,12 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) 
         added += 1
     if added:
         entries = entries[-60:]
-        METRICS.write_text(
+        data_store.write_text(METRICS,
             "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
-            encoding="utf-8",
         )
         try:
             SHARE.mkdir(parents=True, exist_ok=True)
-            (SHARE / "metrics.jsonl").write_text(METRICS.read_text(encoding="utf-8"), encoding="utf-8")
+            (SHARE / "metrics.jsonl").write_text(data_store.read_text(METRICS), encoding="utf-8")
         except OSError:
             pass
     return added
@@ -1689,12 +1686,12 @@ def _self_learning_note(calibrations: dict, drift: dict) -> str | None:
 
 def _plan_vs_fact_note() -> str | None:
     """One notification line comparing yesterday's promised vs metered import."""
-    if not METRICS.exists():
+    if not data_store.exists(METRICS):
         return None
     try:
         entries = [
             json.loads(line)
-            for line in METRICS.read_text(encoding="utf-8").splitlines()
+            for line in data_store.read_text(METRICS).splitlines()
             if line.strip()
         ]
     except (OSError, json.JSONDecodeError):
@@ -2992,7 +2989,7 @@ def run(notify: str = "always") -> dict:
     out_dir = DATA / "shadow_reports"
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"{issue.astimezone(tz):%Y-%m-%d}.json"
-    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    data_store.write_json(out_path, report)
 
     try:
         mirror = SHARE / "shadow_reports"

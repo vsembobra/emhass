@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import traceback
+import zlib
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import charts
 import daily
+import data_store
 import discovery
 import options_meta
 import pipeline
@@ -75,7 +77,7 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
             pass
         if not configuration_ready():
             return
-        if not (DATA / "hourly_audit.jsonl").exists():
+        if not data_store.exists(DATA / "hourly_audit.jsonl"):
             # Fresh install: learn from what Home Assistant already holds
             # (recorder detail + months of long-term statistics + outages),
             # train on it, and only then plan.
@@ -177,14 +179,14 @@ def reports() -> list[Path]:
     directory = DATA / "shadow_reports"
     if not directory.exists():
         return []
-    return sorted(directory.glob("*.json"), reverse=True)
+    return list(reversed(data_store.json_paths(directory)))
 
 
 def latest_report() -> dict | None:
     files = reports()
     if not files:
         return None
-    return json.loads(files[0].read_text(encoding="utf-8"))
+    return data_store.read_json(files[0])
 
 
 TRIGGER_MIN_INTERVAL = timedelta(minutes=20)  # rate limit for event-driven runs
@@ -332,7 +334,7 @@ def scheduler() -> None:
             STATE["next_run"] = target.isoformat()
             today_report = DATA / "shadow_reports" / f"{now:%Y-%m-%d}.json"
             if now >= now.replace(hour=hour, minute=minute, second=0, microsecond=0):
-                due = not today_report.exists()
+                due = not data_store.exists(today_report)
             else:
                 due = False
             if due and not STATE["running"]:
@@ -401,7 +403,7 @@ class Handler(BaseHTTPRequestHandler):
             items = []
             for file in reports()[:30]:
                 try:
-                    report = json.loads(file.read_text(encoding="utf-8"))
+                    report = data_store.read_json(file)
                     items.append(
                         {
                             "date": file.stem,
@@ -428,10 +430,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path.endswith("/api/metrics") or path == "/api/metrics":
             metrics_path = DATA / "metrics.jsonl"
             days = []
-            if metrics_path.exists():
+            if data_store.exists(metrics_path):
                 days = [
                     json.loads(line)
-                    for line in metrics_path.read_text(encoding="utf-8").splitlines()
+                    for line in data_store.read_text(metrics_path).splitlines()
                     if line.strip()
                 ]
             recent = [d for d in days[-7:] if d.get("load") or d.get("pv")]
@@ -485,9 +487,8 @@ class Handler(BaseHTTPRequestHandler):
             current_options = pipeline.options()
             audit_rows = None
             audit_path = DATA / "hourly_audit.jsonl"
-            if audit_path.exists():
-                with audit_path.open("rb") as file:
-                    audit_rows = sum(1 for _ in file)
+            if data_store.exists(audit_path):
+                audit_rows = len(data_store.read_text(audit_path).splitlines())
             self._json(
                 200,
                 {
@@ -659,6 +660,12 @@ def grid_watcher() -> None:
 
 
 def main() -> None:
+    try:
+        data_store.compact_data(DATA)
+    except (OSError, EOFError, zlib.error) as error:
+        # Atomic migration leaves legacy data readable; a full disk must not
+        # prevent the panel from opening or the last good model from running.
+        print(f"storage compaction deferred: {error}", flush=True)
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=grid_watcher, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)

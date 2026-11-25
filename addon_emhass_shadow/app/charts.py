@@ -15,6 +15,7 @@ import json
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+import data_store
 import learning
 import optimize
 import pandas as pd
@@ -156,9 +157,9 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
     # the day get their plan from the archived reports of previous runs.
     reports = [report] if report else []
     try:
-        for path in sorted((pipeline.DATA / "shadow_reports").glob("*.json"))[-3:]:
+        for path in data_store.json_paths(pipeline.DATA / "shadow_reports")[-3:]:
             try:
-                reports.append(json.loads(path.read_text(encoding="utf-8")))
+                reports.append(data_store.read_json(path))
             except (OSError, json.JSONDecodeError):
                 continue
     except OSError:

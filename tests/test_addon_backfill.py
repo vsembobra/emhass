@@ -3,7 +3,6 @@
 import sys
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 ADDON = Path(__file__).resolve().parent.parent / "addon_emhass_shadow"
@@ -40,7 +39,7 @@ def fake_ha(monkeypatch, tmp_path):
 def test_backfill_fresh_install(fake_ha):
     added = pipeline.backfill_audit(SITE, ENT, days=2)
     assert added == 48
-    lines = (fake_ha / "hourly_audit.jsonl").read_text().splitlines()
+    lines = pipeline.data_store.read_text(fake_ha / "hourly_audit.jsonl").splitlines()
     assert len(lines) == 48
 
 
@@ -53,7 +52,7 @@ def test_backfill_extends_only_missing_hours(fake_ha):
     pipeline.backfill_audit(SITE, ENT, days=2)
     added = pipeline.backfill_audit(SITE, ENT, days=4)
     assert added == 48  # only the two older days are new
-    audit = pd.read_json(fake_ha / "hourly_audit.jsonl", lines=True)
+    audit = pipeline.data_store.read_frame(fake_ha / "hourly_audit.jsonl")
     assert len(audit) == 96
     assert not audit["start_utc"].duplicated().any()
 

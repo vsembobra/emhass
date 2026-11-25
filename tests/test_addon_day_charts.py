@@ -106,6 +106,12 @@ def test_without_a_plan_the_chart_says_so(site):
     )
 
 
+def test_compact_history_gives_identical_chart_data(site, tmp_path):
+    before = charts.day_charts(site, now=NOW, live=False)
+    charts.data_store.compact_data(tmp_path)
+    assert charts.day_charts(site, now=NOW, live=False) == before
+
+
 def test_past_hours_show_the_plan_that_covered_them(site, tmp_path):
     # Yesterday's evening plan covered today's early hours: the chart must
     # show it next to the measured SOC instead of hiding it in the past.
