@@ -290,6 +290,7 @@ def _trigger_reason(opts) -> str | None:
             state = str(pipeline.ha_get(f"/api/states/{grid_binary}")["state"])
             previous = STATE.get("grid_state")
             STATE["grid_state"] = state
+            STATE["grid_observed_utc"] = datetime.now(UTC).isoformat()
             if previous in ("on", "off") and state in ("on", "off") and state != previous:
                 return f"сеть {previous} -> {state}"
     except Exception:
@@ -388,6 +389,8 @@ class Handler(BaseHTTPRequestHandler):
                 "application/javascript; charset=utf-8",
                 cache_s=86400,  # 1 MB, changes only with the add-on version
             )
+        elif path.endswith(("/panel_state.js", "/panel_ui.js")):
+            self._send(200, (APP / path.rsplit("/", 1)[-1]).read_bytes(), "application/javascript; charset=utf-8")
         elif path.endswith("/api/latest") or path == "/api/latest":
             report = latest_report()
             if report is None:
@@ -479,6 +482,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._json(200, {"entity_ids": [], "error": traceback.format_exc(limit=3)})
         elif path.endswith("/api/status") or path == "/api/status":
+            current_options = pipeline.options()
             audit_rows = None
             audit_path = DATA / "hourly_audit.jsonl"
             if audit_path.exists():
@@ -497,6 +501,9 @@ class Handler(BaseHTTPRequestHandler):
                     "last_backfill": STATE.get("last_backfill"),
                     "last_trigger": STATE.get("last_trigger"),
                     "grid_state": STATE.get("grid_state"),
+                    "grid_observed_utc": STATE.get("grid_observed_utc"),
+                    "apply_mode": bool(current_options.get("apply_mode", False)),
+                    "replan_minutes": current_options.get("replan_minutes", 120),
                 },
             )
         else:
@@ -612,6 +619,7 @@ def on_grid_change(old, new) -> bool:
     if old not in ("on", "off") or new not in ("on", "off") or old == new:
         return False
     STATE["grid_state"] = new  # the 10-minute poll must not fire for it again
+    STATE["grid_observed_utc"] = datetime.now(UTC).isoformat()
     STATE["grid_event_reason"] = f"сеть {old} -> {new}"
     threading.Timer(GRID_EVENT_DELAY_S, _run_for_grid_event).start()
     return True

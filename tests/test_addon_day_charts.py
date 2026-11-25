@@ -86,6 +86,19 @@ def test_tomorrow_is_forecast_and_plan_only(site):
     assert tomorrow["forecast_kwh"] == pytest.approx(3.0 * 24)
 
 
+def test_consumption_is_aligned_with_solar_without_fabricating_measurements(site, tmp_path):
+    path = tmp_path / "hourly_audit.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[9]["load_kw"] = 1.7
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    days = charts.day_charts(site, now=NOW, live=False)["days"]
+    assert days[0]["hours"][9]["load_actual_kw"] == 1.7
+    assert days[0]["hours"][8]["load_actual_kw"] is None
+    assert days[0]["hours"][9]["load_forecast_kw"] == 0.5
+    assert days[1]["hours"][0]["load_forecast_kw"] == 0.5
+    assert all(h["load_actual_kw"] is None for h in days[1]["hours"])
+
+
 def test_without_a_plan_the_chart_says_so(site):
     data = charts.day_charts(None, now=NOW, live=False)
     assert data["plan_note"] and all(

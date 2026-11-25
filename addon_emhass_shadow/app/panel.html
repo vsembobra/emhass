@@ -79,6 +79,37 @@
     .optinput { max-width: 100%; }
     button { padding: 9px 14px; }
   }
+
+  [hidden] { display: none !important; }
+  body { padding-bottom: 90px; }
+  .card h3 { text-transform: none; letter-spacing: 0; font-size: 14px; }
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+  .tabs button { background: transparent; color: var(--muted); border-radius: 8px 8px 0 0; border-bottom: 3px solid transparent; }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .health { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
+  .health strong { font-weight: 600; }
+  .health .ok { color: var(--good); } .health .warning { color: var(--warn); }
+  .decision { border-left: 3px solid var(--accent); padding: 8px 16px; margin: 12px 0 20px; line-height: 1.6; max-width: 80ch; }
+  .decision:empty { display: none; }
+  .decision h2 { font-size: 20px; font-weight: 600; margin-bottom: 5px; }
+  .overview .big { font-variant-numeric: tabular-nums; }
+  .overview .sub { line-height: 1.5; }
+  .snapshot-time { font-size: 11px; }
+  .maintenance, .chart-range { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .chart-range button { padding: 5px 10px; font-size: 12px; }
+  .chart-range button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+  .plan-details > summary { cursor: pointer; padding: 12px 0; color: var(--accent); }
+  .settings-tools { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
+  .settings-search { flex: 1; min-width: 200px; max-width: 540px; }
+  .settings-search span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 5px; }
+  #settings-search { width: 100%; box-sizing: border-box; padding: 10px; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; }
+  .setting-help summary { cursor: pointer; font-size: 12px; }
+  .setting-help div { margin-top: 5px; }
+  .savebar { position: sticky; bottom: 12px; z-index: 8; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; padding: 12px 16px; background: #27313c; border: 1px solid var(--warn); border-radius: 10px; box-shadow: 0 4px 24px #0006; }
+  .savebar span { margin-right: auto; }
+  @media (max-width: 640px) { .overview { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; } .overview .card { padding: 12px; } .overview .big { font-size: 25px; } .tabs button { flex: 1; padding: 10px; } .health { gap: 4px 12px; } .decision h2 { font-size: 18px; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
@@ -86,45 +117,34 @@
 <header>
   <h1>🔋 <span data-i18n="title">Теневой план батареи</span></h1>
   <span class="badge" id="modebadge"></span>
-  <button id="backfill" class="secondary" onclick="backfillNow()" data-i18n="btn_backfill">Загрузить историю</button>
-  <button id="retrain" class="secondary" onclick="retrainNow()" data-i18n="btn_retrain">Переобучить модели</button>
   <button id="refresh" onclick="recalc()" data-i18n="btn_recalc">Пересчитать сейчас</button>
   <button id="langbtn" class="secondary" onclick="switchLang()">EN</button>
 </header>
-
-<div id="status"></div>
-<details class="notice" id="notice" style="display:none">
-  <summary style="cursor:pointer" data-i18n="notice_title">Сводка отчёта</summary>
-  <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
-</details>
-<div id="content" style="display:none">
-
+<nav class="tabs" role="tablist" aria-label="Navigation">
+  <button role="tab" id="tab-now" aria-controls="view-now" aria-selected="true" onclick="selectTab('now')" data-i18n="tab_now">Сейчас</button>
+  <button role="tab" id="tab-history" aria-controls="view-history" aria-selected="false" tabindex="-1" onclick="selectTab('history')" data-i18n="tab_history">История</button>
+  <button role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" tabindex="-1" onclick="selectTab('settings')" data-i18n="tab_settings">Настройки</button>
+</nav>
+<div id="health" class="health" aria-live="polite"></div>
+<div id="alerts" aria-live="polite"></div>
+<main>
+<section id="view-now" role="tabpanel" aria-labelledby="tab-now">
+  <div id="decision" class="decision" aria-live="polite"></div>
+  <div id="empty-now" class="notice" hidden><p data-i18n="empty_now">Первого плана ещё нет. Проверьте сенсоры в настройках и запустите расчёт.</p><button class="secondary" onclick="selectTab('settings')" data-i18n="open_settings">Открыть настройки</button></div>
+  <div id="content" style="display:none">
   <div class="period" id="period"></div>
-  <div class="grid">
-    <div class="card">
-      <h3 data-i18n="card_rec" data-hint="hint_rec">Рекомендуемый пол SOC</h3>
-      <div class="big"><span id="rec">—</span><span class="chip" id="delta"></span></div>
-      <div class="sub" id="curfloor"></div>
-    </div>
-    <div class="card">
-      <h3 data-i18n="card_load" data-hint="hint_load">Нагрузка, 24 ч</h3>
-      <div class="big" id="load">—</div>
-      <div class="sub" id="loadband"></div>
-    </div>
-    <div class="card">
-      <h3 data-i18n="card_pv" data-hint="hint_pv">Солнце, 24 ч</h3>
-      <div class="big" id="pv">—</div>
-      <div class="sub" id="pvb"></div>
-    </div>
-    <div class="card">
-      <h3 data-i18n="card_res" data-hint="hint_res">Резерв отключений</h3>
-      <div class="big" id="res">—</div>
-      <div class="sub" id="resd"></div>
-    </div>
+  <div class="grid overview">
+    <article class="card"><h3 data-i18n="overview_battery">Батарея</h3><div class="big" id="battery-value">—</div><div class="sub" id="battery-energy"></div><div class="sub snapshot-time"></div></article>
+    <article class="card"><h3 data-i18n="overview_autonomy">Автономия</h3><div class="big" id="autonomy-value">—</div><div class="sub" id="autonomy-load"></div><div class="sub" data-i18n="autonomy_assumption">Оценка без притока солнца; зависит от нагрузки</div></article>
+    <article class="card"><h3 data-i18n="card_res">Резерв отключений</h3><div class="big" id="res">—</div><div class="sub" id="resd"></div><div class="sub" id="reserve-reason"></div></article>
+    <article class="card"><h3 data-i18n="overview_solar">Солнце, ближайшие 24 ч</h3><div class="big" id="pv">—</div><div class="sub" id="pvb"></div><div class="sub" id="solar-excess"></div></article>
   </div>
-
   <div class="card full" id="daycard" style="display:none">
     <h3 data-i18n="day_title" data-hint="hint_day">Солнце и батарея по часам</h3>
+    <div class="chart-range" role="group" aria-label="Chart period">
+      <button class="secondary" id="range-today" aria-pressed="true" onclick="setChartDays(1)" data-i18n="range_today">Сегодня</button>
+      <button class="secondary" id="range-both" aria-pressed="false" onclick="setChartDays(2)" data-i18n="range_both">Сегодня и завтра</button>
+    </div>
     <div class="sub daylegend">
       <span><i class="hatch"></i><span data-i18n="day_hatch_legend">штриховка — урезано: батарея была полной, панели могли больше</span></span>
       <span id="legendcheap" style="display:none"><i style="background:rgba(79,195,247,.25)"></i><span data-i18n="day_cheap_legend">голубой фон — дешёвый тариф</span></span>
@@ -133,11 +153,17 @@
     </div>
     <div class="sub" id="daynote"></div>
     <div class="dayhead" id="dayhead0"></div>
-    <div class="echart" id="daychart0" style="height:350px"></div>
-    <div class="dayhead" id="dayhead1"></div>
-    <div class="echart" id="daychart1" style="height:350px"></div>
+    <div class="echart" id="daychart0" style="height:385px"></div>
+    <div id="tomorrow-chart" hidden><div class="dayhead" id="dayhead1"></div>
+    <div class="echart" id="daychart1" style="height:385px"></div></div>
   </div>
 
+
+  <details class="plan-details" id="plan-details"><summary data-i18n="plan_details">Подробности плана</summary>
+  <div class="grid" style="margin-top:14px">
+    <div class="card"><h3 data-i18n="card_rec">Рекомендуемый пол SOC</h3><div class="big"><span id="rec">—</span><span class="chip" id="delta"></span></div><div class="sub" id="curfloor"></div></div>
+    <div class="card"><h3 data-i18n="card_load">Нагрузка, 24 ч</h3><div class="big" id="load">—</div><div class="sub" id="loadband"></div></div>
+  </div>
   <div class="card full">
     <h3 data-i18n="floor_title" data-hint="hint_floor">Пол SOC по часам (плавающий)</h3>
     <div class="sub" id="floornote" style="margin-bottom:8px"></div>
@@ -158,6 +184,16 @@
     </table>
   </div>
 
+  </details>
+  </div>
+</section>
+<section id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+  <div class="maintenance"><button id="backfill" class="secondary" onclick="backfillNow()" data-i18n="btn_backfill">Загрузить историю</button><button id="retrain" class="secondary" onclick="retrainNow()" data-i18n="btn_retrain">Переобучить модели</button></div>
+  <div id="status"></div>
+<details class="notice" id="notice" style="display:none">
+  <summary style="cursor:pointer" data-i18n="notice_title">Сводка отчёта</summary>
+  <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
+</details>
   <div class="card full" id="learncard" style="display:none">
     <h3 data-i18n="learn_title" data-hint="hint_learn">Самообучение и автонастройка</h3>
     <div class="sub" id="learnnote" style="margin-bottom:6px"></div>
@@ -205,8 +241,11 @@
       <tbody id="history"></tbody>
     </table>
   </div>
-</div>
-
+</section>
+<section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+  <div class="settings-tools"><label class="settings-search"><span data-i18n="settings_search">Поиск настроек</span><input id="settings-search" type="search" oninput="filterSettings()"></label><label><input type="checkbox" id="settings-advanced" onchange="filterSettings()"> <span data-i18n="settings_advanced">Расширенные</span></label></div>
+  <p class="muted" data-i18n="settings_shared">Изменения сохраняются в общую конфигурацию аддона.</p>
+  <div id="settings-no-results" class="notice" hidden data-i18n="settings_no_results">Настройки не найдены. Измените запрос.</div>
 <details class="card full" id="entscard" style="display:none;margin-bottom:14px">
   <summary style="cursor:pointer;list-style:none">
     <h3 style="display:inline"><span data-i18n="ents_title">Проверка и настройка сущностей</span> <span class="muted" id="entssummary" style="text-transform:none"></span>
@@ -228,7 +267,7 @@
     <tbody id="ents"></tbody>
   </table>
 </details>
-<details class="card full" id="optscard" style="margin-bottom:14px">
+<details open class="card full" id="optscard" style="margin-bottom:14px">
   <summary style="cursor:pointer;list-style:none">
     <h3 style="display:inline"><span data-i18n="opts_title">Настройки аддона</span> <span class="muted" style="text-transform:none" data-i18n="opts_note">— то же, что на странице конфигурации аддона, с подсказками</span>
     <button id="optssave" class="secondary" style="display:none;padding:3px 12px;font-size:12px;margin-left:10px" onclick="event.preventDefault();event.stopPropagation();saveOptions()" data-i18n="btn_save">Сохранить</button>
@@ -237,7 +276,14 @@
   <div id="opts"></div>
 </details>
 
+
+</section>
+</main>
+<div id="savebar" class="savebar" hidden role="status"><span data-i18n="settings_unsaved">Есть несохранённые изменения</span><button id="save-settings" onclick="saveSettings()" data-i18n="btn_save">Сохранить</button><button id="cancel-settings" class="secondary" onclick="cancelSettings()" data-i18n="btn_cancel">Отменить</button></div>
+
 <script src="vendor/echarts.min.js"></script>
+<script src="panel_state.js"></script>
+<script src="panel_ui.js"></script>
 <script>
 // UI language: the switch in the header, persisted in localStorage with a
 // cookie fallback. Server payloads carry both label/hint and label_en/hint_en;
@@ -560,6 +606,9 @@ const UNITS_EN = {"дн.": "days", "ч": "h", "мин": "min", "кВт·ч": "kW
 
 // Home Assistant webviews can block or wipe localStorage; a long-lived cookie
 // is the fallback so the language choice survives either way.
+Object.assign(I18N.ru, PANEL_I18N.ru);
+Object.assign(I18N.en, PANEL_I18N.en);
+
 function langRead() {
   try { const v = localStorage.getItem("shadow_lang"); if (v) return v; } catch (e) {}
   const m = document.cookie.match(/(?:^|;\s*)shadow_lang=(ru|en)(?:;|$)/);
@@ -597,6 +646,9 @@ function switchLang() {
   LANG = LANG === "ru" ? "en" : "ru";
   langWrite(LANG);
   applyStatic();
+  renderOverview();
+  renderEntities(lastSetup.checks);
+  renderOptions(lastSetup.groups);
   load();
   loadSetup();
 }
@@ -616,10 +668,13 @@ async function load() {
       fetch("api/metrics").then(r => r.ok ? r.json() : {days: [], avg7: {}}),
       fetch("api/daily").then(r => r.ok ? r.json() : {days: []}),
     ]);
+    lastReport = latest; lastStatus = status; panelOnline = true;
+    renderOverview();
     fetch("api/day_charts").then(r => r.ok ? r.json() : null).then(renderDayCharts).catch(() => {});
     renderStatus(status);
     renderMetrics(metrics);
     renderDaily(dailyData.days || []);
+    renderHistory(history);
     if (!latest) {
       const n = document.getElementById("notice");
       n.style.display = "block"; n.open = true;
@@ -627,8 +682,7 @@ async function load() {
       return;
     }
     render(latest);
-    renderHistory(history);
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); panelOnline = false; renderOverview(); }
 }
 
 function renderStatus(s) {
@@ -772,35 +826,15 @@ async function saveDiscovery() {
 }
 
 function onEntityInput() {
-  let changed = false;
   document.querySelectorAll(".entinput").forEach(el => {
     const dirty = el.value.trim() !== el.dataset.original;
     el.classList.toggle("changed", dirty);
-    if (dirty) changed = true;
   });
-  document.getElementById("entsave").style.display = changed ? "inline-block" : "none";
+  document.getElementById("entsave").style.display = "none";
+  updateSavebar();
 }
 
-async function saveEntities() {
-  const b = document.getElementById("entsave");
-  const options = {};
-  document.querySelectorAll(".entinput").forEach(el => {
-    if (el.value.trim() !== el.dataset.original) options[el.dataset.key] = el.value.trim();
-  });
-  b.disabled = true; b.textContent = t("btn_saving");
-  try {
-    const r = await fetch("api/config", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({options, lang: LANG}),
-    });
-    const resp = await r.json();
-    if (resp.error) alert(t("save_failed") + resp.error);
-  } catch (e) { alert(t("save_failed") + e); }
-  b.disabled = false; b.textContent = t("btn_save");
-  loadSetup();
-  load();
-}
+async function saveEntities() { return saveSettings(); }
 
 function renderEntities(checks) {
   const card = document.getElementById("entscard");
@@ -812,7 +846,7 @@ function renderEntities(checks) {
   // Collapsed by default: opened automatically only while something is broken.
   if (bad) card.open = true;
   // Don't clobber unsaved edits with the periodic refresh.
-  if (document.querySelector(".entinput.changed")) return;
+  const pending = captureEdits(".entinput");
   const label = {
     ok: ["OK", "var(--good)"], ok_number: [t("ent_ok_number"), "var(--good)"],
     skipped: [t("ent_skipped"), "var(--muted)"], missing: [t("ent_missing"), "var(--bad)"],
@@ -828,16 +862,19 @@ function renderEntities(checks) {
     const [text, color] = label[c.status] || [c.status, "var(--muted)"];
     const entityCell = c.key
       ? "<input class='entinput' list='entity-ids' aria-label='" + esc(pick(c, "label")) + "' data-key='" + c.key + "' data-original='" +
-        (c.entity || "") + "' value='" + (c.entity || "") + "' oninput='onEntityInput()' " +
+        esc(c.entity || "") + "' value='" + esc(c.entity || "") + "' oninput='onEntityInput()' " +
         "placeholder='" + esc(t("ent_placeholder")) + "'>"
       : "<span class='muted'>" + (c.entity || "—") + "</span>";
     const entityWithSource = entityCell + autoTag(c.source);
     const hint = pick(c, "hint");
     const labelCell = esc(pick(c, "label")) +
-      (hint ? "<div class='opthint ent'>" + esc(hint) + "</div>" : "");
-    return heading + "<tr><td>" + labelCell + "</td><td>" + entityWithSource + "</td><td>" +
-      (c.state == null ? "—" : c.state) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
+      (hint ? "<details class='opthint ent setting-help'><summary>" + esc(t("setting_help")) + "</summary><div>" + esc(hint) + "</div></details>" : "");
+    const search = [pick(c, "label"), c.key, c.entity, hint, group].join(" ").toLocaleLowerCase();
+    return heading + "<tr data-search='" + esc(search) + "'><td>" + labelCell + "</td><td>" + entityWithSource + "</td><td>" +
+      (c.state == null ? "—" : esc(c.state)) + "</td><td style='color:" + color + "'>" + text + "</td></tr>";
   }).join("");
+  restoreEdits(pending, ".entinput");
+  onEntityInput(); filterSettings();
 }
 
 // Values filled from Home Assistant (not typed by the owner): say where from.
@@ -891,7 +928,7 @@ function optionSnapshot(element) {
 
 function renderOptions(groups) {
   // Don't clobber unsaved edits with the periodic refresh.
-  if (document.querySelector(".optinput.changed")) return;
+  const pending = captureEdits(".optinput");
   const html = groups.map(g => '<div class="optgroup"><h4>' + esc(pick(g, "title")) + "</h4>" +
     g.items.map(item => {
       let input;
@@ -924,54 +961,26 @@ function renderOptions(groups) {
       const label = item.type === "loads"
         ? "<div class='optlabel' id='label-opt-" + item.key + "'>" + esc(pick(item, "label")) + "</div>"
         : "<label class='optlabel' for='opt-" + item.key + "'>" + esc(pick(item, "label")) + "</label>";
-      return "<div class='optrow'>" + label +
+      return "<div class='optrow' data-search='" + esc([item.key, pick(item, "label"), pick(item, "hint"), pick(g, "title")].join(" ").toLocaleLowerCase()) + "'>" + label +
         "<div>" + input + unitHtml + "</div>" +
-        "<div class='opthint'>" + esc(pick(item, "hint")) + "</div></div>";
+        "<details class='opthint setting-help'><summary>" + esc(t("setting_help")) + "</summary><div>" + esc(pick(item, "hint")) + "</div></details></div>";
     }).join("") + "</div>").join("");
   document.getElementById("opts").innerHTML = html;
+  restoreEdits(pending, ".optinput");
+  onOptionInput(); filterSettings();
 }
 
 function onOptionInput() {
-  let changed = false;
   document.querySelectorAll(".optinput").forEach(el => {
     const now = optionSnapshot(el);
     const dirty = now !== el.dataset.original;
     el.classList.toggle("changed", dirty);
-    if (dirty) changed = true;
   });
-  document.getElementById("optssave").style.display = changed ? "inline-block" : "none";
+  document.getElementById("optssave").style.display = "none";
+  updateSavebar();
 }
 
-async function saveOptions() {
-  const b = document.getElementById("optssave");
-  const options = {};
-  document.querySelectorAll(".optinput.changed").forEach(el => {
-    options[el.dataset.key] = optionValue(el);
-  });
-  b.disabled = true; b.textContent = t("btn_saving");
-  try {
-    const r = await fetch("api/config", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({options, lang: LANG}),
-    });
-    const resp = await r.json();
-    if (resp.error) alert(t("save_failed") + resp.error);
-    else {
-      if (resp.rejected && resp.rejected.length)
-        alert(t("saved_rejected") + resp.rejected.join(", "));
-      // Mark edits as persisted so the periodic refresh may re-render.
-      document.querySelectorAll(".optinput.changed").forEach(el => {
-        el.dataset.original = optionSnapshot(el);
-        el.classList.remove("changed");
-      });
-      document.getElementById("optssave").style.display = "none";
-    }
-  } catch (e) { alert(t("save_failed") + e); }
-  b.disabled = false; b.textContent = t("btn_save");
-  loadSetup();
-  load();
-}
+async function saveOptions() { return saveSettings(); }
 
 async function backfillNow() {
   const b = document.getElementById("backfill");
@@ -1007,17 +1016,8 @@ async function retrainNow() {
 
 function render(r) {
   document.getElementById("content").style.display = "block";
-  const badge = document.getElementById("modebadge");
-  if (r.apply_mode) {
-    badge.dataset.applied = "1";
-    badge.textContent = t("badge_apply");
-    badge.style.background = "rgba(239,83,80,.18)";
-    badge.style.color = "var(--warn)";
-    badge.style.borderColor = "var(--warn)";
-  } else {
-    delete badge.dataset.applied;
-    badge.textContent = t("badge_shadow");
-  }
+  lastReport = r;
+  renderOverview();
   const n = document.getElementById("notice");
   n.style.display = "block";
   document.getElementById("noticetext").textContent = r.notification;
@@ -1364,7 +1364,8 @@ function dayOption(day, nowFraction, narrow) {
     axisLabel: {show, color: EC.ink, interval: narrow ? 5 : 2}});
   const legend = [t("ser_forecast"), t("ser_band"), t("ser_actual"),
     t("ser_grid_actual"), t("ser_grid_plan"),
-    t("ser_soc_actual"), t("ser_soc_plan"), t("ser_floor_plan")];
+    t("ser_soc_actual"), t("ser_soc_plan"), t("ser_floor_plan"),
+    t("ser_load_actual"), t("ser_load_forecast")];
   return {
     animationDurationUpdate: 600,
     axisPointer: {link: [{xAxisIndex: "all"}], lineStyle: {color: "rgba(230,232,238,.35)"}},
@@ -1377,7 +1378,7 @@ function dayOption(day, nowFraction, narrow) {
         const next = String((parseInt(h.label, 10) + 1) % 24).padStart(2, "0");
         return esc(hourHint(h, next)).replace(/ · /g, "<br>");
       }}),
-    grid: [{left: 44, right: 16, top: 48, height: 176}, {left: 44, right: 16, top: 256, height: 62}],
+    grid: [{left: 44, right: 16, top: narrow ? 100 : 72, height: 150}, {left: 44, right: 16, top: 288, height: 62}],
     xAxis: [xAxis(0, false), xAxis(1, true)],
     yAxis: [Object.assign(axisY(0, undefined, t("unit_kw")), {gridIndex: 0}),
             Object.assign(axisY(0, 100, "%"), {gridIndex: 1, interval: 50})],
@@ -1395,6 +1396,12 @@ function dayOption(day, nowFraction, narrow) {
        encode: {x: 0, y: 2}, data: actual, z: 3,
        renderItem: columnBar(.38, i => ({fill: actual[i][3] ? hatch() : EC.actual,
          stroke: EC.surface, lineWidth: 2, opacity: actual[i][4] ? .75 : 1}))},
+      {name: t("ser_load_actual"), type: "line", xAxisIndex: 0, yAxisIndex: 0,
+       showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: "#e6ac63"},
+       itemStyle: {color: "#e6ac63"}, data: day.hours.map(h => h.load_actual_kw ?? null)},
+      {name: t("ser_load_forecast"), type: "line", xAxisIndex: 0, yAxisIndex: 0,
+       showSymbol: false, connectNulls: false, lineStyle: {width: 2, type: "dashed", color: "#e6ac63"},
+       itemStyle: {color: "#e6ac63"}, data: day.hours.map(h => h.load_forecast_kw ?? null)},
       {name: t("ser_grid_actual"), type: "line", xAxisIndex: 0, yAxisIndex: 0, smooth: 0.3,
        showSymbol: false, connectNulls: false, lineStyle: {width: 2, color: EC.gridLine},
        itemStyle: {color: EC.gridLine}, data: day.hours.map(h => h.grid_actual_kw)},
@@ -1438,6 +1445,7 @@ function renderDayCharts(data) {
     const el = document.getElementById("daychart" + i);
     chartOf("daychart" + i).setOption(dayOption(day, data.now_fraction || 0, el.offsetWidth < 520));
   });
+  setChartDays(chartDays);
 }
 
 // Own tooltip, not the title attribute: the Home Assistant apps embed the
@@ -1486,13 +1494,24 @@ function applyHints() {
 
 async function loadSetup() {
   try {
+    const readSetup = async url => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Settings: " + response.status);
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      return data;
+    };
     const [ents, opts] = await Promise.all([
-      fetch("api/entities").then(r => r.ok ? r.json() : {checks: []}),
-      fetch("api/options").then(r => r.ok ? r.json() : {groups: []}),
+      readSetup("api/entities"),
+      readSetup("api/options"),
     ]);
-    renderEntities(ents.checks || []);
-    renderOptions(opts.groups || []);
-  } catch (e) { console.error(e); }
+    if (!Array.isArray(ents.checks) || !Array.isArray(opts.groups)) throw new Error("Invalid settings response");
+    lastSetup = {checks: ents.checks, groups: opts.groups};
+    renderEntities(lastSetup.checks);
+    renderOptions(lastSetup.groups);
+    setupError = false;
+    renderOverview();
+  } catch (e) { console.error(e); setupError = true; renderOverview(); }
 }
 
 let entityIdsLoaded = false;
@@ -1511,6 +1530,7 @@ I18N.en.unit_kwh = "kWh"; I18N.en.unit_kw = "kW";
 
 applyStatic();
 applyHints();
+initPanelNavigation();
 load();
 loadSetup();
 setInterval(load, 60000);

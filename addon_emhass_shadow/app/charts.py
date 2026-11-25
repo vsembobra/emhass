@@ -21,7 +21,7 @@ import pandas as pd
 import pipeline
 
 
-def _forecast(entries: list[dict], hour: pd.Timestamp) -> dict | None:
+def _forecast(entries: list[dict], hour: pd.Timestamp, source: str = "pv") -> dict | None:
     """P10/P50/P90 of the latest run issued before ``hour`` that covers it."""
     key = hour.isoformat()
     for entry in reversed(entries):  # the log is in issue order
@@ -32,7 +32,7 @@ def _forecast(entries: list[dict], hour: pd.Timestamp) -> dict | None:
             continue
         index = starts.index(key)
         return {
-            q: round(float((entry.get(f"pv_{q}_used") or entry["pv"][q])[index]), 3)
+            q: round(float((entry.get(f"{source}_{q}_used") or entry[source][q])[index]), 3)
             for q in ("p10", "p50", "p90")
         }
     return None
@@ -204,6 +204,8 @@ def day_charts(report: dict | None, now: datetime | None = None, live: bool = Tr
                     "label": stamp.tz_convert(tz).strftime("%H"),
                     "forecast": _forecast(entries, stamp),
                     "actual_kw": None if actual is None else round(actual, 3),
+                    "load_actual_kw": number(row, "load_kw"),
+                    "load_forecast_kw": (_forecast(entries, stamp, "load") or {}).get("p50"),
                     "throttled": bool(stamp in throttled.index and throttled.loc[stamp]),
                     "soc_pct": None if soc is None else round(soc * 100, 1),
                     "soc_plan_pct": plan.get(key),
