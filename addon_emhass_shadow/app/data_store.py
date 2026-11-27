@@ -18,6 +18,13 @@ import weather_models
 _LOCK = threading.RLock()
 
 
+def local_path(path: Path, root: Path) -> bool:
+    """Check in-root ancestors as well as the leaf before automatic migration."""
+    if path != root and root not in path.parents:
+        return False
+    return not any(part.is_symlink() for part in (path, *path.parents) if part == root or root in part.parents)
+
+
 def compressed(path: Path) -> Path:
     return path.with_name(path.name + ".gz")
 
@@ -60,7 +67,7 @@ def _sync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-def _write_bytes(path: Path, raw: bytes) -> None:
+def write_bytes(path: Path, raw: bytes) -> None:
     destination = compressed(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = gzip.compress(raw, compresslevel=6, mtime=0)
@@ -85,7 +92,7 @@ def _write_bytes(path: Path, raw: bytes) -> None:
 
 
 def write_text(path: Path, text: str) -> None:
-    _write_bytes(path, text.encode("utf-8"))
+    write_bytes(path, text.encode("utf-8"))
 
 
 def write_json(path: Path, value) -> None:
@@ -143,7 +150,7 @@ def compact_existing(path: Path) -> bool:
             path.unlink()
             _sync_directory(path.parent)
         else:
-            _write_bytes(path, raw)
+            write_bytes(path, raw)
         return True
 
 
@@ -152,12 +159,12 @@ def compact_data(data: Path) -> int:
     roots = [data, *(data / "weather_models" / model for model in weather_models.MODEL_IDS if model != "auto")]
     count = 0
     for root in roots:
-        if root.is_symlink():
+        if not local_path(root, data):
             continue
-        for name in ("hourly_audit.jsonl", "forecast_log.jsonl", "weather_previous_day1.jsonl", "metrics.jsonl"):
+        for name in ("hourly_audit.jsonl", "forecast_log.jsonl", "weather_previous_day1.jsonl", "metrics.jsonl", "retrain_state.json", "outages.jsonl"):
             count += compact_existing(root / name)
         for directory in (root / "shadow_reports", root / "weather_archive"):
-            if directory.is_symlink():
+            if not local_path(directory, data):
                 continue
             for path in json_paths(directory):
                 count += compact_existing(path)

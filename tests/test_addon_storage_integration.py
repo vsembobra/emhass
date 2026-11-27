@@ -23,6 +23,7 @@ def test_failed_maintenance_does_not_block_panel_start(monkeypatch, error):
     def failed(*args):
         raise error
     monkeypatch.setattr(data_store, "compact_data", failed)
+    monkeypatch.setattr(main.storage_migration, "migrate_shared", lambda *a: {})
     # Do not start scheduler/watchers in this startup control-flow check.
     class IdleThread:
         def __init__(self, **kwargs):

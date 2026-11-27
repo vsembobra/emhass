@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-mkdir -p /data/shadow_reports /data/weather_archive /share/emhass_shadow 2>/dev/null || true
+mkdir -p /data/shadow_reports /data/weather_archive 2>/dev/null || true
 
 # Seed models and historical data on first run.
 if [ ! -d /data/models ]; then
@@ -14,8 +14,12 @@ if [ ! -f /data/hourly_audit.jsonl ] && [ ! -f /data/hourly_audit.jsonl.gz ]; th
     cp /share/emhass_shadow/seed/hourly_audit.jsonl /data/hourly_audit.jsonl
   fi
 fi
-if [ -f /share/emhass_shadow/seed/outages.jsonl ] && [ ! -f /data/outages.jsonl ]; then
-  cp /share/emhass_shadow/seed/outages.jsonl /data/outages.jsonl
+if [ ! -f /data/outages.jsonl ] && [ ! -f /data/outages.jsonl.gz ]; then
+  if [ -f /share/emhass_shadow/seed/outages.jsonl.gz ]; then
+    cp /share/emhass_shadow/seed/outages.jsonl.gz /data/outages.jsonl.gz
+  elif [ -f /share/emhass_shadow/seed/outages.jsonl ]; then
+    cp /share/emhass_shadow/seed/outages.jsonl /data/outages.jsonl
+  fi
 fi
 if [ -f /share/emhass_shadow/seed/outages.sqlite ] && [ ! -f /data/outages.sqlite ]; then
   cp /share/emhass_shadow/seed/outages.sqlite /data/outages.sqlite

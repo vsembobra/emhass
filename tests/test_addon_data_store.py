@@ -106,6 +106,17 @@ def test_migration_covers_each_weather_source_and_leaves_manual_files(tmp_path):
     assert custom.exists()
 
 
+def test_compaction_does_not_follow_a_linked_weather_models_parent(tmp_path):
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    data.mkdir()
+    path = outside / "icon/weather_previous_day1.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"keep":true}\n')
+    (data / "weather_models").symlink_to(outside, target_is_directory=True)
+    store.compact_data(data)
+    assert path.exists() and not store.compressed(path).exists()
+
+
 def test_restart_removes_only_verified_redundant_interrupted_writes(tmp_path):
     path = tmp_path / "hourly_audit.jsonl"
     store.write_text(path, '{"load_kw":1}\n')

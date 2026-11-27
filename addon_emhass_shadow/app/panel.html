@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Теневой план батареи</title>
+<title>Solar Reserve</title>
 <style>
   :root {
     --bg: #111318; --card: #1c1f26; --border: #2c313c;
@@ -115,7 +115,7 @@
 <body>
 <datalist id="entity-ids"></datalist>
 <header>
-  <h1>🔋 <span data-i18n="title">Теневой план батареи</span></h1>
+  <h1>🔋 <span data-i18n="title">Solar Reserve</span></h1>
   <span class="badge" id="modebadge"></span>
   <button id="refresh" onclick="recalc()" data-i18n="btn_recalc">Пересчитать сейчас</button>
   <button id="langbtn" class="secondary" onclick="switchLang()">EN</button>
@@ -161,7 +161,7 @@
 
   <details class="plan-details" id="plan-details"><summary data-i18n="plan_details">Подробности плана</summary>
   <section class="notice" id="notice" style="display:none;white-space:normal;margin-top:14px">
-    <h3 data-i18n="title">Теневой план батареи</h3>
+    <h3 data-i18n="shadow_plan_title">Теневой план батареи</h3>
     <div id="noticetext" style="white-space:pre-line;margin-top:8px"></div>
   </section>
   <div class="grid" style="margin-top:14px">
@@ -290,7 +290,7 @@
 // report texts (notification) are generated on the server and stay Russian.
 const I18N = {
   ru: {
-    title: "Теневой план батареи",
+    title: "Solar Reserve",
     badge_shadow: "только советует · в инвертор не пишет",
     badge_apply: "⚡ применяет план в инвертор",
     btn_backfill: "Загрузить историю", btn_backfilling: "Загружаю историю…",
@@ -446,7 +446,7 @@ const I18N = {
     hint_history: "Какой пол аддон рекомендовал в прошлые дни и какой тогда стоял на инверторе.",
   },
   en: {
-    title: "Battery shadow plan",
+    title: "Solar Reserve",
     badge_shadow: "advisory only · never writes to the inverter",
     badge_apply: "⚡ applies the plan to the inverter",
     btn_backfill: "Backfill history", btn_backfilling: "Backfilling…",

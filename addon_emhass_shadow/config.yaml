@@ -1,4 +1,4 @@
-name: "EMHASS Shadow — теневой план батареи"
+name: "Solar Reserve — Солнечный резерв"
 description: >-
   План батареи на 48 ч на EMHASS: квантильные прогнозы нагрузки и солнца по
   данным Recorder, резерв на время серии отключений и MILP-оптимизатор
@@ -9,7 +9,7 @@ description: >-
   хуже, определяет ёмкость батареи и ориентацию панелей. По умолчанию
   только советует; с «Применять план к инвертору» пишет цели в инвертор.
 
-version: "0.19.1"
+version: "0.20.0"
 slug: emhass_shadow
 init: false
 arch:
@@ -25,7 +25,7 @@ ingress: true
 ingress_port: 8099
 panel_admin: false
 panel_icon: mdi:battery-sync-outline
-panel_title: Теневой план
+panel_title: Solar Reserve
 options:
   apply_mode: false
   notifications: true

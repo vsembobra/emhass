@@ -118,7 +118,7 @@ def test_upgrade_retrains_the_pv_model_once(monkeypatch, tmp_path, options):
     calls = _upgrade_env(monkeypatch, tmp_path, {"last_retrain_utc": recent}, options)
     retrain.retrain_if_due(site=SITE)
     assert calls == ["load", "pv"]
-    state = json.loads((tmp_path / "retrain_state.json").read_text(encoding="utf-8"))
+    state = retrain.data_store.read_json(tmp_path / "retrain_state.json")
     assert state["pv_model_tried"] == pipeline.PV_MODEL
     retrain.retrain_if_due(site=SITE)
     assert calls == ["load", "pv"]  # back on the normal schedule

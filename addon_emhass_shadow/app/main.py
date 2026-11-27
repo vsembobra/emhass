@@ -1,4 +1,4 @@
-"""Panel web server and daily scheduler for the EMHASS Shadow add-on."""
+"""Panel web server and daily scheduler for the Solar Reserve add-on."""
 
 import json
 import threading
@@ -17,6 +17,7 @@ import discovery
 import options_meta
 import pipeline
 import retrain
+import storage_migration
 from discovery_search import DiscoverySearch
 
 DATA = Path("/data")
@@ -52,7 +53,7 @@ def _report_retrain_problems(status: dict) -> None:
         )
         pipeline.notify_problem(
             "retrain",
-            "EMHASS Shadow: переобучение не удалось",
+            "Solar Reserve: переобучение не удалось",
             f"Не удалось переобучить модели ({details}). Прогнозы работают на "
             "прежних моделях. Панель → «Переобучить модели» повторит попытку; "
             "уведомление исчезнет после успешного обучения.",
@@ -100,10 +101,10 @@ def run_pipeline(retrain_first: bool = True, notify: str = "always") -> None:
         STATE["last_error"] = traceback.format_exc(limit=5)
         pipeline.notify_problem(
             "run",
-            "EMHASS Shadow: расчёт не удался",
+            "Solar Reserve: расчёт не удался",
             "Последний расчёт плана завершился ошибкой:\n"
             + str(STATE["last_error"]).strip().splitlines()[-1][:300]
-            + "\nПолный traceback — в панели «Теневой план» и в журнале аддона. "
+            + "\nПолный traceback — в панели «Solar Reserve» и в журнале аддона. "
             "Уведомление исчезнет после первого успешного расчёта.",
         )
     finally:
@@ -124,10 +125,10 @@ def run_retrain() -> None:
         STATE["last_error"] = traceback.format_exc(limit=5)
         pipeline.notify_problem(
             "retrain",
-            "EMHASS Shadow: переобучение не удалось",
+            "Solar Reserve: переобучение не удалось",
             "Переобучение моделей завершилось ошибкой:\n"
             + str(STATE["last_error"]).strip().splitlines()[-1][:300]
-            + "\nПолный traceback — в панели «Теневой план» и в журнале аддона.",
+            + "\nПолный traceback — в панели «Solar Reserve» и в журнале аддона.",
         )
     finally:
         STATE["running"] = False
@@ -661,6 +662,10 @@ def grid_watcher() -> None:
 
 def main() -> None:
     try:
+        for shared in dict.fromkeys((pipeline.SHARE, retrain.SHARE)):
+            migrated = storage_migration.migrate_shared(DATA, shared)
+            if any(migrated.values()):
+                print(f"storage migration: {migrated}", flush=True)
         data_store.compact_data(DATA)
     except (OSError, EOFError, zlib.error) as error:
         # Atomic migration leaves legacy data readable; a full disk must not

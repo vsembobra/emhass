@@ -1,6 +1,7 @@
 /* Navigation and presentation only. Settings use the existing Supervisor API. */
 const PANEL_I18N = {
   ru: {
+    shadow_plan_title:'Теневой план батареи',
     tab_now:'Сейчас', tab_history:'История', tab_settings:'Настройки',
     overview_battery:'Батарея', overview_autonomy:'Автономия', overview_solar:'Солнце, ближайшие 24 ч',
     autonomy_assumption:'Оценка без притока солнца; зависит от нагрузки',
@@ -35,6 +36,7 @@ const PANEL_I18N = {
     th_curtailment_loss:'Ограничение солнца, оценка',
   },
   en: {
+    shadow_plan_title:'Battery shadow plan',
     tab_now:'Now', tab_history:'History', tab_settings:'Settings',
     overview_battery:'Battery', overview_autonomy:'Autonomy', overview_solar:'Solar, next 24 h',
     autonomy_assumption:'Estimate without incoming solar; depends on load',

@@ -1,13 +1,12 @@
-"""Shadow pipeline for the EMHASS Shadow add-on.
+"""Shadow pipeline for the Solar Reserve add-on.
 
 Adapted from data/forecast_training/daily_shadow.py to run inside the add-on:
   * Home Assistant API through the Supervisor proxy (SUPERVISOR_TOKEN),
   * site/battery parameters from /data/options.json,
-  * persistent data under /data, mirrors to /share/emhass_shadow,
+  * one persistent data store under /data,
   * summary delivered as a persistent notification in Home Assistant.
 
-Nothing is written to the inverter: every Home Assistant call is a read,
-except the persistent notification service call.
+Inverter writes remain gated by the configured apply_mode.
 """
 
 import bisect
@@ -1147,8 +1146,8 @@ def prune_weather_archive(archive: Path, keep_days: float = WEATHER_ARCHIVE_DAYS
 def load_outage_events() -> list[OutageEvent]:
     events = []
     path = DATA / "outages.jsonl"
-    if path.exists():
-        for line in path.read_text().splitlines():
+    if data_store.exists(path):
+        for line in data_store.read_text(path).splitlines():
             record = json.loads(line)
             events.append(
                 OutageEvent(
@@ -1293,21 +1292,16 @@ def update_metrics(audit: pd.DataFrame, tz: ZoneInfo, opts: dict | None = None) 
         data_store.write_text(METRICS,
             "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
         )
-        try:
-            SHARE.mkdir(parents=True, exist_ok=True)
-            (SHARE / "metrics.jsonl").write_text(data_store.read_text(METRICS), encoding="utf-8")
-        except OSError:
-            pass
     return added
 
 
 def _retrain_note() -> str | None:
     """One notification line when models were retrained in the last hours."""
     state_path = weather_models.scoped(DATA / "retrain_state.json", weather_models.from_data(DATA))
-    if not state_path.exists():
+    if not data_store.exists(state_path):
         return None
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = data_store.read_json(state_path)
         last = datetime.fromisoformat(state["last_retrain_utc"])
     except (OSError, json.JSONDecodeError, KeyError, ValueError):
         return None
@@ -1514,7 +1508,7 @@ def _forecast_sensors(report: dict) -> list[tuple[str, object, dict]]:
     power = {"unit_of_measurement": "W", "device_class": "power", "state_class": "measurement"}
     ahead = report.get("day_ahead_hour") or {}
     weather = report.get("weather_hour") or {}
-    name = "EMHASS Shadow: "
+    name = "Solar Reserve: "
     return [
         ("sensor.emhass_shadow_pv_forecast", watts(first("pv_p50_kw")),
          {**power, "hour_start_utc": hour, "friendly_name": name + "солнце, прогноз на этот час"}),
@@ -1580,7 +1574,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             round(advisory["recommended_floor_soc"] * 100),
             {
                 "unit_of_measurement": "%",
-                "friendly_name": "EMHASS Shadow: рекомендуемый пол SOC",
+                "friendly_name": "Solar Reserve: рекомендуемый пол SOC",
                 "profile": [step["floor_soc"] for step in advisory["floor_profile"]],
                 "issue_utc": report["issue_utc"],
             },
@@ -1588,7 +1582,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
         (
             "sensor.emhass_shadow_autonomy_hours",
             advisory["autonomy_hours"] if advisory["autonomy_hours"] is not None else "unknown",
-            {"unit_of_measurement": "h", "friendly_name": "EMHASS Shadow: автономия батареи"},
+            {"unit_of_measurement": "h", "friendly_name": "Solar Reserve: автономия батареи"},
         ),
         # For the owner's automations during an outage: "on" = the battery
         # will not last the likely rest of it, shed the loads you can.
@@ -1596,7 +1590,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             "binary_sensor.emhass_shadow_save_battery",
             "on" if outage and not outage["enough"] else "off",
             {
-                "friendly_name": "EMHASS Shadow: экономить батарею",
+                "friendly_name": "Solar Reserve: экономить батарею",
                 "cut_kw": outage["cut_kw"] if outage else 0.0,
                 "autonomy_h": outage["autonomy_h"] if outage else None,
             },
@@ -1606,7 +1600,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             outage["remaining_h"] if outage else 0.0,
             {
                 "unit_of_measurement": "h",
-                "friendly_name": "EMHASS Shadow: отключение, осталось с запасом",
+                "friendly_name": "Solar Reserve: отключение, осталось с запасом",
                 "elapsed_h": outage["elapsed_h"] if outage else 0.0,
                 "typical_h": outage["remaining_typical_h"] if outage else 0.0,
             },
@@ -1618,7 +1612,7 @@ def publish_sensors(report: dict, flexible: list[dict], tz) -> list[str]:
             (
                 f"sensor.emhass_shadow_{item['slug']}_start",
                 item.get("start_local") or "unknown",
-                {"friendly_name": f"EMHASS Shadow: {item['name']} — старт", **item},
+                {"friendly_name": f"Solar Reserve: {item['name']} — старт", **item},
             )
         )
     published = []
@@ -2991,15 +2985,6 @@ def run(notify: str = "always") -> dict:
     out_path = out_dir / f"{issue.astimezone(tz):%Y-%m-%d}.json"
     data_store.write_json(out_path, report)
 
-    try:
-        mirror = SHARE / "shadow_reports"
-        mirror.mkdir(parents=True, exist_ok=True)
-        (mirror / out_path.name).write_text(
-            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    except OSError:
-        pass
-
     report["data"]["metrics_scored_days"] = metrics_scored
 
     published: list[str] = []
@@ -3012,7 +2997,7 @@ def run(notify: str = "always") -> dict:
             "persistent_notification",
             "create",
             {
-                "title": f"Теневой план батареи — {issue.astimezone(tz):%d.%m}",
+                "title": f"Solar Reserve — план батареи, {issue.astimezone(tz):%d.%m}",
                 "message": report["notification"],
                 "notification_id": "emhass_shadow_plan",
             },
@@ -3024,7 +3009,7 @@ def run(notify: str = "always") -> dict:
         if weather_name is not None:
             notify_problem(
                 "weather",
-                "EMHASS Shadow: прогноз погоды устарел",
+                "Solar Reserve: прогноз погоды устарел",
                 "Нет связи с Open-Meteo — солнечный прогноз посчитан по архивному "
                 f"снапшоту {weather_name} и может расходиться с реальной погодой. "
                 "Проверь интернет и маршрут на хосте. Уведомление исчезнет само, "
@@ -3033,7 +3018,7 @@ def run(notify: str = "always") -> dict:
         else:
             notify_problem(
                 "weather",
-                "EMHASS Shadow: нет прогноза погоды",
+                "Solar Reserve: нет прогноза погоды",
                 "Нет связи с Open-Meteo и нет ни одного архивного снапшота — "
                 "солнечный прогноз принят нулевым, план консервативный. "
                 "Проверь интернет и маршрут на хосте.",
@@ -3043,7 +3028,7 @@ def run(notify: str = "always") -> dict:
     if entity_note is not None:
         notify_problem(
             "entities",
-            "EMHASS Shadow: проблемы с сущностями",
+            "Solar Reserve: проблемы с сущностями",
             entity_note.lstrip("• ")
             + " Панель → «Проверка и настройка сущностей» подскажет, что именно не так.",
         )

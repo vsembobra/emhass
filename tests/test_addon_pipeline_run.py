@@ -131,6 +131,7 @@ def test_run_produces_report_and_logs(fake_site):
     assert (data / "drift_state.json").exists()
     assert "self_learning" in report["data"]
     assert report["notification"].startswith("Теневой план")
+    assert not (data / "share" / "shadow_reports").exists()
     # Shadow mode writes nothing but the notification (plus self-clearing
     # dismissals of the error notifications, which are no-ops here).
     assert {s[:2] for s in fake_site["services"]} == {
@@ -146,6 +147,25 @@ def test_apply_mode_writes_zone_targets(fake_site):
     writes = [s for s in fake_site["services"] if s[1] == "set_value"]
     assert writes, report["notification"]
     assert not report["advisory"]["apply_errors"]
+
+
+def test_shared_full_report_can_restore_the_panel_plan(fake_site, monkeypatch):
+    import main
+    import storage_migration
+
+    pipeline.run()
+    data = fake_site["data"]
+    target = pipeline.data_store.json_paths(data / "shadow_reports")[0]
+    raw = pipeline.data_store.read_bytes(target)
+    source = data / "share" / "shadow_reports" / target.name
+    source.parent.mkdir(parents=True)
+    source.write_bytes(raw)
+    pipeline.data_store.remove(target)
+    result = storage_migration.migrate_shared(data, data / "share")
+    monkeypatch.setattr(main, "DATA", data)
+    assert result["restored"] == 1 and not source.exists()
+    assert pipeline.data_store.read_bytes(target) == raw
+    assert main.latest_report() == json.loads(raw)
 
 
 def test_weather_selection_loads_only_matching_models(fake_site, monkeypatch):

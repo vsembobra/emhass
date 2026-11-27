@@ -64,9 +64,9 @@ WEATHER_VARIABLES = (
 
 def _load_state(model: str | None = None) -> dict:
     path = weather_models.scoped(STATE, model or weather_models.from_data(DATA))
-    if path.exists():
+    if data_store.exists(path):
         try:
-            return json.loads(path.read_text())
+            return data_store.read_json(path)
         except (OSError, json.JSONDecodeError):
             pass
     return {"last_retrain_utc": None, "models": {}}
@@ -75,16 +75,7 @@ def _load_state(model: str | None = None) -> dict:
 def _save_state(state: dict, model: str | None = None) -> None:
     model = model or weather_models.from_data(DATA)
     path = weather_models.scoped(STATE, model)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        mirror = weather_models.scoped(SHARE / "retrain_state.json", model)
-        mirror.parent.mkdir(parents=True, exist_ok=True)
-        mirror.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    except OSError:
-        pass
+    data_store.write_json(path, state)
 
 
 def retrain_status(model: str | None = None) -> dict:

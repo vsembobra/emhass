@@ -21,3 +21,20 @@ Prove old/new reads, interrupted migration recovery, model training, report APIs
 weather fallback, timestamp and quality equivalence, scope isolation, no duplicate
 history in the UI and a measured compression ratio. No core EMHASS changes, live
 HA cleanup or deployment. Existing .tmp_friend remains untouched.
+
+## Approved completion (2026-11-27)
+
+User confirmed all shared files are consumed only by the add-on. Remove automatic
+mirror writes. Migrate known shared exports before startup compaction: restore
+missing primary files, remove verified duplicates, archive differing unique
+versions compactly under /data/legacy_imports. Import missing seed audit hours;
+existing observations win and conflicting seed rows are retained separately.
+Delete a source only after reading back its saved data. For SQLite seed, remove
+only if all source tables/rows are covered by the active database; otherwise
+retain its unique snapshot compressed. Unknown files and symlinks remain.
+
+Rename the visible product to Solar Reserve (Солнечный резерв), the recommended
+name followed by the user's 'continue'. Preserve slug emhass_shadow, sensor and
+notification IDs, repository URL, data paths and all 57 schema keys. Preserve the
+restored full shadow-plan report title as a functional section, separate from the
+product brand. Bump version to 0.20.0. No live migration/push/deployment.

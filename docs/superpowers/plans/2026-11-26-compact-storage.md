@@ -13,7 +13,8 @@ through it; preserve JSON content and response interfaces.
 ## Global Constraints
 
 No dependencies, core/controller changes, training-history truncation, live HA
-cleanup, deployment or edits to .tmp_friend. External share consumers pending.
+cleanup, deployment or edits to .tmp_friend. User confirmed shared files have no
+external consumers; migrate known application-owned exports only.
 
 ## Review Focus
 
@@ -36,9 +37,9 @@ physical compressed files append .gz. json_paths returns logical .json paths.
 - [x] Implement storage module; watch tests turn green.
 - [x] Integrate all training/report/weather readers and writers, presence checks
   and retention; verify existing fixture semantics with updated format reads.
-- [ ] Resolve share-consumer answer; stop duplicate writes and migrate only safe
+- [x] Resolve share-consumer answer; stop duplicate writes and migrate only safe
   mirrors with verification, preserving unique files and manual seeds.
-- [ ] Verify training, panel APIs, offline weather, migration/restart and measured
+- [x] Verify training, panel APIs, offline weather, migration/restart and measured
   compression; run add-on regressions and independent review; document version.
 
 ## Execution record
@@ -47,10 +48,9 @@ Starting from d8f25bd1 in the current checkout; branch codex/compact-storage.
 Baseline known: test_live_series_holds_a_reserve_with_margin is wall-clock
 dependent and failed on clean HEAD in the previous task; recheck current run.
 
-Progress: gzip storage and all internal consumers integrated. Share mirror writes
-remain unchanged pending the user's answer to whether external scripts consume
-/share/emhass_shadow; no dependent deletion has been performed. No version bump
-or deployment until the complete storage policy is settled.
+Compression-only phase (committed as 6cb38ea3): gzip storage and all internal
+consumers integrated. At that point share mirror writes remained unchanged
+pending the external-consumer answer, and the version was not yet bumped.
 
 Evidence so far:
 - Both actual LightGBM load/PV bundles train, save, reload and predict from
@@ -75,8 +75,37 @@ Malformed DEFLATE (zlib.error) is covered. Compaction read errors (including
 truncated/corrupt gzip) are caught by startup so the panel still opens. Migration
 is limited to supported weather model roots and skips symlinked directories.
 
-Pending: external-share consumer answer, export policy/removal, version bump and
-final task completion. The compression work is ready to review independently;
-existing shared exports and manual seed files are not modified on the live site.
+Compression phase verification: 400 add-on tests and 13 JS tests passed; Ruff,
+shell syntax and diff checks passed. Export deduplication followed only after the
+user confirmed no external consumers. No live cleanup, push or deployment.
 
-Compression phase verification complete: 400 add-on tests and 13 JS tests pass; Ruff, shell syntax and diff checks pass. The export-consumer question remains pending; no claim of complete deduplication, version bump, live cleanup, push or deployment.
+## Completion tasks (2026-11-27)
+
+User confirmed no external shared-file consumers. Continue in the same branch.
+- [x] Add storage_migration.py with verified export import/dedup/archive, missing
+  seed-hour import and conflict preservation; tests for failure and retry.
+- [x] Stop the three mirror writers, migrate before scheduler/watchers start,
+  include compressed retrain state and legacy outage JSONL in existing readers.
+- [x] Rename visible config/repository/panel/sensor/notification labels to Solar
+  Reserve, preserving every technical identifier and shadow-plan detail heading.
+- [x] Verify migrations, training, APIs, compatibility IDs, real browser RU/EN,
+  add-on regressions, independent review; release 0.20.0 locally.
+
+## Final verification (2026-11-28)
+
+- Final add-on regression suite: **420 passed** (60.48 s), including real
+  LightGBM training/reload, local HTTP APIs and full report restoration.
+- Panel JavaScript: **13 passed**; JS syntax, Ruff, shell syntax and diff checks
+  passed. Configuration remains 57 keys; slug, sensor and notification IDs and
+  repository URL are unchanged. Release version is **0.20.0**.
+- Independent review found unsafe activation of incomplete legacy metadata and
+  a symlinked-parent traversal. Reproducing tests added; both fixed and reviewed
+  again, with no remaining migration blockers identified.
+- Browser smoke test with synthetic data confirmed Solar Reserve in RU/EN,
+  the weather-model selector and the separate full shadow-plan heading in Plan
+  details. Screenshot: /private/tmp/solar-reserve-panel.jpg.
+- Shared copies are no longer written. Missing seed hours are imported by UTC;
+  duplicates are removed only after verification and unique versions archived
+  losslessly. Failed transfers retain the source for retry.
+- Local code only: no live data cleanup, inverter writes, push or deployment.
+  Existing .tmp_friend remains untouched.
